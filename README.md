@@ -98,3 +98,4 @@ The application automatically saves your configuration to `config.json` in the a
 - For better performance, crop your templates to the smallest possible region
 - Performance may vary depending on screen resolution and system resources
 - NOT EVERYTHING FULLY WORKS AS INTENDED OR IS 100% FULLY IMPLEMENTED
+![explorer_DLFHKKejYv](https://github.com/user-attachments/assets/6232d9a5-9198-4846-8cb2-10fe655fc240)
