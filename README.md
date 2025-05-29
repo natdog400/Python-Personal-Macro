@@ -4,7 +4,7 @@ A Python-based bot with a user-friendly GUI for detecting images on screen and a
 
 ## Features
 
-- **User-Friendly GUI**: Intuitive interface for managing templates and sequences
+- **Crappy GUI**: an interface for managing templates and sequences
 - **Template Management**: Create and manage image templates with previews
 - **Sequence Editor**: Visually create and edit action sequences
 - **Multiple Action Types**: Supports clicks, right-clicks, double-clicks, mouse movements, typing, and key presses
@@ -13,6 +13,7 @@ A Python-based bot with a user-friendly GUI for detecting images on screen and a
 - **Looping Support**: Run sequences multiple times with configurable loop counts
 - **Real-time Status**: Monitor bot activity with detailed status updates
 - **Global Hotkey**: Stop sequences at any time with the F8 key
+- **Failsafe Image step jump**: Will search for this image after every step and if found jump to step
 
 ## Requirements
 
@@ -94,3 +95,4 @@ The application automatically saves your configuration to `config.json` in the a
 - The bot uses template matching which is sensitive to scale and rotation
 - For better performance, crop your templates to the smallest possible region
 - Performance may vary depending on screen resolution and system resources
+- NOT EVERYTHING FULLY WORKS AS INTENDED OR IS 100% FULLY IMPLEMENTED
