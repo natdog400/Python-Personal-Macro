@@ -1,0 +1,7 @@
+numpy>=1.19.0
+opencv-python>=4.5.0
+pyautogui>=0.9.50
+Pillow>=8.0.0
+PyQt6>=6.4.0
+pyqt6-tools>=6.4.0
+darkdetect>=0.7.1
