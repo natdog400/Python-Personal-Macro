@@ -2,7 +2,7 @@
 
 Please help and contribute if you can find bugs im not the best coder and ai was used in the aid of creating this python script enjoy
 
-A Python-based bot with a user-friendly GUI for detecting images on screen and automating sequences of actions. Ideal for automating repetitive tasks, game automation, and UI testing with visual feedback.
+A Python-based bot with GUI for detecting images on screen and automating sequences of actions. Ideal for automating repetitive tasks, game automation, and UI testing with visual feedback.
 
 ## Features
 
