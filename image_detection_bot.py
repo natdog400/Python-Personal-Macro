@@ -10,6 +10,7 @@ import argparse
 import logging
 from enum import Enum
 from dataclasses import dataclass, asdict
+import random
 
 # Configure logging
 logging.basicConfig(
@@ -46,6 +47,7 @@ class Action:
     x: Optional[int] = None
     y: Optional[int] = None
     duration: float = 0.0
+    region: Optional[Tuple[int, int, int, int]] = None
 
 class ImageDetectionBot:
     def __init__(self, confidence: float = 0.8):
@@ -363,6 +365,19 @@ class ImageDetectionBot:
             position = self.current_position
             
         x, y = position
+        
+        # If this is a click action and a region is specified, pick a random point in the region
+        if action.type == ActionType.CLICK and hasattr(action, 'region') and action.region:
+            region = action.region
+            if isinstance(region, (list, tuple)) and len(region) == 4:
+                x = random.randint(region[0], region[0] + region[2] - 1)
+                y = random.randint(region[1], region[1] + region[3] - 1)
+                try:
+                    self.click_at(x, y, button=action.button, clicks=action.clicks)
+                    return True
+                except Exception as e:
+                    logger.error(f"Error executing random region click: {str(e)}")
+                    return False
         
         try:
             if action.type == ActionType.CLICK:

@@ -746,6 +746,14 @@ class ActionEditor(QWidget):
             clicks_spin.valueChanged.connect(
                 lambda value, key="clicks": self.update_action_param(key, value))
             self.params_layout.addWidget(clicks_spin)
+
+            # --- Region selection for random click ---
+            region_btn = QPushButton("Select Region")
+            region_btn.clicked.connect(self.select_region)
+            self.params_layout.addWidget(region_btn)
+            self.region_label = QLabel()
+            self.params_layout.addWidget(self.region_label)
+            self.update_region_label()
             
         elif action_type in ["type", "key_press"]:
             param_name = "text" if action_type == "type" else "key"
@@ -840,6 +848,25 @@ class ActionEditor(QWidget):
                 break
             parent = parent.parent()
 
+    def select_region(self):
+        dialog = ScreenCaptureDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            rect = dialog.get_capture_rect()
+            if rect and rect.isValid():
+                self.action_data["region"] = [rect.x(), rect.y(), rect.width(), rect.height()]
+                self.update_region_label()
+            else:
+                self.action_data.pop("region", None)
+                self.update_region_label()
+
+    def update_region_label(self):
+        region = self.action_data.get("region")
+        if region and len(region) == 4:
+            x, y, w, h = region
+            self.region_label.setText(f"Region: ({x}, {y}, {w}x{h})")
+        else:
+            self.region_label.setText("Region: None (random click disabled)")
+    
 class StepEditor(QGroupBox):
     """Widget to edit a single step in a sequence."""
     def __init__(self, step_data: Optional[dict] = None, templates: List[str] = None, parent=None):
