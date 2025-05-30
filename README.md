@@ -15,7 +15,6 @@ A Python-based bot with GUI for detecting images on screen and automating sequen
 - **Looping Support**: Run sequences multiple times with configurable loop counts
 - **Real-time Status**: Monitor bot activity with detailed status updates
 - **Global Hotkey**: Stop sequences at any time with the F8 key
-- **Failsafe Image step jump**: Will search for this image after every step and if found jump to step
 
 ## Requirements
 
@@ -65,7 +64,12 @@ A Python-based bot with GUI for detecting images on screen and automating sequen
    - When editing a step, add a "Click" action.
    - Use the "Select Region" button to define an area.
    - The bot will click at a random point inside this region each time the action runs.
-
+  
+   - 5. **Random Move-To in Region**:
+   - When editing a step, add a "Move To" action.
+   - Enable the "Toggle Random" checkbox to activate random movement.
+   - Use the "Select Region" button to define an area.
+   - The bot will move to a random point inside this region for the template step. If not enabled, it moves to the center of the detected template as usual.
 
 ## Configuration
 
@@ -77,13 +81,15 @@ The application automatically saves your configuration to `config.json` in the a
 - **Confidence Threshold**: Adjust how strictly templates must match
 - **Search Region**: Limit template search to specific screen areas
 - **Required/Optional**: Mark steps as required or optional
-- - **Click Region**: For click actions, you can select a region. The click will occur at a random location within this region.
+- **Click Region**: For click actions, you can select a region. The click will occur at a random location within this region.
+- **Move-To Region**: For move_to actions, you can enable random movement and select a region. The move will occur at a random location within this region if random is enabled.
 
 
 ### Action Types
 - **Click**: Left/right/middle click with configurable number of clicks
 - **NEW:** You can now select a region for a click action. If a region is set, the click will happen at a random point inside that region.
 - **Move**: Move mouse to coordinates or template location
+  - **NEW:** You can enable random movement for move_to actions. When enabled, the bot will move to a random point inside a selected region for the template, instead of the center.
 - **Type**: Simulate keyboard typing
 - **Key Press**: Simulate single key presses
 - **Wait**: Pause for a specified duration
