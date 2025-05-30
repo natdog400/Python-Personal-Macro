@@ -792,7 +792,26 @@ class ActionEditor(QWidget):
                 lambda value, key="y": self.update_action_param(key, value))
             self.params_layout.addWidget(y_spin)
             
-            # Add duration
+            # Toggle random checkbox
+            self.random_checkbox = QCheckBox("Toggle Random")
+            self.random_checkbox.setChecked(self.action_data.get("random", False))
+            self.random_checkbox.toggled.connect(lambda checked: self.update_action_param("random", checked) or self.update_params())
+            self.params_layout.addWidget(self.random_checkbox)
+
+            # If random is checked, allow region selection
+            if self.action_data.get("random", False):
+                region_btn = QPushButton("Select Region")
+                region_btn.clicked.connect(self.select_random_region)
+                self.params_layout.addWidget(region_btn)
+                self.random_region_label = QLabel()
+                self.params_layout.addWidget(self.random_region_label)
+                self.update_random_region_label()
+            else:
+                # Show info
+                info_label = QLabel("Moves to center of detected template")
+                self.params_layout.addWidget(info_label)
+
+            # Duration
             self.params_layout.addWidget(QLabel("Duration (s):"))
             duration_spin = QDoubleSpinBox()
             duration_spin.setRange(0.0, 10.0)
@@ -867,6 +886,25 @@ class ActionEditor(QWidget):
         else:
             self.region_label.setText("Region: None (random click disabled)")
     
+    def select_random_region(self):
+        dialog = ScreenCaptureDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            rect = dialog.get_capture_rect()
+            if rect and rect.isValid():
+                self.action_data["random_region"] = [rect.x(), rect.y(), rect.width(), rect.height()]
+                self.update_random_region_label()
+            else:
+                self.action_data.pop("random_region", None)
+                self.update_random_region_label()
+
+    def update_random_region_label(self):
+        region = self.action_data.get("random_region")
+        if region and len(region) == 4:
+            x, y, w, h = region
+            self.random_region_label.setText(f"Region: ({x}, {y}, {w}x{h})")
+        else:
+            self.random_region_label.setText("Region: None (random move disabled)")
+
 class StepEditor(QGroupBox):
     """Widget to edit a single step in a sequence."""
     def __init__(self, step_data: Optional[dict] = None, templates: List[str] = None, parent=None):

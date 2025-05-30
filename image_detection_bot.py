@@ -48,6 +48,8 @@ class Action:
     y: Optional[int] = None
     duration: float = 0.0
     region: Optional[Tuple[int, int, int, int]] = None
+    random: bool = False
+    random_region: Optional[Tuple[int, int, int, int]] = None
 
 class ImageDetectionBot:
     def __init__(self, confidence: float = 0.8):
@@ -377,6 +379,18 @@ class ImageDetectionBot:
                     return True
                 except Exception as e:
                     logger.error(f"Error executing random region click: {str(e)}")
+                    return False
+        # If this is a move_to action and random is set, move to a random point in the region
+        if action.type == ActionType.MOVE_TO and getattr(action, 'random', False) and hasattr(action, 'random_region') and action.random_region:
+            region = action.random_region
+            if isinstance(region, (list, tuple)) and len(region) == 4:
+                x = random.randint(region[0], region[0] + region[2] - 1)
+                y = random.randint(region[1], region[1] + region[3] - 1)
+                try:
+                    self.move_to(x, y, duration=action.duration)
+                    return True
+                except Exception as e:
+                    logger.error(f"Error executing random region move_to: {str(e)}")
                     return False
         
         try:
