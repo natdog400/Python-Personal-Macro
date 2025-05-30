@@ -60,6 +60,12 @@ A Python-based bot with GUI for detecting images on screen and automating sequen
    - Select a sequence from the list
    - Click "Run" to start the sequence
    - Press F8 at any time to stop the sequence
+  
+   - 4. **Random Click in Region**:
+   - When editing a step, add a "Click" action.
+   - Use the "Select Region" button to define an area.
+   - The bot will click at a random point inside this region each time the action runs.
+
 
 ## Configuration
 
@@ -71,9 +77,12 @@ The application automatically saves your configuration to `config.json` in the a
 - **Confidence Threshold**: Adjust how strictly templates must match
 - **Search Region**: Limit template search to specific screen areas
 - **Required/Optional**: Mark steps as required or optional
+- - **Click Region**: For click actions, you can select a region. The click will occur at a random location within this region.
+
 
 ### Action Types
 - **Click**: Left/right/middle click with configurable number of clicks
+- **NEW:** You can now select a region for a click action. If a region is set, the click will happen at a random point inside that region.
 - **Move**: Move mouse to coordinates or template location
 - **Type**: Simulate keyboard typing
 - **Key Press**: Simulate single key presses
