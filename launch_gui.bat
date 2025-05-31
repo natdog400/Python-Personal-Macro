@@ -1,2 +1,2 @@
 @echo off
-python bot_gui.py %*
+python bot_gui2.py %*
