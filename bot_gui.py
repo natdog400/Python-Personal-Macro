@@ -213,7 +213,7 @@ class BotWorker(QThread):
                                             break
                                     # Execute actions for this step (only once per template detection)
                                     actions = step.get('actions', [])
-                                    for action_data in actions:
+                                    for idx, action_data in enumerate(actions):
                                         if not self._is_running:
                                             should_continue = False
                                             break
@@ -225,6 +225,15 @@ class BotWorker(QThread):
                                             })
                                             if action.type == ActionType.MOVE and action.x is not None and action.y is not None:
                                                 last_move_position = (action.x, action.y)
+                                            # --- NEW LOGIC: Only use template position for the first action, or for move_to/click with region ---
+                                            use_template_position = False
+                                            if idx == 0:
+                                                use_template_position = True
+                                            elif action.type == ActionType.MOVE_TO:
+                                                use_template_position = True
+                                            elif action.type == ActionType.CLICK and getattr(action, 'region', None):
+                                                use_template_position = True
+                                            # Otherwise, use current mouse position
                                             if action.type == ActionType.MOVE:
                                                 if action.x is not None and action.y is not None:
                                                     success = self.bot.execute_action(action)
@@ -232,11 +241,7 @@ class BotWorker(QThread):
                                                     self.signals.error.emit("MOVE action requires x and y coordinates")
                                                     should_continue = False
                                                     break
-                                            elif action.type == ActionType.MOVE_TO and position is not None:
-                                                success = self.bot.execute_action_at_position(action, position)
-                                            elif action.type == ActionType.CLICK and last_move_position is not None:
-                                                success = self.bot.execute_action_at_position(action, last_move_position)
-                                            elif position is not None:
+                                            elif use_template_position:
                                                 success = self.bot.execute_action_at_position(action, position)
                                             else:
                                                 success = self.bot.execute_action(action)
