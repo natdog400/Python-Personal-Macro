@@ -459,9 +459,8 @@ class ImageDetectionBot:
                 self.move_to(action.x, action.y, duration=action.duration)
                 return True
             elif action.type == ActionType.CLICK_AND_HOLD:
-                # This should never be called directly - handled in execute_sequence
-                logger.warning("CLICK_AND_HOLD action should be handled in execute_sequence")
-                return False
+                # Allow click_and_hold to be executed directly, using current mouse position
+                return self.execute_action_at_position(action, self.current_position)
             else:
                 # For other actions, use execute_action_at_position with current position
                 return self.execute_action_at_position(action, self.current_position)

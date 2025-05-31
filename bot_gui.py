@@ -243,6 +243,8 @@ class BotWorker(QThread):
                                                     break
                                             elif use_template_position:
                                                 success = self.bot.execute_action_at_position(action, position)
+                                            elif action.type == ActionType.CLICK_AND_HOLD:
+                                                success = self.bot.execute_action(action)
                                             else:
                                                 success = self.bot.execute_action(action)
                                             # Log the result of each action
