@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QGroupBox, QScrollArea, QSplitter, QFrame, QSizePolicy, QToolBar, 
                             QStatusBar, QDialog, QFormLayout, QListWidgetItem, QInputDialog, QMenu,
                             QDialogButtonBox, QMenuBar, QTableWidget, QTableWidgetItem,
-                            QHeaderView, QAbstractItemView, QTabWidget)
+                            QHeaderView, QAbstractItemView, QTabWidget, QGridLayout)
 from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QThread, QObject, QPoint, QRect, QEvent
 from PyQt6.QtGui import (QAction, QIcon, QPixmap, QImage, QPainter, QPen, QColor, 
                         QScreen, QGuiApplication, QKeySequence, QShortcut, QKeyEvent)
@@ -827,6 +827,53 @@ class ActionEditor(QWidget):
             duration_spin.valueChanged.connect(
                 lambda value, key="duration": self.update_action_param(key, value))
             self.params_layout.addWidget(duration_spin)
+
+            # Mouse Movement Settings
+            movement_group = QGroupBox("Mouse Movement")
+            movement_layout = QVBoxLayout()
+            
+            # Curved movement toggle
+            self.curved_movement_check = QCheckBox("Use Curved Movement")
+            self.curved_movement_check.setChecked(self.action_data.get("use_curved_movement", False))
+            self.curved_movement_check.toggled.connect(
+                lambda checked: self.update_action_param("use_curved_movement", checked))
+            movement_layout.addWidget(self.curved_movement_check)
+            
+            # Control point settings
+            control_layout = QHBoxLayout()
+            control_layout.addWidget(QLabel("Min Control:"))
+            self.min_control_spin = QDoubleSpinBox()
+            self.min_control_spin.setRange(0.0, 1.0)
+            self.min_control_spin.setSingleStep(0.1)
+            self.min_control_spin.setValue(self.action_data.get("min_control_point", 0.2))
+            self.min_control_spin.valueChanged.connect(
+                lambda value: self.update_action_param("min_control_point", value))
+            control_layout.addWidget(self.min_control_spin)
+            
+            control_layout.addWidget(QLabel("Max Control:"))
+            self.max_control_spin = QDoubleSpinBox()
+            self.max_control_spin.setRange(0.0, 1.0)
+            self.max_control_spin.setSingleStep(0.1)
+            self.max_control_spin.setValue(self.action_data.get("max_control_point", 0.8))
+            self.max_control_spin.valueChanged.connect(
+                lambda value: self.update_action_param("max_control_point", value))
+            control_layout.addWidget(self.max_control_spin)
+            movement_layout.addLayout(control_layout)
+            
+            # Speed variation
+            speed_layout = QHBoxLayout()
+            speed_layout.addWidget(QLabel("Speed Variation:"))
+            self.speed_variation_spin = QDoubleSpinBox()
+            self.speed_variation_spin.setRange(0.0, 1.0)
+            self.speed_variation_spin.setSingleStep(0.1)
+            self.speed_variation_spin.setValue(self.action_data.get("speed_variation", 0.0))
+            self.speed_variation_spin.valueChanged.connect(
+                lambda value: self.update_action_param("speed_variation", value))
+            speed_layout.addWidget(self.speed_variation_spin)
+            movement_layout.addLayout(speed_layout)
+            
+            movement_group.setLayout(movement_layout)
+            self.params_layout.addWidget(movement_group)
         
         elif action_type == "scroll":
             self.params_layout.addWidget(QLabel("Pixels:"))
@@ -1507,7 +1554,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.config = {}
-        self.config_path = "config.json"
+        # Set config path to be in the same directory as the script
+        self.config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
         self.bot = ImageDetectionBot()
         self.search_region = None  # Will store the search region (x, y, width, height)
         self.worker = None  # Will store the worker thread
@@ -1517,263 +1565,292 @@ class MainWindow(QMainWindow):
         self.images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
         os.makedirs(self.images_dir, exist_ok=True)
         
+        # Initialize UI components
+        self.templates_list = QListWidget()
+        self.sequences_list = QListWidget()
+        
+        # Set up auto-save timer
+        self.auto_save_timer = QTimer(self)
+        self.auto_save_timer.timeout.connect(self.auto_save)
+        self.auto_save_timer.start(30000)  # Auto-save every 30 seconds
+        
         self.init_ui()
-        self.load_config()
+        self.load_config()  # Load config on startup
         
         # Set up F8 key monitoring
         self.f8_timer = QTimer(self)
         self.f8_timer.timeout.connect(self.check_f8_key)
         self.f8_timer.start(100)  # Check every 100ms
-    
-    def init_ui(self):
-        """Initialize the UI."""
-        self.setWindowTitle("Image Detection Bot")
-        self.setGeometry(100, 100, 1200, 800)
-        
-        # Create a global shortcut for F8 to stop sequences
-        self.f8_shortcut = QShortcut(QKeySequence("F8"), self)
-        self.f8_shortcut.activated.connect(self.stop_sequence)
-        self.f8_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        
-        # Create main widget and layout
-        main_widget = QWidget()
-        main_layout = QVBoxLayout(main_widget)
-        
-        # Toolbar
-        toolbar = QToolBar()
-        self.addToolBar(toolbar)
-        
-        # Region selection action
-        self.region_action = QAction("Select Region", self)
-        self.region_action.setCheckable(True)
-        self.region_action.toggled.connect(self.toggle_region_selection)
-        toolbar.addAction(self.region_action)
-        
-        # Add separator
-        toolbar.addSeparator()
-        
-        # Stop action
-        self.stop_action = QAction("Stop", self)
-        self.stop_action.setEnabled(False)
-        self.stop_action.triggered.connect(self.stop_sequence)
-        toolbar.addAction(self.stop_action)
-        
-        # Status bar widgets
-        status_bar = self.statusBar()
-        
-        # Region status label
-        self.region_status = QLabel("Region: Full Screen")
-        status_bar.addPermanentWidget(self.region_status)
-        
-        # Mouse position label
-        self.mouse_pos_label = QLabel("X: 0, Y: 0")
-        status_bar.addPermanentWidget(self.mouse_pos_label)
-        
-        # Set up a timer to update mouse position
+
+        # Set up mouse position tracking
+        self.mouse_pos_label = QLabel()
+        self.statusBar().addPermanentWidget(self.mouse_pos_label)
         self.mouse_timer = QTimer(self)
         self.mouse_timer.timeout.connect(self.update_mouse_position)
         self.mouse_timer.start(100)  # Update every 100ms
+    
+    def init_ui(self):
+        # Create main window
+        self.setWindowTitle("Bot GUI")
+        self.setGeometry(100, 100, 800, 600)
         
-        # Set up F8 global shortcut for stopping sequences
-        self.f8_shortcut = QShortcut(QKeySequence("F8"), self)
-        self.f8_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)  # Make it work globally
-        self.f8_shortcut.activated.connect(self.stop_sequence)
+        # Create central widget and main layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
         
-        # Also handle F8 via key press event as a fallback
-        self.f8_pressed = False
+        # Create tab widget
+        tab_widget = QTabWidget()
         
-        # Main content area
-        content_widget = QWidget()
-        content_layout = QHBoxLayout(content_widget)
-        content_layout.setContentsMargins(0, 0, 0, 0)
+        # Create tabs
+        sequence_tab = QWidget()
+        templates_tab = QWidget()
+        settings_tab = QWidget()
+        movement_tab = QWidget()
         
-        main_layout.addWidget(toolbar)
-        main_layout.addWidget(content_widget)
+        # Initialize tab contents
+        self.init_sequence_tab(sequence_tab)
+        self.init_templates_tab(templates_tab)
+        self.init_settings_tab(settings_tab)
+        self.init_movement_tab(movement_tab)
         
-        # Store the main content layout for adding widgets later
-        self.main_content_layout = content_layout
+        # Add tabs to widget
+        tab_widget.addTab(sequence_tab, "Sequence")
+        tab_widget.addTab(templates_tab, "Templates")
+        tab_widget.addTab(settings_tab, "Settings")
+        tab_widget.addTab(movement_tab, "Mouse Movement")
         
-        # Left sidebar
+        main_layout.addWidget(tab_widget)
+        
+        # Create control buttons
+        button_layout = QHBoxLayout()
+        
+        run_button = QPushButton("Run")
+        run_button.clicked.connect(self.run_sequence)
+        button_layout.addWidget(run_button)
+        
+        stop_button = QPushButton("Stop")
+        stop_button.clicked.connect(self.stop_sequence)
+        stop_button.setEnabled(False)  # Initially disabled
+        self.stop_action = stop_button  # Store reference to stop button
+        button_layout.addWidget(stop_button)
+        
+        main_layout.addLayout(button_layout)
+        
+        # Create status bar
+        self.statusBar().showMessage("Ready")
+        
+        # Set main layout
+        self.setLayout(main_layout)
+    
+    def init_sequence_tab(self, tab):
+        """Initialize the sequence tab."""
+        layout = QHBoxLayout(tab)
+        
+        # Left sidebar for sequence list
         sidebar = QWidget()
-        sidebar.setFixedWidth(250)
+        sidebar.setFixedWidth(200)
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Templates section
-        templates_group = QGroupBox("Templates")
-        templates_layout = QVBoxLayout()
-        
-        self.templates_list = QListWidget()
-        self.templates_list.currentItemChanged.connect(self.on_template_selected)
-        
-        # Button layout for Add/Delete template
-        template_btns_layout = QHBoxLayout()
-        
-        add_template_btn = QPushButton("Add")
-        add_template_btn.clicked.connect(self.add_template)
-        
-        self.delete_template_btn = QPushButton("Delete")
-        self.delete_template_btn.clicked.connect(self.delete_template)
-        self.delete_template_btn.setEnabled(False)  # Disable by default, enable when a template is selected
-        
-        template_btns_layout.addWidget(add_template_btn)
-        template_btns_layout.addWidget(self.delete_template_btn)
-        template_btns_layout.addStretch()
-        
-        templates_layout.addWidget(self.templates_list)
-        templates_layout.addLayout(template_btns_layout)
-        templates_group.setLayout(templates_layout)
-        
-        # Sequences section
-        sequences_group = QGroupBox("Sequences")
-        sequences_layout = QVBoxLayout()
-        
-        self.sequences_list = QListWidget()
+        # Sequence list
         self.sequences_list.currentItemChanged.connect(self.on_sequence_selected)
+        sidebar_layout.addWidget(QLabel("Sequences:"))
+        sidebar_layout.addWidget(self.sequences_list)
         
-        # Button layout for Add/Remove sequence
-        sequence_btns_layout = QHBoxLayout()
-        
-        add_sequence_btn = QPushButton("Add")
-        add_sequence_btn.clicked.connect(self.add_sequence)
-        
+        # Add/Remove sequence buttons
+        btn_layout = QHBoxLayout()
+        self.add_sequence_btn = QPushButton("Add")
+        self.add_sequence_btn.clicked.connect(self.add_sequence)
         self.remove_sequence_btn = QPushButton("Remove")
         self.remove_sequence_btn.clicked.connect(self.remove_sequence)
-        self.remove_sequence_btn.setEnabled(False)  # Disable by default, enable when a sequence is selected
-        
-        sequence_btns_layout.addWidget(add_sequence_btn)
-        sequence_btns_layout.addWidget(self.remove_sequence_btn)
-        sequence_btns_layout.addStretch()
-        
-        sequences_layout.addLayout(sequence_btns_layout)
+        self.remove_sequence_btn.setEnabled(False)
+        btn_layout.addWidget(self.add_sequence_btn)
+        btn_layout.addWidget(self.remove_sequence_btn)
+        sidebar_layout.addLayout(btn_layout)
         
         # Loop controls
-        loop_control_layout = QHBoxLayout()
-        
-        # Loop checkbox
-        self.loop_checkbox = QCheckBox("Loop Sequence")
+        loop_group = QGroupBox("Loop Settings")
+        loop_layout = QVBoxLayout()
+        self.loop_checkbox = QCheckBox("Enable Loop")
         self.loop_checkbox.toggled.connect(self.on_loop_toggled)
+        loop_layout.addWidget(self.loop_checkbox)
         
-        # Loop count spinner
-        self.loop_count_label = QLabel("Times:")
+        loop_count_layout = QHBoxLayout()
+        self.loop_count_label = QLabel("Loop Count:")
         self.loop_count_spin = QSpinBox()
-        self.loop_count_spin.setMinimum(1)
-        self.loop_count_spin.setMaximum(9999)
+        self.loop_count_spin.setRange(1, 9999)
         self.loop_count_spin.setValue(1)
-        self.loop_count_spin.setEnabled(False)  # Disabled by default, enabled when loop is checked
+        self.loop_count_spin.setEnabled(False)
+        loop_count_layout.addWidget(self.loop_count_label)
+        loop_count_layout.addWidget(self.loop_count_spin)
+        loop_layout.addLayout(loop_count_layout)
         
-        # Add widgets to loop control layout
-        loop_control_layout.addWidget(self.loop_checkbox)
-        loop_control_layout.addWidget(self.loop_count_label)
-        loop_control_layout.addWidget(self.loop_count_spin)
-        loop_control_layout.addStretch()
+        loop_group.setLayout(loop_layout)
+        sidebar_layout.addWidget(loop_group)
         
-        # Run sequence button
-        run_sequence_btn = QPushButton("Run Sequence")
-        run_sequence_btn.clicked.connect(self.run_sequence)
+        # Add stretch to push everything to the top
+        sidebar_layout.addStretch()
         
-        # Add widgets to sequences layout
-        sequences_layout.addWidget(self.sequences_list)
-        sequences_layout.addLayout(loop_control_layout)
-        sequences_layout.addWidget(run_sequence_btn)
-        sequences_group.setLayout(sequences_layout)
+        # Main content area
+        self.main_content = QWidget()
+        self.main_content_layout = QVBoxLayout(self.main_content)
         
-        # Add sections to sidebar
-        sidebar_layout.addWidget(templates_group)
-        sidebar_layout.addWidget(sequences_group)
+        # Add widgets to main layout
+        layout.addWidget(sidebar)
+        layout.addWidget(self.main_content, 1)  # 1 is stretch factor
         
-        # Add sidebar to main layout
-        splitter = QSplitter()
-        splitter.addWidget(sidebar)
+        # Load existing sequences
+        self.update_ui_from_config()
+    
+    def init_templates_tab(self, tab):
+        """Initialize the templates tab."""
+        layout = QHBoxLayout(tab)
+        
+        # Left sidebar for template list
+        sidebar = QWidget()
+        sidebar.setFixedWidth(200)
+        sidebar_layout = QVBoxLayout(sidebar)
+        
+        # Template list (using pre-initialized list)
+        sidebar_layout.addWidget(QLabel("Templates:"))
+        sidebar_layout.addWidget(self.templates_list)
+        
+        # Add/Remove template buttons
+        btn_layout = QHBoxLayout()
+        self.add_template_btn = QPushButton("Add")
+        self.add_template_btn.clicked.connect(self.add_template)
+        self.delete_template_btn = QPushButton("Delete")
+        self.delete_template_btn.clicked.connect(self.delete_template)
+        self.delete_template_btn.setEnabled(False)
+        btn_layout.addWidget(self.add_template_btn)
+        btn_layout.addWidget(self.delete_template_btn)
+        sidebar_layout.addLayout(btn_layout)
+        
+        # Add stretch to push everything to the top
+        sidebar_layout.addStretch()
         
         # Main content area
         self.content_stack = QStackedWidget()
-        splitter.addWidget(self.content_stack)
-        splitter.setStretchFactor(1, 1)
         
-        self.main_content_layout.addWidget(splitter)
+        # Add widgets to main layout
+        layout.addWidget(sidebar)
+        layout.addWidget(self.content_stack, 1)  # 1 is stretch factor
         
-        # Welcome screen
-        welcome_widget = QWidget()
-        welcome_layout = QVBoxLayout(welcome_widget)
-        welcome_layout.addWidget(QLabel("Welcome to Image Detection Bot"))
-        welcome_layout.addStretch()
+        # Connect template selection signal
+        self.templates_list.currentItemChanged.connect(self.on_template_selected)
+    
+    def init_settings_tab(self, tab):
+        """Initialize the settings tab."""
+        layout = QVBoxLayout(tab)
         
-        # Template editor
-        self.template_editor = QWidget()
-        template_editor_layout = QVBoxLayout(self.template_editor)
-        template_editor_layout.addWidget(QLabel("Template Editor"))
+        # Create group box for general settings
+        general_group = QGroupBox("General Settings")
+        general_layout = QFormLayout()
         
-        # Sequence editor
-        self.sequence_editor = QWidget()
-        sequence_editor_layout = QVBoxLayout(self.sequence_editor)
-        sequence_editor_layout.addWidget(QLabel("Sequence Editor"))
+        # Search region selection
+        region_layout = QHBoxLayout()
+        self.region_status = QLabel("Region: Full Screen")
+        region_btn = QPushButton("Select Region")
+        region_btn.clicked.connect(self.toggle_region_selection)
+        region_layout.addWidget(self.region_status)
+        region_layout.addWidget(region_btn)
+        general_layout.addRow("Search Region:", region_layout)
         
-        # Add widgets to stack
-        self.content_stack.addWidget(welcome_widget)
-        self.content_stack.addWidget(self.template_editor)
-        self.content_stack.addWidget(self.sequence_editor)
+        # Add group box to layout
+        general_group.setLayout(general_layout)
+        layout.addWidget(general_group)
         
-        # Set initial content
-        self.content_stack.setCurrentWidget(welcome_widget)
-        self.setCentralWidget(main_widget)
+        # Create group box for configuration
+        config_group = QGroupBox("Configuration")
+        config_layout = QHBoxLayout()
         
-        # Create menu bar
-        menubar = self.menuBar()
+        # Configuration buttons
+        new_btn = QPushButton("New")
+        new_btn.clicked.connect(self.new_config)
+        open_btn = QPushButton("Open")
+        open_btn.clicked.connect(self.open_config)
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self.save_config)
+        save_as_btn = QPushButton("Save As")
+        save_as_btn.clicked.connect(self.save_config_as)
         
-        # File menu
-        file_menu = menubar.addMenu("&File")
+        config_layout.addWidget(new_btn)
+        config_layout.addWidget(open_btn)
+        config_layout.addWidget(save_btn)
+        config_layout.addWidget(save_as_btn)
         
-        new_action = QAction("&New", self)
-        new_action.setShortcut("Ctrl+N")
-        new_action.triggered.connect(self.new_config)
-        file_menu.addAction(new_action)
+        # Add group box to layout
+        config_group.setLayout(config_layout)
+        layout.addWidget(config_group)
         
-        open_action = QAction("&Open...", self)
-        open_action.setShortcut("Ctrl+O")
-        open_action.triggered.connect(self.open_config)
-        file_menu.addAction(open_action)
+        # Add stretch to push everything to the top
+        layout.addStretch()
+    
+    def init_movement_tab(self, tab):
+        """Initialize the movement settings tab."""
+        layout = QVBoxLayout(tab)
         
-        save_action = QAction("&Save", self)
-        save_action.setShortcut("Ctrl+S")
-        save_action.triggered.connect(self.save_config)
-        file_menu.addAction(save_action)
+        # Create group box for movement settings
+        group_box = QGroupBox("Global Mouse Movement Settings")
+        group_layout = QGridLayout()
         
-        save_as_action = QAction("Save &As...", self)
-        save_as_action.triggered.connect(self.save_config_as)
-        file_menu.addAction(save_as_action)
+        # Curved movement toggle
+        self.global_curved_movement_check = QCheckBox("Use Curved Movement")
+        self.global_curved_movement_check.setChecked(False)
+        group_layout.addWidget(self.global_curved_movement_check, 0, 0, 1, 2)
         
-        file_menu.addSeparator()
+        # Control point settings
+        group_layout.addWidget(QLabel("Minimum Control Point:"), 1, 0)
+        self.global_min_control_spin = QDoubleSpinBox()
+        self.global_min_control_spin.setRange(0.0, 1.0)
+        self.global_min_control_spin.setSingleStep(0.1)
+        self.global_min_control_spin.setValue(0.2)
+        group_layout.addWidget(self.global_min_control_spin, 1, 1)
         
-        exit_action = QAction("E&xit", self)
-        exit_action.setShortcut("Alt+F4")
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
+        group_layout.addWidget(QLabel("Maximum Control Point:"), 2, 0)
+        self.global_max_control_spin = QDoubleSpinBox()
+        self.global_max_control_spin.setRange(0.0, 1.0)
+        self.global_max_control_spin.setSingleStep(0.1)
+        self.global_max_control_spin.setValue(0.8)
+        group_layout.addWidget(self.global_max_control_spin, 2, 1)
         
-        # Run menu
-        run_menu = menubar.addMenu("&Run")
+        # Speed variation
+        group_layout.addWidget(QLabel("Speed Variation:"), 3, 0)
+        self.global_speed_variation_spin = QDoubleSpinBox()
+        self.global_speed_variation_spin.setRange(0.0, 1.0)
+        self.global_speed_variation_spin.setSingleStep(0.1)
+        self.global_speed_variation_spin.setValue(0.0)
+        group_layout.addWidget(self.global_speed_variation_spin, 3, 1)
         
-        self.run_action = QAction("Run Sequence", self)
-        self.run_action.setShortcut("F5")
-        self.run_action.triggered.connect(self.run_sequence)
-        run_menu.addAction(self.run_action)
+        # Steps per second
+        group_layout.addWidget(QLabel("Steps per Second:"), 4, 0)
+        self.global_steps_spin = QSpinBox()
+        self.global_steps_spin.setRange(10, 120)
+        self.global_steps_spin.setSingleStep(10)
+        self.global_steps_spin.setValue(60)
+        group_layout.addWidget(self.global_steps_spin, 4, 1)
         
-        self.stop_action = QAction("Stop Sequence", self)
-        self.stop_action.setShortcut("F8")
-        self.stop_action.triggered.connect(self.stop_sequence)
-        self.stop_action.setEnabled(False)  # Disabled by default
-        run_menu.addAction(self.stop_action)
+        # Add group box to layout
+        group_box.setLayout(group_layout)
+        layout.addWidget(group_box)
         
-        # Help menu
-        help_menu = menubar.addMenu("&Help")
+        # Add stretch to push everything to the top
+        layout.addStretch()
         
-        about_action = QAction("&About", self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
-        
-        # Add global shortcut for F8 to stop sequence
-        self.stop_shortcut = QShortcut(QKeySequence("F8"), self)
-        self.stop_shortcut.activated.connect(self.stop_sequence)
+        # Connect signals
+        self.global_curved_movement_check.stateChanged.connect(self.update_global_movement_settings)
+        self.global_min_control_spin.valueChanged.connect(self.update_global_movement_settings)
+        self.global_max_control_spin.valueChanged.connect(self.update_global_movement_settings)
+        self.global_speed_variation_spin.valueChanged.connect(self.update_global_movement_settings)
+        self.global_steps_spin.valueChanged.connect(self.update_global_movement_settings)
+    
+    def update_global_movement_settings(self):
+        """Update global movement settings."""
+        self.bot.use_curved_movement = self.global_curved_movement_check.isChecked()
+        self.bot.min_control_point = self.global_min_control_spin.value()
+        self.bot.max_control_point = self.global_max_control_spin.value()
+        self.bot.speed_variation = self.global_speed_variation_spin.value()
+        self.bot.steps_per_second = self.global_steps_spin.value()
     
     def new_config(self):
         """Create a new configuration."""
@@ -1864,9 +1941,21 @@ class MainWindow(QMainWindow):
                 self.update_ui_from_config()
                 self.statusBar().showMessage(f"Loaded configuration from {file_path}")
             else:
-                self.statusBar().showMessage("No configuration file found, using defaults")
+                # Create default config if it doesn't exist
+                self.config = {
+                    "templates": {},
+                    "sequences": []
+                }
+                self.save_config()
+                self.statusBar().showMessage("Created new configuration")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load configuration: {str(e)}")
+            # Create default config on error
+            self.config = {
+                "templates": {},
+                "sequences": []
+            }
+            self.save_config()
     
     def save_config(self):
         """Save configuration to file."""
@@ -1912,11 +2001,11 @@ class MainWindow(QMainWindow):
             with open(self.config_path, 'w') as f:
                 json.dump(self.config, f, indent=4)
                 
-            self.statusBar().showMessage(f"Configuration saved to {self.config_path}")
+            logger.debug(f"Configuration saved to {self.config_path}")
             return True
             
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save configuration: {str(e)}")
+            logger.error(f"Failed to save configuration: {str(e)}")
             return False
     
     def toggle_region_selection(self, checked):
@@ -2511,19 +2600,22 @@ class MainWindow(QMainWindow):
                     self.loop_count_spin.setValue(sequence.get('loop_count', 1))
                     self.loop_count_spin.setEnabled(loop_enabled)
                     self.loop_count_label.setEnabled(loop_enabled)
-                
+            
+            # Clear existing sequence editor if it exists
+            if hasattr(self, 'sequence_editor_widget'):
+                # Remove the old widget from the layout
+                self.main_content_layout.removeWidget(self.sequence_editor_widget)
+                # Delete the old widget
+                self.sequence_editor_widget.deleteLater()
+                # Clear the reference
+                del self.sequence_editor_widget
+            
             # Create new sequence editor widget
             self.sequence_editor_widget = SequenceEditor(
                 sequence, 
                 list(self.config.get('templates', {}).keys()), 
                 self
             )
-            
-            # Clear the layout before adding new widget
-            while self.main_content_layout.count() > 1:  # Keep the first widget (sidebar)
-                item = self.main_content_layout.takeAt(1)
-                if item.widget():
-                    item.widget().deleteLater()
             
             # Add the new widget to the layout
             self.main_content_layout.addWidget(self.sequence_editor_widget, 1)
@@ -2763,6 +2855,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'f8_timer') and self.f8_timer.isActive():
             self.f8_timer.stop()
         
+        # Stop the auto-save timer
+        if hasattr(self, 'auto_save_timer') and self.auto_save_timer.isActive():
+            self.auto_save_timer.stop()
+        
         # Stop any running worker threads
         if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
             self.worker.stop()
@@ -2776,10 +2872,29 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass  # Already deleted or disconnected
         
-        # Ask to save changes if needed
-        # TODO: Check for unsaved changes
+        # Final save before closing
+        try:
+            if hasattr(self, 'sequence_editor_widget'):
+                self.save_current_sequence()
+            if hasattr(self, 'template_editor'):
+                self.save_current_template()
+            self.save_config()
+        except Exception as e:
+            logger.error(f"Error during final save: {e}")
         
         event.accept()
+
+    def auto_save(self):
+        """Auto-save the current configuration."""
+        try:
+            if hasattr(self, 'sequence_editor_widget'):
+                self.save_current_sequence()
+            if hasattr(self, 'template_editor'):
+                self.save_current_template()
+            self.save_config()
+            logger.debug(f"Auto-saved configuration to {self.config_path}")
+        except Exception as e:
+            logger.error(f"Error during auto-save: {e}")
 
 def apply_dark_theme(app):
     """Apply a dark theme to the application."""

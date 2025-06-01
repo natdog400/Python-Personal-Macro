@@ -1,116 +1,175 @@
 # Image Detection Bot
 
-Please help and contribute if you can find bugs im not the best coder and ai was used in the aid of creating this python script enjoy
-
-A Python-based bot with GUI for detecting images on screen and automating sequences of actions. Ideal for automating repetitive tasks, game automation, and UI testing with visual feedback.
+A powerful automation tool that uses image detection to perform sequences of actions. Built with Python and PyQt6, this application allows you to create and manage sequences of image-based actions for automation tasks.
 
 ## Features
 
-- **Crappy GUI**: an interface for managing templates and sequences
-- **Template Management**: Create and manage image templates with previews
-- **Sequence Editor**: Visually create and edit action sequences
-- **Multiple Action Types**: Supports clicks, right-clicks, double-clicks, mouse movements, typing, and key presses
-- **Template Matching**: Advanced image detection with adjustable confidence levels
-- **Screen Region Selection**: Define specific screen regions for image detection
-- **Looping Support**: Run sequences multiple times with configurable loop counts
-- **Real-time Status**: Monitor bot activity with detailed status updates
-- **Global Hotkey**: Stop sequences at any time with the F8 key
+- **Image Detection**: Find and interact with images on screen
+- **Sequence Editor**: Create and manage sequences of actions
+- **Template Management**: Capture and manage image templates
+- **Mouse Movement Control**: 
+  - Curved mouse movement
+  - Speed variation
+  - Customizable control points
+- **Failsafe System**: Jump to specific steps when certain images are detected
+- **Loop Support**: Run sequences multiple times
+- **Search Region**: Limit image detection to specific screen areas
+- **Configuration Management**: Save and load different configurations
 
 ## Requirements
 
-- Python 3.9+
-- OpenCV (for image processing)
-- PyAutoGUI (for mouse and keyboard control)
-- NumPy (for numerical operations)
-- Pillow (for image handling)
-- PyQt6 (for the GUI)
-- darkdetect (for automatic dark/light theme)
+- Python 3.8 or higher
+- PyQt6
+- OpenCV
+- PyAutoGUI
+- NumPy
+- Pillow
+- darkdetect
 
 ## Installation
 
-1. Clone this repository or download the files
-2. Install the required packages:
-   ```
-   pip install -r requirements.txt
-   ```
-3. Launch the application:
-   ```
-   python bot_gui.py
-   ```
-   Or use the provided batch file on Windows:
-   ```
-   launch_gui.bat
-   ```
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/image_detection_bot.git
+cd image_detection_bot
+```
 
-## Getting Started
+2. Install required packages:
+```bash
+pip install -r requirements.txt
+```
 
-1. **Create Templates**:
-   - Click "Add Template" to create a new template
-   - Capture from screen or select an image file
-   - Give your template a descriptive name
+## Usage
 
-2. **Create Sequences**:
-   - Click "Add Sequence" to create a new sequence
-   - Add steps to your sequence
-   - For each step, select a template and define actions
-   - Set timeouts and required flags as needed
+1. **Starting the Application**
+```bash
+python bot_gui2.py
+```
 
-3. **Run Sequences**:
+2. **Creating Templates**
+   - Go to the Templates tab
+   - Click "Add" to create a new template
+   - Choose between capturing from screen or selecting an image file
+   - Name your template and save it
+
+3. **Creating Sequences**
+   - Go to the Sequence tab
+   - Click "Add" to create a new sequence
+   - Add steps to your sequence:
+     - Select a template to find
+     - Configure search region, confidence, and timeout
+     - Add actions (click, move, type, etc.)
+   - Configure loop settings if needed
+   - Set up failsafe conditions if desired
+
+4. **Mouse Movement Settings**
+   - Go to the Mouse Movement tab
+   - Configure global mouse movement settings:
+     - Enable/disable curved movement
+     - Set control points
+     - Adjust speed variation
+     - Set steps per second
+
+5. **Running Sequences**
    - Select a sequence from the list
-   - Click "Run" to start the sequence
-   - Press F8 at any time to stop the sequence
-  
-   - 4. **Random Click in Region**:
-   - When editing a step, add a "Click" action.
-   - Use the "Select Region" button to define an area.
-   - The bot will click at a random point inside this region each time the action runs.
-  
-   - 5. **Random Move-To in Region**:
-   - When editing a step, add a "Move To" action.
-   - Enable the "Toggle Random" checkbox to activate random movement.
-   - Use the "Select Region" button to define an area.
-   - The bot will move to a random point inside this region for the template step. If not enabled, it moves to the center of the detected template as usual.
+   - Click "Run" to start execution
+   - Use "Stop" to halt execution
+   - Press F8 for emergency stop
 
 ## Configuration
 
-The application automatically saves your configuration to `config.json` in the application directory. You can also import/export configurations using the File menu.
+The application saves configurations in JSON format, including:
+- Templates and their image paths
+- Sequences and their steps
+- Global settings
+- Search regions
 
-## Advanced Features
+## Mouse Movement Settings Explained
 
-### Template Options
-- **Confidence Threshold**: Adjust how strictly templates must match
-- **Search Region**: Limit template search to specific screen areas
-- **Required/Optional**: Mark steps as required or optional
-- **Click Region**: For click actions, you can select a region. The click will occur at a random location within this region.
-- **Move-To Region**: For move_to actions, you can enable random movement and select a region. The move will occur at a random location within this region if random is enabled.
+The mouse movement settings allow you to customize how the bot moves the mouse cursor. These settings can be configured globally in the Mouse Movement tab or per-action in the sequence editor.
+
+### Curved Movement
+- **Enabled**: Mouse follows a curved path instead of a straight line
+- **Disabled**: Mouse moves in a straight line to the target
+- **Effect**: More natural-looking movement that mimics human behavior
+
+### Control Points
+- **Minimum Control Point** (0.0 - 1.0)
+  - Lower values (e.g., 0.1): Curve starts closer to the starting point
+  - Higher values (e.g., 0.4): Curve starts further from the starting point
+  - Default: 0.2
+- **Maximum Control Point** (0.0 - 1.0)
+  - Lower values (e.g., 0.6): Curve ends closer to the target
+  - Higher values (e.g., 0.9): Curve ends further from the target
+  - Default: 0.8
+- **Effect**: Controls the shape of the curved path
+  - Closer control points = tighter curve
+  - Further control points = wider curve
+
+### Speed Variation
+- **Range**: 0.0 - 1.0
+- **0.0**: Constant speed throughout the movement
+- **0.5**: Moderate speed variation
+- **1.0**: Maximum speed variation
+- **Effect**: 
+  - Lower values: More consistent, robotic movement
+  - Higher values: More natural, human-like movement with acceleration/deceleration
+
+### Steps per Second
+- **Range**: 10 - 120
+- **Lower values** (e.g., 20):
+  - Fewer points in the movement path
+  - More noticeable "steps"
+  - Faster overall movement
+- **Higher values** (e.g., 60):
+  - More points in the movement path
+  - Smoother movement
+  - Slightly slower overall movement
+- **Default**: 60
+- **Effect**: Controls the smoothness vs. speed trade-off
+
+### Example Configurations
+
+1. **Natural Movement**:
+   - Curved Movement: Enabled
+   - Min Control: 0.2
+   - Max Control: 0.8
+   - Speed Variation: 0.7
+   - Steps per Second: 60
+
+2. **Fast and Direct**:
+   - Curved Movement: Disabled
+   - Speed Variation: 0.0
+   - Steps per Second: 30
+
+3. **Very Natural**:
+   - Curved Movement: Enabled
+   - Min Control: 0.3
+   - Max Control: 0.7
+   - Speed Variation: 0.9
+   - Steps per Second: 90
+
+## Tips
+
+- Use the search region feature to limit image detection to specific areas
+- Enable curved mouse movement for more natural-looking automation
+- Set up failsafes to handle unexpected situations
+- Use the confidence setting to adjust template matching sensitivity
+- Save your configurations regularly
+
+## Troubleshooting
+
+- If image detection is not working:
+  - Check template quality and lighting conditions
+  - Adjust confidence threshold
+  - Verify search region settings
+- If mouse movement is erratic:
+  - Adjust speed variation
+  - Modify control points
+  - Check steps per second setting
+
+## Contributing
+
+Fork your own version to modify please!
 
 
-### Action Types
-- **Click**: Left/right/middle click with configurable number of clicks
-- **NEW:** You can now select a region for a click action. If a region is set, the click will happen at a random point inside that region.
-- **Move**: Move mouse to coordinates or template location
-  - **NEW:** You can enable random movement for move_to actions. When enabled, the bot will move to a random point inside a selected region for the template, instead of the center.
-- **Type**: Simulate keyboard typing
-- **Key Press**: Simulate single key presses
-- **Wait**: Pause for a specified duration
-- **Loop**: Repeat sequences a set number of times
-
-### Hotkeys
-- **F8**: Stop the currently running sequence
-- **Ctrl+O**: Open configuration
-- **Ctrl+S**: Save configuration
-- **Ctrl+N**: New configuration
-
-## Template Images
-
-- Use clear, high-contrast images for best results
-- The template image should be an exact match for what you want to find
-- Avoid using templates that appear multiple times on screen unless you want to find all instances
-
-## Notes
-
-- The bot uses template matching which is sensitive to scale and rotation
-- For better performance, crop your templates to the smallest possible region
-- Performance may vary depending on screen resolution and system resources
-- NOT EVERYTHING FULLY WORKS AS INTENDED OR IS 100% FULLY IMPLEMENTED
-![explorer_DLFHKKejYv](https://github.com/user-attachments/assets/6232d9a5-9198-4846-8cb2-10fe655fc240)

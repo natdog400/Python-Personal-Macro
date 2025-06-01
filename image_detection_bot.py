@@ -11,6 +11,7 @@ import logging
 from enum import Enum
 from dataclasses import dataclass, asdict
 import random
+import math
 
 # Configure logging
 logging.basicConfig(
@@ -37,19 +38,25 @@ class ActionType(Enum):
 
 @dataclass
 class Action:
+    """Represents a single action to be performed."""
     type: ActionType
-    button: str = "left"
+    x: Optional[int] = None
+    y: Optional[int] = None
+    button: str = 'left'
     clicks: int = 1
     text: Optional[str] = None
     key: Optional[str] = None
     seconds: float = 1.0
     pixels: int = 0
-    x: Optional[int] = None
-    y: Optional[int] = None
     duration: float = 0.0
-    region: Optional[Tuple[int, int, int, int]] = None
+    region: Optional[List[int]] = None
     random: bool = False
-    random_region: Optional[Tuple[int, int, int, int]] = None
+    random_region: Optional[List[int]] = None
+    use_curved_movement: bool = False
+    min_control_point: float = 0.2
+    max_control_point: float = 0.8
+    speed_variation: float = 0.0
+    steps_per_second: int = 60
 
 class ImageDetectionBot:
     def __init__(self, confidence: float = 0.8):
@@ -62,6 +69,11 @@ class ImageDetectionBot:
         self.confidence = confidence
         self.templates: Dict[str, np.ndarray] = {}
         self.current_position: Optional[Tuple[int, int]] = None
+        self.use_curved_movement = False
+        self.min_control_point = 0.2
+        self.max_control_point = 0.8
+        self.speed_variation = 0.0
+        self.steps_per_second = 60
         
     def load_template(self, name: str, image_path: str) -> bool:
         """
@@ -270,7 +282,45 @@ class ImageDetectionBot:
         """
         try:
             if duration > 0:
-                pyautogui.moveTo(x, y, duration=duration, tween=pyautogui.easeInOutQuad)
+                if self.use_curved_movement:
+                    # Get current mouse position
+                    current_x, current_y = pyautogui.position()
+                    
+                    # Calculate control points for curved movement
+                    min_control = self.min_control_point
+                    max_control = self.max_control_point
+                    
+                    # Calculate number of steps based on duration and steps per second
+                    num_steps = int(duration * self.steps_per_second)
+                    
+                    # Generate points along the curve
+                    points = []
+                    for i in range(num_steps + 1):
+                        t = i / num_steps
+                        
+                        # Add speed variation
+                        if self.speed_variation > 0:
+                            # Use a sine wave to vary speed
+                            speed_factor = 1.0 + (self.speed_variation * math.sin(t * math.pi))
+                            t = t * speed_factor
+                            t = max(0.0, min(1.0, t))  # Clamp between 0 and 1
+                        
+                        # Calculate control point
+                        control_x = current_x + (x - current_x) * (min_control + (max_control - min_control) * t)
+                        control_y = current_y + (y - current_y) * (min_control + (max_control - min_control) * t)
+                        
+                        # Calculate point on curve
+                        point_x = current_x + (control_x - current_x) * t
+                        point_y = current_y + (control_y - current_y) * t
+                        
+                        points.append((point_x, point_y))
+                    
+                    # Move through points
+                    for point_x, point_y in points:
+                        pyautogui.moveTo(point_x, point_y)
+                        time.sleep(duration / num_steps)
+                else:
+                    pyautogui.moveTo(x, y, duration=duration, tween=pyautogui.easeInOutQuad)
             else:
                 pyautogui.moveTo(x, y)
             self.current_position = (x, y)
@@ -456,8 +506,28 @@ class ImageDetectionBot:
         try:
             if action.type == ActionType.MOVE and action.x is not None and action.y is not None:
                 # For MOVE action with absolute coordinates
-                self.move_to(action.x, action.y, duration=action.duration)
-                return True
+                if getattr(action, 'random', False) and hasattr(action, 'random_region') and action.random_region:
+                    region = action.random_region
+                    if isinstance(region, (list, tuple)) and len(region) == 4:
+                        x = random.randint(region[0], region[0] + region[2] - 1)
+                        y = random.randint(region[1], region[1] + region[3] - 1)
+                        # Use action-specific movement settings
+                        self.use_curved_movement = action.use_curved_movement
+                        self.min_control_point = action.min_control_point
+                        self.max_control_point = action.max_control_point
+                        self.speed_variation = action.speed_variation
+                        self.steps_per_second = action.steps_per_second
+                        self.move_to(x, y, duration=action.duration)
+                        return True
+                else:
+                    # Use action-specific movement settings
+                    self.use_curved_movement = action.use_curved_movement
+                    self.min_control_point = action.min_control_point
+                    self.max_control_point = action.max_control_point
+                    self.speed_variation = action.speed_variation
+                    self.steps_per_second = action.steps_per_second
+                    self.move_to(action.x, action.y, duration=action.duration)
+                    return True
             elif action.type == ActionType.CLICK_AND_HOLD:
                 # Allow click_and_hold to be executed directly, using current mouse position
                 return self.execute_action_at_position(action, self.current_position)
