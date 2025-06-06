@@ -170,6 +170,6 @@ The mouse movement settings allow you to customize how the bot moves the mouse c
 
 ## Contributing
 
-Fork your own version to modify please!
+Fork your own version to modify please! Everything listed may not implemeted or is WIP!!
 
 
