@@ -13,8 +13,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QGroupBox, QScrollArea, QSplitter, QFrame, QSizePolicy, QToolBar, 
                             QStatusBar, QDialog, QFormLayout, QListWidgetItem, QInputDialog, QMenu,
                             QDialogButtonBox, QMenuBar, QTableWidget, QTableWidgetItem,
-                            QHeaderView, QAbstractItemView, QTabWidget, QGridLayout)
-from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QThread, QObject, QPoint, QRect, QEvent
+                            QHeaderView, QAbstractItemView, QTabWidget, QGridLayout, QSlider)
+from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QThread, QObject, QPoint, QRect, QEvent, QDateTime
 from PyQt6.QtGui import (QAction, QIcon, QPixmap, QImage, QPainter, QPen, QColor, 
                         QScreen, QGuiApplication, QKeySequence, QShortcut, QKeyEvent)
 import pyautogui
@@ -827,53 +827,6 @@ class ActionEditor(QWidget):
             duration_spin.valueChanged.connect(
                 lambda value, key="duration": self.update_action_param(key, value))
             self.params_layout.addWidget(duration_spin)
-
-            # Mouse Movement Settings
-            movement_group = QGroupBox("Mouse Movement")
-            movement_layout = QVBoxLayout()
-            
-            # Curved movement toggle
-            self.curved_movement_check = QCheckBox("Use Curved Movement")
-            self.curved_movement_check.setChecked(self.action_data.get("use_curved_movement", False))
-            self.curved_movement_check.toggled.connect(
-                lambda checked: self.update_action_param("use_curved_movement", checked))
-            movement_layout.addWidget(self.curved_movement_check)
-            
-            # Control point settings
-            control_layout = QHBoxLayout()
-            control_layout.addWidget(QLabel("Min Control:"))
-            self.min_control_spin = QDoubleSpinBox()
-            self.min_control_spin.setRange(0.0, 1.0)
-            self.min_control_spin.setSingleStep(0.1)
-            self.min_control_spin.setValue(self.action_data.get("min_control_point", 0.2))
-            self.min_control_spin.valueChanged.connect(
-                lambda value: self.update_action_param("min_control_point", value))
-            control_layout.addWidget(self.min_control_spin)
-            
-            control_layout.addWidget(QLabel("Max Control:"))
-            self.max_control_spin = QDoubleSpinBox()
-            self.max_control_spin.setRange(0.0, 1.0)
-            self.max_control_spin.setSingleStep(0.1)
-            self.max_control_spin.setValue(self.action_data.get("max_control_point", 0.8))
-            self.max_control_spin.valueChanged.connect(
-                lambda value: self.update_action_param("max_control_point", value))
-            control_layout.addWidget(self.max_control_spin)
-            movement_layout.addLayout(control_layout)
-            
-            # Speed variation
-            speed_layout = QHBoxLayout()
-            speed_layout.addWidget(QLabel("Speed Variation:"))
-            self.speed_variation_spin = QDoubleSpinBox()
-            self.speed_variation_spin.setRange(0.0, 1.0)
-            self.speed_variation_spin.setSingleStep(0.1)
-            self.speed_variation_spin.setValue(self.action_data.get("speed_variation", 0.0))
-            self.speed_variation_spin.valueChanged.connect(
-                lambda value: self.update_action_param("speed_variation", value))
-            speed_layout.addWidget(self.speed_variation_spin)
-            movement_layout.addLayout(speed_layout)
-            
-            movement_group.setLayout(movement_layout)
-            self.params_layout.addWidget(movement_group)
         
         elif action_type == "scroll":
             self.params_layout.addWidget(QLabel("Pixels:"))
@@ -1465,15 +1418,27 @@ class SequenceEditor(QGroupBox):
         # Update the step numbers
         self.update_step_numbers()
         
-        # Ensure the new step is visible
-        QTimer.singleShot(100, lambda: self.scroll_to_bottom())
+        # Add a small delay to ensure the UI has updated
+        try:
+            if hasattr(self, 'scroll_area') and self.scroll_area:
+                QTimer.singleShot(100, self.scroll_to_bottom)
+        except RuntimeError:
+            # Widget was already deleted, ignore
+            pass
         
         return step_editor
     
     def scroll_to_bottom(self):
         """Scroll the scroll area to the bottom."""
-        scrollbar = self.scroll_area.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        try:
+            # Check if scroll area and its scrollbar still exist
+            if (hasattr(self, 'scroll_area') and self.scroll_area and 
+                self.scroll_area.verticalScrollBar()):
+                scrollbar = self.scroll_area.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
+        except RuntimeError:
+            # Widget was already deleted, ignore
+            pass
         # Force an update to ensure the scroll happens
         self.scroll_area.viewport().update()
     
@@ -1544,10 +1509,321 @@ class SequenceEditor(QGroupBox):
                 self.fs_region_label.setText("Region: Full Screen")
 
     def toggle_failsafe_ui(self, enabled):
-        # Enable/disable all failsafe config widgets except the enable checkbox
-        for widget in [self.failsafe_path_edit, self.failsafe_preview, self.fs_capture_btn, self.fs_select_btn,
-                      self.fs_step_combo, self.fs_conf_spin, self.fs_region_btn, self.fs_region_label]:
-            widget.setEnabled(enabled)
+        """Enable or disable the failsafe UI elements."""
+        if hasattr(self, 'failsafe_enable_checkbox'):
+            self.failsafe_enable_checkbox.setEnabled(enabled)
+        if hasattr(self, 'fs_region_btn'):
+            self.fs_region_btn.setEnabled(enabled)
+        if hasattr(self, 'fs_template_combo'):
+            self.fs_template_combo.setEnabled(enabled)
+        if hasattr(self, 'fs_interval_spin'):
+            self.fs_interval_spin.setEnabled(enabled)
+        if not enabled:
+            self.failsafe_region = None
+            if hasattr(self, 'fs_region_label'):
+                self.fs_region_label.setText("Region: Full Screen")
+
+
+class RegionSelectionDialog(QDialog):
+    """Dialog for selecting a region of the screen for preview."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Preview Region")
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | 
+                           Qt.WindowType.WindowStaysOnTopHint |
+                           Qt.WindowType.Tool)
+        
+        # Make window semi-transparent
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowOpacity(0.3)
+        
+        # Store screen information
+        self.screens = QGuiApplication.screens()
+        self.combined_geometry = QRect()
+        for screen in self.screens:
+            self.combined_geometry = self.combined_geometry.united(screen.geometry())
+        
+        # Set dialog to cover all screens
+        self.setGeometry(self.combined_geometry)
+        self.move(self.combined_geometry.topLeft())
+        
+        # Selection rectangle in screen coordinates
+        self.start_pos = None
+        self.end_pos = None
+        self.selection_rect = None
+        
+        # Instructions label
+        self.instructions = QLabel("Click and drag to select a region. Press Enter to confirm or Esc to cancel.", self)
+        self.instructions.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 180);
+                color: white;
+                padding: 5px;
+                border-radius: 5px;
+            }
+        """)
+        self.instructions.adjustSize()
+        self.instructions.move(10, 10)
+        self.instructions.show()
+    
+    def paintEvent(self, event):
+        """Draw the semi-transparent overlay and selection rectangle."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Draw semi-transparent overlay
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+        
+        # Draw selection rectangle
+        if self.selection_rect:
+            painter.setPen(QPen(Qt.GlobalColor.white, 2, Qt.PenStyle.SolidLine))
+            painter.drawRect(self.selection_rect)
+            
+            # Fill the selected area with a different opacity
+            painter.fillRect(self.selection_rect, QColor(255, 255, 255, 30))
+    
+    def mousePressEvent(self, event):
+        """Start selection on mouse press."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.start_pos = event.position().toPoint()
+            self.end_pos = self.start_pos
+            self.selection_rect = QRect()
+            self.update()
+    
+    def mouseMoveEvent(self, event):
+        """Update selection rectangle on mouse move."""
+        if self.start_pos:
+            self.end_pos = event.position().toPoint()
+            self.selection_rect = QRect(
+                min(self.start_pos.x(), self.end_pos.x()),
+                min(self.start_pos.y(), self.end_pos.y()),
+                abs(self.end_pos.x() - self.start_pos.x()),
+                abs(self.end_pos.y() - self.start_pos.y())
+            )
+            self.update()
+    
+    def mouseReleaseEvent(self, event):
+        """Finish selection on mouse release."""
+        if event.button() == Qt.MouseButton.LeftButton and self.start_pos:
+            self.end_pos = event.position().toPoint()
+            self.selection_rect = QRect(
+                min(self.start_pos.x(), self.end_pos.x()),
+                min(self.start_pos.y(), self.end_pos.y()),
+                abs(self.end_pos.x() - self.start_pos.x()),
+                abs(self.end_pos.y() - self.start_pos.y())
+            )
+            self.update()
+    
+    def keyPressEvent(self, event):
+        """Handle Enter to confirm or Escape to cancel."""
+        if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+            if self.selection_rect and self.selection_rect.isValid():
+                self.accept()
+            else:
+                QMessageBox.warning(self, "Invalid Selection", "Please select a valid region.")
+        elif event.key() == Qt.Key.Key_Escape:
+            self.reject()
+    
+    def get_selected_region(self):
+        """Get the selected region in screen coordinates."""
+        if self.selection_rect and self.selection_rect.isValid():
+            # Convert to screen coordinates
+            screen_rect = QRect(
+                self.combined_geometry.x() + self.selection_rect.x(),
+                self.combined_geometry.y() + self.selection_rect.y(),
+                self.selection_rect.width(),
+                self.selection_rect.height()
+            )
+            return (
+                screen_rect.x(), 
+                screen_rect.y(), 
+                screen_rect.width(), 
+                screen_rect.height()
+            )
+        return None
+
+
+class TemplatePreviewWindow(QDialog):
+    """A window that displays the current screen with template matches highlighted."""
+    def __init__(self, bot, parent=None):
+        super().__init__(parent)
+        self.bot = bot
+        self.setWindowTitle("Template Matching Preview")
+        self.setMinimumSize(800, 600)
+        self.preview_region = None  # Will store (x, y, width, height)
+        self.last_update_time = 0
+        self.update_interval = 300  # ms between updates
+        
+        # Main layout
+        layout = QVBoxLayout()
+        
+        # Controls layout
+        controls_layout = QHBoxLayout()
+        
+        # Template selection
+        self.template_combo = QComboBox()
+        self.template_combo.currentTextChanged.connect(self.schedule_update_preview)
+        controls_layout.addWidget(QLabel("Template:"))
+        controls_layout.addWidget(self.template_combo)
+        
+        # Region selection button
+        self.region_btn = QPushButton("Select Region")
+        self.region_btn.clicked.connect(self.select_region)
+        controls_layout.addWidget(self.region_btn)
+        
+        # Clear region button
+        self.clear_region_btn = QPushButton("Clear Region")
+        self.clear_region_btn.clicked.connect(self.clear_region)
+        self.clear_region_btn.setEnabled(False)
+        controls_layout.addWidget(self.clear_region_btn)
+        
+        # Confidence threshold
+        self.confidence_slider = QSlider(Qt.Orientation.Horizontal)
+        self.confidence_slider.setRange(0, 100)
+        self.confidence_slider.setValue(int(self.bot.confidence * 100))
+        self.confidence_slider.valueChanged.connect(self.on_confidence_changed)
+        controls_layout.addWidget(QLabel("Confidence:"))
+        controls_layout.addWidget(self.confidence_slider)
+        
+        # Confidence value label
+        self.confidence_label = QLabel(f"{self.bot.confidence:.2f}")
+        controls_layout.addWidget(self.confidence_label)
+        
+        # Add stretch to push everything to the left
+        controls_layout.addStretch()
+        
+        # Add controls to main layout
+        layout.addLayout(controls_layout)
+        
+        # Image display area
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+        # Add scroll area for the image
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidget(self.image_label)
+        self.scroll_area.setWidgetResizable(True)
+        layout.addWidget(self.scroll_area)
+        
+        # Status bar
+        self.status_bar = QStatusBar()
+        layout.addWidget(self.status_bar)
+        
+        # Set the main layout
+        self.setLayout(layout)
+        
+        # Load templates
+        self.load_templates()
+        
+        # Set up update timer
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_preview)
+        self.update_timer.start(100)  # Check for updates 10 times per second
+    
+    def select_region(self):
+        """Open a dialog to select a region of the screen."""
+        dialog = RegionSelectionDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.preview_region = dialog.get_selected_region()
+            self.clear_region_btn.setEnabled(True)
+            self.schedule_update_preview()
+    
+    def clear_region(self):
+        """Clear the selected region."""
+        self.preview_region = None
+        self.clear_region_btn.setEnabled(False)
+        self.schedule_update_preview()
+    
+    def schedule_update_preview(self):
+        """Schedule a preview update if enough time has passed since the last update."""
+        current_time = QDateTime.currentMSecsSinceEpoch()
+        if current_time - self.last_update_time > self.update_interval:
+            self.update_preview()
+            self.last_update_time = current_time
+    
+    def load_templates(self):
+        """Load available templates into the combo box."""
+        self.template_combo.clear()
+        if hasattr(self.parent(), 'config') and 'templates' in self.parent().config:
+            self.template_combo.addItems(self.parent().config['templates'].keys())
+
+    def on_confidence_changed(self, value):
+        """Handle confidence threshold change."""
+        confidence = value / 100.0
+        self.confidence_label.setText(f"{confidence:.2f}")
+        self.bot.confidence = confidence
+        self.schedule_update_preview()
+
+    def update_preview(self):
+        """Update the preview with the current template matches."""
+        current_time = QDateTime.currentMSecsSinceEpoch()
+        if current_time - self.last_update_time < self.update_interval:
+            return
+        
+        self.last_update_time = current_time
+            
+        if not hasattr(self, 'bot') or not self.template_combo.currentText():
+            return
+            
+        template_name = self.template_combo.currentText()
+        
+        try:
+            # Get the screen capture with matches drawn
+            result = self.bot.find_on_screen(
+                template_name, 
+                region=self.preview_region,
+                draw_matches=True
+            )
+            
+            if result is not None and len(result) >= 3:
+                _, confidence, screenshot = result
+                if screenshot is not None:
+                    # Convert numpy array to QImage
+                    height, width, channel = screenshot.shape
+                    bytes_per_line = 3 * width
+                    q_img = QImage(screenshot.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+                    
+                    # Create pixmap
+                    pixmap = QPixmap.fromImage(q_img)
+                    
+                    # Only scale down, never up
+                    if pixmap.width() > self.scroll_area.viewport().width() or \
+                       pixmap.height() > self.scroll_area.viewport().height():
+                        pixmap = pixmap.scaled(
+                            self.scroll_area.viewport().size(),
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation
+                        )
+                    
+                    self.image_label.setPixmap(pixmap)
+                    
+                    # Show status with confidence
+                    if confidence > 0:
+                        self.status_bar.showMessage(
+                            f"Template '{template_name}' found with confidence: {confidence:.2f}"
+                        )
+                    else:
+                        self.status_bar.showMessage(f"Template '{template_name}' not found")
+                    return
+            
+            self.status_bar.showMessage(f"Template '{template_name}' not found")
+            
+        except Exception as e:
+            logger.error(f"Error updating preview: {e}")
+            self.status_bar.showMessage(f"Error: {str(e)}")
+
+    def showEvent(self, event):
+        """Handle the window show event."""
+        super().showEvent(event)
+        self.load_templates()
+        self.schedule_update_preview()
+
+    def closeEvent(self, event):
+        """Handle the window close event."""
+        self.update_timer.stop()
+        event.accept()
+
 
 class MainWindow(QMainWindow):
     """Main application window."""
@@ -1572,7 +1848,7 @@ class MainWindow(QMainWindow):
         # Set up auto-save timer
         self.auto_save_timer = QTimer(self)
         self.auto_save_timer.timeout.connect(self.auto_save)
-        self.auto_save_timer.start(30000)  # Auto-save every 30 seconds
+        self.auto_save_timer.start(2147483647)  # Auto-save every 30 seconds
         
         self.init_ui()
         self.load_config()  # Load config on startup
@@ -1606,19 +1882,16 @@ class MainWindow(QMainWindow):
         sequence_tab = QWidget()
         templates_tab = QWidget()
         settings_tab = QWidget()
-        movement_tab = QWidget()
         
         # Initialize tab contents
         self.init_sequence_tab(sequence_tab)
         self.init_templates_tab(templates_tab)
         self.init_settings_tab(settings_tab)
-        self.init_movement_tab(movement_tab)
         
         # Add tabs to widget
         tab_widget.addTab(sequence_tab, "Sequence")
         tab_widget.addTab(templates_tab, "Templates")
         tab_widget.addTab(settings_tab, "Settings")
-        tab_widget.addTab(movement_tab, "Mouse Movement")
         
         main_layout.addWidget(tab_widget)
         
@@ -1643,6 +1916,168 @@ class MainWindow(QMainWindow):
         # Set main layout
         self.setLayout(main_layout)
     
+    def add_sequence(self):
+        """Add a new sequence to the configuration."""
+        # Generate a default sequence name
+        sequence_count = len(self.config.get('sequences', []))
+        default_name = f"Sequence {sequence_count + 1}"
+        
+        # Get user input for sequence name
+        name, ok = QInputDialog.getText(
+            self,
+            'Add New Sequence',
+            'Enter sequence name:',
+            text=default_name
+        )
+        
+        if ok and name.strip():
+            # Check if name already exists
+            existing_sequences = [seq.get('name', '') for seq in self.config.get('sequences', [])]
+            if name in existing_sequences:
+                QMessageBox.warning(
+                    self,
+                    'Duplicate Name',
+                    f'A sequence named "{name}" already exists. Please choose a different name.',
+                    QMessageBox.StandardButton.Ok
+                )
+                return
+                
+            # Create new sequence
+            new_sequence = {
+                'name': name,
+                'steps': [],
+                'loop': False,
+                'loop_count': 1
+            }
+            
+            # Add to config
+            if 'sequences' not in self.config:
+                self.config['sequences'] = []
+            self.config['sequences'].append(new_sequence)
+            
+            # Update UI
+            self.sequences_list.addItem(name)
+            self.sequences_list.setCurrentRow(self.sequences_list.count() - 1)
+            
+            # Save config
+            self.save_config()
+            self.statusBar().showMessage(f'Added sequence: {name}')
+    
+    def rename_sequence(self):
+        """Rename the currently selected sequence."""
+        current_item = self.sequences_list.currentItem()
+        if not current_item:
+            return
+            
+        old_name = current_item.text()
+        new_name, ok = QInputDialog.getText(
+            self, 
+            "Rename Sequence", 
+            "Enter new sequence name:",
+            text=old_name
+        )
+        
+        if ok and new_name and new_name != old_name:
+            # Check if name already exists
+            if any(s.get('name') == new_name for s in self.config.get('sequences', [])):
+                QMessageBox.warning(self, "Error", f"A sequence named '{new_name}' already exists.")
+                return
+                
+            # Update in config
+            for sequence in self.config.get('sequences', []):
+                if sequence.get('name') == old_name:
+                    sequence['name'] = new_name
+                    break
+            
+            # Update UI
+            current_item.setText(new_name)
+            self.statusBar().showMessage(f"Renamed sequence to '{new_name}'", 3000)
+    
+    def copy_sequence(self):
+        """Create a copy of the currently selected sequence."""
+        current_item = self.sequences_list.currentItem()
+        if not current_item:
+            return
+            
+        old_name = current_item.text()
+        new_name = f"{old_name} (Copy)"
+        
+        # Find a unique name
+        counter = 1
+        while any(s.get('name') == new_name for s in self.config.get('sequences', [])):
+            new_name = f"{old_name} (Copy {counter})"
+            counter += 1
+        
+        # Find the sequence to copy
+        for sequence in self.config.get('sequences', []):
+            if sequence.get('name') == old_name:
+                # Create a deep copy of the sequence
+                import copy
+                new_sequence = copy.deepcopy(sequence)
+                new_sequence['name'] = new_name
+                
+                # Add to config
+                self.config['sequences'].append(new_sequence)
+                
+                # Update UI
+                self.sequences_list.addItem(new_name)
+                self.sequences_list.setCurrentRow(self.sequences_list.count() - 1)
+                self.statusBar().showMessage(f"Created copy: {new_name}", 3000)
+                break
+    
+    def remove_sequence(self):
+        """Safely remove the currently selected sequence."""
+        current_item = self.sequences_list.currentItem()
+        if not current_item:
+            return
+            
+        sequence_name = current_item.text()
+        
+        # Check if sequence is being used in any other sequences
+        used_in = []
+        for seq in self.config.get('sequences', []):
+            if seq.get('name') != sequence_name:  # Don't check against self
+                for step in seq.get('steps', []):
+                    if step.get('find') == sequence_name:
+                        used_in.append(seq['name'])
+        
+        if used_in:
+            reply = QMessageBox.warning(
+                self,
+                "Sequence in Use",
+                f"This sequence is used in: {', '.join(used_in)}\n\n"
+                "Deleting it may cause issues. Are you sure you want to continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        
+        # Confirm deletion
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Are you sure you want to delete the sequence '{sequence_name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            # Remove from config
+            self.config['sequences'] = [s for s in self.config['sequences'] 
+                                      if s.get('name') != sequence_name]
+            
+            # Update UI
+            self.sequences_list.takeItem(self.sequences_list.row(current_item))
+            
+            # Clear the sequence editor if it was showing this sequence
+            if hasattr(self, 'sequence_editor_widget'):
+                self.main_content_layout.removeWidget(self.sequence_editor_widget)
+                self.sequence_editor_widget.deleteLater()
+                del self.sequence_editor_widget
+            
+            self.statusBar().showMessage(f"Deleted sequence: {sequence_name}", 3000)
+    
     def init_sequence_tab(self, tab):
         """Initialize the sequence tab."""
         layout = QHBoxLayout(tab)
@@ -1653,20 +2088,42 @@ class MainWindow(QMainWindow):
         sidebar_layout = QVBoxLayout(sidebar)
         
         # Sequence list
+        self.sequences_list = QListWidget()
         self.sequences_list.currentItemChanged.connect(self.on_sequence_selected)
         sidebar_layout.addWidget(QLabel("Sequences:"))
         sidebar_layout.addWidget(self.sequences_list)
         
-        # Add/Remove sequence buttons
-        btn_layout = QHBoxLayout()
+        # Buttons for managing sequences
+        btn_layout = QVBoxLayout()
+        
+        # Top row - Add and Remove
+        top_btn_layout = QHBoxLayout()
         self.add_sequence_btn = QPushButton("Add")
         self.add_sequence_btn.clicked.connect(self.add_sequence)
-        self.remove_sequence_btn = QPushButton("Remove")
+        self.remove_sequence_btn = QPushButton("Delete")
         self.remove_sequence_btn.clicked.connect(self.remove_sequence)
         self.remove_sequence_btn.setEnabled(False)
-        btn_layout.addWidget(self.add_sequence_btn)
-        btn_layout.addWidget(self.remove_sequence_btn)
+        top_btn_layout.addWidget(self.add_sequence_btn)
+        top_btn_layout.addWidget(self.remove_sequence_btn)
+        
+        # Bottom row - Rename and Copy
+        bottom_btn_layout = QHBoxLayout()
+        self.rename_sequence_btn = QPushButton("Rename")
+        self.rename_sequence_btn.clicked.connect(self.rename_sequence)
+        self.rename_sequence_btn.setEnabled(False)
+        self.copy_sequence_btn = QPushButton("Copy")
+        self.copy_sequence_btn.clicked.connect(self.copy_sequence)
+        self.copy_sequence_btn.setEnabled(False)
+        bottom_btn_layout.addWidget(self.rename_sequence_btn)
+        bottom_btn_layout.addWidget(self.copy_sequence_btn)
+        
+        # Add all to main button layout
+        btn_layout.addLayout(top_btn_layout)
+        btn_layout.addLayout(bottom_btn_layout)
         sidebar_layout.addLayout(btn_layout)
+        
+        # Connect sequence selection change
+        self.sequences_list.currentItemChanged.connect(self.on_sequence_selection_changed)
         
         # Loop controls
         loop_group = QGroupBox("Loop Settings")
@@ -1702,42 +2159,66 @@ class MainWindow(QMainWindow):
         # Load existing sequences
         self.update_ui_from_config()
     
+    def show_template_preview(self):
+        """Show the template matching preview window."""
+        if not hasattr(self, 'preview_window') or not self.preview_window:
+            self.preview_window = TemplatePreviewWindow(self.bot, self)
+        self.preview_window.show()
+        self.preview_window.raise_()
+        self.preview_window.activateWindow()
+    
     def init_templates_tab(self, tab):
         """Initialize the templates tab."""
-        layout = QHBoxLayout(tab)
+        layout = QVBoxLayout(tab)
         
-        # Left sidebar for template list
-        sidebar = QWidget()
-        sidebar.setFixedWidth(200)
-        sidebar_layout = QVBoxLayout(sidebar)
+        # Create splitter for resizable panels
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         
-        # Template list (using pre-initialized list)
-        sidebar_layout.addWidget(QLabel("Templates:"))
-        sidebar_layout.addWidget(self.templates_list)
+        # Left panel - template list and controls
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Add/Remove template buttons
+        # Template list
+        left_layout.addWidget(QLabel("Templates:"))
+        self.templates_list = QListWidget()
+        self.templates_list.currentItemChanged.connect(self.on_template_selected)
+        left_layout.addWidget(self.templates_list)
+        
+        # Template buttons
         btn_layout = QHBoxLayout()
         self.add_template_btn = QPushButton("Add")
-        self.add_template_btn.clicked.connect(self.add_template)
+        self.add_template_btn.clicked.connect(lambda: self.add_template())
         self.delete_template_btn = QPushButton("Delete")
         self.delete_template_btn.clicked.connect(self.delete_template)
         self.delete_template_btn.setEnabled(False)
         btn_layout.addWidget(self.add_template_btn)
         btn_layout.addWidget(self.delete_template_btn)
-        sidebar_layout.addLayout(btn_layout)
+        left_layout.addLayout(btn_layout)
         
-        # Add stretch to push everything to the top
-        sidebar_layout.addStretch()
+        # Preview button
+        self.preview_btn = QPushButton("Preview Matches")
+        self.preview_btn.clicked.connect(self.show_template_preview)
+        left_layout.addWidget(self.preview_btn)
         
-        # Main content area
+        # Right panel - content area
         self.content_stack = QStackedWidget()
         
-        # Add widgets to main layout
-        layout.addWidget(sidebar)
-        layout.addWidget(self.content_stack, 1)  # 1 is stretch factor
+        # Add panels to splitter
+        splitter.addWidget(left_panel)
+        splitter.addWidget(self.content_stack)
         
-        # Connect template selection signal
-        self.templates_list.currentItemChanged.connect(self.on_template_selected)
+        # Set initial sizes (left panel: 200px, right panel: takes remaining space)
+        splitter.setSizes([200, 600])
+        
+        # Add splitter to main layout
+        layout.addWidget(splitter)
+        
+        # Load existing templates
+        if hasattr(self, 'config') and 'templates' in self.config:
+            self.templates_list.addItems(self.config['templates'].keys())
+            if self.templates_list.count() > 0:
+                self.templates_list.setCurrentRow(0)
     
     def init_settings_tab(self, tab):
         """Initialize the settings tab."""
@@ -1785,72 +2266,6 @@ class MainWindow(QMainWindow):
         
         # Add stretch to push everything to the top
         layout.addStretch()
-    
-    def init_movement_tab(self, tab):
-        """Initialize the movement settings tab."""
-        layout = QVBoxLayout(tab)
-        
-        # Create group box for movement settings
-        group_box = QGroupBox("Global Mouse Movement Settings")
-        group_layout = QGridLayout()
-        
-        # Curved movement toggle
-        self.global_curved_movement_check = QCheckBox("Use Curved Movement")
-        self.global_curved_movement_check.setChecked(False)
-        group_layout.addWidget(self.global_curved_movement_check, 0, 0, 1, 2)
-        
-        # Control point settings
-        group_layout.addWidget(QLabel("Minimum Control Point:"), 1, 0)
-        self.global_min_control_spin = QDoubleSpinBox()
-        self.global_min_control_spin.setRange(0.0, 1.0)
-        self.global_min_control_spin.setSingleStep(0.1)
-        self.global_min_control_spin.setValue(0.2)
-        group_layout.addWidget(self.global_min_control_spin, 1, 1)
-        
-        group_layout.addWidget(QLabel("Maximum Control Point:"), 2, 0)
-        self.global_max_control_spin = QDoubleSpinBox()
-        self.global_max_control_spin.setRange(0.0, 1.0)
-        self.global_max_control_spin.setSingleStep(0.1)
-        self.global_max_control_spin.setValue(0.8)
-        group_layout.addWidget(self.global_max_control_spin, 2, 1)
-        
-        # Speed variation
-        group_layout.addWidget(QLabel("Speed Variation:"), 3, 0)
-        self.global_speed_variation_spin = QDoubleSpinBox()
-        self.global_speed_variation_spin.setRange(0.0, 1.0)
-        self.global_speed_variation_spin.setSingleStep(0.1)
-        self.global_speed_variation_spin.setValue(0.0)
-        group_layout.addWidget(self.global_speed_variation_spin, 3, 1)
-        
-        # Steps per second
-        group_layout.addWidget(QLabel("Steps per Second:"), 4, 0)
-        self.global_steps_spin = QSpinBox()
-        self.global_steps_spin.setRange(10, 120)
-        self.global_steps_spin.setSingleStep(10)
-        self.global_steps_spin.setValue(60)
-        group_layout.addWidget(self.global_steps_spin, 4, 1)
-        
-        # Add group box to layout
-        group_box.setLayout(group_layout)
-        layout.addWidget(group_box)
-        
-        # Add stretch to push everything to the top
-        layout.addStretch()
-        
-        # Connect signals
-        self.global_curved_movement_check.stateChanged.connect(self.update_global_movement_settings)
-        self.global_min_control_spin.valueChanged.connect(self.update_global_movement_settings)
-        self.global_max_control_spin.valueChanged.connect(self.update_global_movement_settings)
-        self.global_speed_variation_spin.valueChanged.connect(self.update_global_movement_settings)
-        self.global_steps_spin.valueChanged.connect(self.update_global_movement_settings)
-    
-    def update_global_movement_settings(self):
-        """Update global movement settings."""
-        self.bot.use_curved_movement = self.global_curved_movement_check.isChecked()
-        self.bot.min_control_point = self.global_min_control_spin.value()
-        self.bot.max_control_point = self.global_max_control_spin.value()
-        self.bot.speed_variation = self.global_speed_variation_spin.value()
-        self.bot.steps_per_second = self.global_steps_spin.value()
     
     def new_config(self):
         """Create a new configuration."""
@@ -2374,135 +2789,189 @@ class MainWindow(QMainWindow):
                 logger.error(f"Error deleting template: {e}", exc_info=True)
                 QMessageBox.critical(
                     self,
-                    'Error',
-                    f'Failed to delete template: {str(e)}',
+                    "Error",
+                    f"Failed to delete template: {str(e)}",
                     QMessageBox.StandardButton.Ok
                 )
-    
-    def remove_sequence(self):
-        """Remove the currently selected sequence."""
-        current_item = self.sequences_list.currentItem()
+                return False
+
+    def add_template(self, name: str = None, path: str = None):
+        """Add a new template."""
+        try:
+            if name is None:
+                name = f"template_{len(self.config.get('templates', {})) + 1}"
+        
+            # Create and show the template dialog
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Add New Template")
+            dialog.setLayout(QVBoxLayout())
+            
+            # Create the preview widget
+            preview = TemplatePreview(name, path or "", dialog)  # Pass dialog as parent
+            
+            # Add widgets to dialog
+            dialog.layout().addWidget(preview)
+            
+            # Button layout
+            btn_box = QHBoxLayout()
+            
+            capture_btn = QPushButton("Capture from Screen")
+            capture_btn.clicked.connect(preview.capture_from_screen)
+            
+            select_btn = QPushButton("Select from File")
+            select_btn.clicked.connect(preview.select_from_file)
+            
+            btn_box.addWidget(capture_btn)
+            btn_box.addWidget(select_btn)
+            btn_box.addStretch()
+            
+            # Dialog buttons
+            button_box = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+                Qt.Orientation.Horizontal, dialog
+            )
+            button_box.accepted.connect(dialog.accept)
+            button_box.rejected.connect(dialog.reject)
+            
+            dialog.layout().addLayout(btn_box)
+            dialog.layout().addWidget(button_box)
+            
+            # Show the dialog
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                name = preview.name_edit.text().strip()
+                path = preview.path_edit.text().strip()
+                
+                if not name or not path:
+                    QMessageBox.warning(self, "Error", "Template name and image path are required")
+                    return False
+                    
+                if not os.path.exists(path):
+                    QMessageBox.warning(self, "Error", f"Image file not found: {path}")
+                    return False
+                
+                # If the file is in the temp directory, move it to the main images directory
+                if os.path.dirname(path) != self.images_dir:
+                    new_path = os.path.join(self.images_dir, f"{name}{os.path.splitext(path)[1]}")
+                    shutil.move(path, new_path)
+                    path = new_path
+                
+                # Make sure the path is absolute
+                if not os.path.isabs(path):
+                    path = os.path.join(os.path.dirname(os.path.abspath(self.config_path)), path)
+                
+                # Add to config with relative path
+                rel_path = os.path.relpath(path, os.path.dirname(os.path.abspath(self.config_path)))
+                self.config.setdefault('templates', {})[name] = rel_path
+                
+                # Load the template into the bot
+                if hasattr(self, 'bot') and os.path.exists(path):
+                    success = self.bot.load_template(name, path)
+                    if not success:
+                        QMessageBox.warning(self, "Error", f"Failed to load template '{name}' into bot")
+                        return False
+                
+                # Add to UI
+                self.templates_list.addItem(name)
+                self.templates_list.setCurrentRow(self.templates_list.count() - 1)
+                
+                # Update sequence editor's template list if it exists
+                if hasattr(self, 'sequence_editor_widget'):
+                    self.sequence_editor_widget.templates = list(self.config.get('templates', {}).keys())
+                    # Force refresh the current step editor if it exists
+                    if hasattr(self, 'current_sequence_widget'):
+                        self.on_sequence_selected(self.sequences_list.currentItem(), None)
+                
+                # Save config
+                self.save_config()
+                
+                # Show the template in the editor
+                self.on_template_selected(self.templates_list.currentItem(), None)
+                return True
+                
+            return False
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to add template: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def delete_template(self):
+        """Delete the currently selected template."""
+        current_item = self.templates_list.currentItem()
         if not current_item:
             return
-            
-        sequence_name = current_item.text()
-        
+
+        template_name = current_item.text()
+
+        # Check if template is used in any sequence
+        used_in_sequences = []
+        for seq in self.config.get('sequences', []):
+            for step in seq.get('steps', []):
+                if step.get('find') == template_name:
+                    used_in_sequences.append(seq.get('name', 'Unnamed Sequence'))
+                    break
+
+        if used_in_sequences:
+            seq_list = '\n- ' + '\n- '.join(used_in_sequences)
+            QMessageBox.warning(
+                self,
+                'Cannot Delete Template',
+                f'Template "{template_name}" is used in the following sequences and cannot be deleted:\n{seq_list}\n\nPlease remove it from these sequences first.',
+                QMessageBox.StandardButton.Ok
+            )
+            return
+
         reply = QMessageBox.question(
             self,
             'Confirm Delete',
-            f'Are you sure you want to delete the sequence "{sequence_name}"?',
+            f'Are you sure you want to delete the template "{template_name}"?',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
-        
+
         if reply == QMessageBox.StandardButton.Yes:
-            # Remove from config
-            self.config['sequences'] = [s for s in self.config.get('sequences', []) 
-                                     if s.get('name') != sequence_name]
-            
-            # Remove from UI
-            row = self.sequences_list.row(current_item)
-            self.sequences_list.takeItem(row)
-            
-            # Clear the sequence editor if this was the selected sequence
-            if hasattr(self, 'sequence_editor_widget') and self.sequence_editor_widget.sequence_data.get('name') == sequence_name:
-                self.main_content_layout.removeWidget(self.current_sequence_widget)
-                self.current_sequence_widget.deleteLater()
-                del self.sequence_editor_widget
-                del self.current_sequence_widget
-            
-            # Save changes
-            self.save_config()
-            self.statusBar().showMessage(f"Sequence '{sequence_name}' deleted")
-    
-    def add_sequence(self):
-        """Add a new sequence."""
-        try:
-            print("DEBUG: Entering add_sequence method")  # Debug print
-            
-            # Ensure config exists and has sequences list
-            if not hasattr(self, 'config'):
-                print("DEBUG: No config found, initializing")  # Debug print
-                self.config = {'sequences': []}
-            
-            if 'sequences' not in self.config:
-                print("DEBUG: Initializing empty sequences list")  # Debug print
-                self.config['sequences'] = []
-            
-            # Create default name
-            default_name = f"sequence_{len(self.config['sequences']) + 1}"
-            print(f"DEBUG: Default name: {default_name}")  # Debug print
-            
-            # Show input dialog
-            print("DEBUG: Showing input dialog")  # Debug print
-            name, ok = QInputDialog.getText(
-                self, 
-                "New Sequence", 
-                "Enter sequence name:",
-                QLineEdit.EchoMode.Normal,
-                default_name
-            )
-            print(f"DEBUG: Got input - ok: {ok}, name: {name}")  # Debug print
-            
-            if not ok:
-                print("DEBUG: User cancelled")  # Debug print
-                return
+            try:
+                # Remove the template file if it exists in the images directory
+                if template_name in self.config.get('templates', {}):
+                    template_path = self.config['templates'][template_name]
+                    if os.path.isabs(template_path) and os.path.exists(template_path):
+                        try:
+                            os.remove(template_path)
+                        except Exception as e:
+                            logger.warning(f"Could not delete template file {template_path}: {e}")
+
+                # Remove from config
+                if 'templates' in self.config and template_name in self.config['templates']:
+                    del self.config['templates'][template_name]
+
+                # Remove from UI
+                row = self.templates_list.row(current_item)
+                self.templates_list.takeItem(row)
+
+                # Clear the template editor if this was the selected template
+                if hasattr(self, 'current_sequence_widget'):
+                    self.current_sequence_widget.deleteLater()
+                    del self.current_sequence_widget
+                if hasattr(self, 'sequence_editor_widget'):
+                    del self.sequence_editor_widget
                 
-            name = name.strip()
-            if not name:
-                print("DEBUG: Empty name provided")  # Debug print
-                QMessageBox.warning(self, "Error", "Sequence name cannot be empty")
-                return
-            
-            print(f"DEBUG: Processing name: {name}")  # Debug print
-            
-            # Check if name already exists
-            existing_sequences = []
-            for seq in self.config.get('sequences', []):
-                if isinstance(seq, dict):
-                    existing_sequences.append(seq.get('name', ''))
-            
-            print(f"DEBUG: Existing sequences: {existing_sequences}")  # Debug print
-            
-            # Check if name already exists in sequences
-            if name in existing_sequences:
-                print(f"DEBUG: Name already exists: {name}")  # Debug print
-                QMessageBox.warning(self, "Error", f"A sequence named '{name}' already exists.")
-                return
-            
-            # Create new sequence with default loop settings
-            new_sequence = {
-                'name': name,
-                'steps': [],
-                'loop': False,
-                'loop_count': 1
-            }
-            
-            # Add to config
-            self.config['sequences'].append(new_sequence)
-            
-            # Update UI
-            print("DEBUG: Updating UI")  # Debug print
-            if not hasattr(self, 'sequences_list'):
-                print("DEBUG: sequences_list not found, initializing")  # Debug print
-                self.sequences_list = QListWidget()
+                # Save the configuration
+                self.save_config()
+                self.statusBar().showMessage(f"Template '{template_name}' deleted")
                 
-            self.sequences_list.addItem(name)
-            self.sequences_list.setCurrentRow(self.sequences_list.count() - 1)
-            
-            # Save the config
-            print("DEBUG: Saving config")  # Debug print
-            if not self.save_config():
-                print("DEBUG: Failed to save config")  # Debug print
-                QMessageBox.warning(self, "Error", "Failed to save configuration.")
-                
-            print(f"DEBUG: Successfully added sequence: {name}")  # Debug print
-                
-        except Exception as e:
-            import traceback
-            error_msg = f"Error in add_sequence: {str(e)}\n\n{traceback.format_exc()}"
-            print(f"ERROR: {error_msg}")  # Debug print
-            QMessageBox.critical(self, "Error", f"Failed to add sequence: {str(e)}\n\n{error_msg}")
+                # Update the preview window if it exists
+                if hasattr(self, 'preview_window') and self.preview_window:
+                    self.preview_window.load_templates()
+                    
+            except Exception as e:
+                logger.error(f"Error deleting template: {e}")
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    f"Failed to delete template: {str(e)}",
+                    QMessageBox.StandardButton.Ok
+                )
     
     def on_template_selected(self, current, previous):
         """Handle template selection change."""
@@ -2580,10 +3049,18 @@ class MainWindow(QMainWindow):
             
         return False
     
+    def on_sequence_selection_changed(self, current, previous):
+        """Handle sequence selection change to update button states."""
+        has_selection = current is not None
+        self.remove_sequence_btn.setEnabled(has_selection)
+        self.rename_sequence_btn.setEnabled(has_selection)
+        self.copy_sequence_btn.setEnabled(has_selection)
+        
+        # Call the original selection handler
+        self.on_sequence_selected(current, previous)
+    
     def on_sequence_selected(self, current, previous):
         """Handle sequence selection change."""
-        # Enable/disable remove button based on selection
-        self.remove_sequence_btn.setEnabled(current is not None)
         
         if not current:
             return

@@ -5,16 +5,17 @@ A powerful automation tool that uses image detection to perform sequences of act
 ## Features
 
 - **Image Detection**: Find and interact with images on screen
-- **Sequence Editor**: Create and manage sequences of actions
+- **Sequence Editor**: Create/copy/delete/rename and manage sequences of actions
 - **Template Management**: Capture and manage image templates
-- **Mouse Movement Control**: 
-  - Curved mouse movement
-  - Speed variation
-  - Customizable control points
+- **Mouse Control**: 
+  - Precise mouse movement and clicking
+  - Support for left/right/middle mouse buttons
+  - Configurable click intervals
 - **Failsafe System**: Jump to specific steps when certain images are detected
 - **Loop Support**: Run sequences multiple times
 - **Search Region**: Limit image detection to specific screen areas
 - **Configuration Management**: Save and load different configurations
+- **Error Handling**: Comprehensive logging and error recovery
 
 ## Requirements
 
@@ -84,78 +85,34 @@ The application saves configurations in JSON format, including:
 - Global settings
 - Search regions
 
-## Mouse Movement Settings Explained
+## Mouse Control
 
-The mouse movement settings allow you to customize how the bot moves the mouse cursor. These settings can be configured globally in the Mouse Movement tab or per-action in the sequence editor.
+The bot provides precise control over mouse movements and clicks with the following features:
 
-### Curved Movement
-- **Enabled**: Mouse follows a curved path instead of a straight line
-- **Disabled**: Mouse moves in a straight line to the target
-- **Effect**: More natural-looking movement that mimics human behavior
+### Movement
+- **Linear Movement**: Direct path to target coordinates
+- **Random Region Targeting**: Option to click within a specified region
+- **Speed Control**: Configurable movement duration
 
-### Control Points
-- **Minimum Control Point** (0.0 - 1.0)
-  - Lower values (e.g., 0.1): Curve starts closer to the starting point
-  - Higher values (e.g., 0.4): Curve starts further from the starting point
-  - Default: 0.2
-- **Maximum Control Point** (0.0 - 1.0)
-  - Lower values (e.g., 0.6): Curve ends closer to the target
-  - Higher values (e.g., 0.9): Curve ends further from the target
-  - Default: 0.8
-- **Effect**: Controls the shape of the curved path
-  - Closer control points = tighter curve
-  - Further control points = wider curve
+### Click Actions
+- **Button Support**: Left, Right, and Middle mouse buttons
+- **Multiple Clicks**: Support for single or multiple clicks
+- **Click Intervals**: Configurable delay between multiple clicks
+- **Click Verification**: Confirms successful click execution
 
-### Speed Variation
-- **Range**: 0.0 - 1.0
-- **0.0**: Constant speed throughout the movement
-- **0.5**: Moderate speed variation
-- **1.0**: Maximum speed variation
-- **Effect**: 
-  - Lower values: More consistent, robotic movement
-  - Higher values: More natural, human-like movement with acceleration/deceleration
-
-### Steps per Second
-- **Range**: 10 - 120
-- **Lower values** (e.g., 20):
-  - Fewer points in the movement path
-  - More noticeable "steps"
-  - Faster overall movement
-- **Higher values** (e.g., 60):
-  - More points in the movement path
-  - Smoother movement
-  - Slightly slower overall movement
-- **Default**: 60
-- **Effect**: Controls the smoothness vs. speed trade-off
-
-### Example Configurations
-
-1. **Natural Movement**:
-   - Curved Movement: Enabled
-   - Min Control: 0.2
-   - Max Control: 0.8
-   - Speed Variation: 0.7
-   - Steps per Second: 60
-
-2. **Fast and Direct**:
-   - Curved Movement: Disabled
-   - Speed Variation: 0.0
-   - Steps per Second: 30
-
-3. **Very Natural**:
-   - Curved Movement: Enabled
-   - Min Control: 0.3
-   - Max Control: 0.7
-   - Speed Variation: 0.9
-   - Steps per Second: 90
+### Error Handling
+- **Position Validation**: Ensures target coordinates are within screen bounds
+- **Movement Verification**: Confirms mouse reached target position
+- **Detailed Logging**: Comprehensive error messages for troubleshooting
 
 ## Tips
 
 - Use the search region feature to limit image detection to specific areas
-- Enable curved mouse movement for more natural-looking automation
+- Adjust the confidence threshold for template matching to balance between accuracy and speed
+- Use the random region feature for more natural clicking behavior
 - Set up failsafes to handle unexpected situations
-- Use the confidence setting to adjust template matching sensitivity
 - Save your configurations regularly
+- Check the logs for detailed information about bot operations
 
 ## Troubleshooting
 
