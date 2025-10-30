@@ -52,6 +52,13 @@ class Action:
     region: Optional[List[int]] = None
     random: bool = False
     random_region: Optional[List[int]] = None
+    
+    def __str__(self) -> str:
+        attrs = []
+        for k, v in self.__dict__.items():
+            if v is not None and not k.startswith('_'):
+                attrs.append(f"{k}={v}")
+        return f"Action({', '.join(attrs)})"
     duration: float = 0.0
 
 class ImageDetectionBot:
@@ -371,25 +378,16 @@ class ImageDetectionBot:
         Click at the specified coordinates.
         
         Args:
-            x: X coordinate to click
-            y: Y coordinate to click
-            button: Mouse button to click ('left', 'right', 'middle')
-            clicks: Number of clicks to perform
-            interval: Time in seconds between clicks if multiple clicks
+            x: X coordinate
+            y: Y coordinate
+            button: Mouse button to click ('left', 'middle', 'right')
+            clicks: Number of clicks
+            interval: Time between clicks in seconds
             
         Returns:
             bool: True if click was successful, False otherwise
         """
         try:
-            # Validate button
-            button = button.lower()
-            if button not in ('left', 'right', 'middle'):
-                logger.warning(f"Invalid button '{button}'. Using 'left' instead.")
-                button = 'left'
-                
-            # Ensure clicks is at least 1
-            clicks = max(1, int(clicks))
-            
             # Move to the position first
             if not self.move_to(x, y, duration=0.1):
                 logger.error(f"Failed to move to click position: ({x}, {y})")
@@ -410,6 +408,32 @@ class ImageDetectionBot:
         except Exception as e:
             logger.error(f"Error in click_at: {str(e)}")
             return False
+            
+    def right_click_at(self, x: int, y: int) -> bool:
+        """
+        Right click at the specified coordinates.
+        
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            
+        Returns:
+            bool: True if right click was successful, False otherwise
+        """
+        return self.click_at(x, y, button='right')
+        
+    def double_click_at(self, x: int, y: int) -> bool:
+        """
+        Double click at the specified coordinates.
+        
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            
+        Returns:
+            bool: True if double click was successful, False otherwise
+        """
+        return self.click_at(x, y, clicks=2)
     
     def wait(self, seconds: float) -> None:
         """Wait for the specified number of seconds."""
@@ -452,114 +476,77 @@ class ImageDetectionBot:
         Returns:
             bool: True if the action was executed successfully, False otherwise
         """
-        if position is None:
-            if self.current_position is None:
-                logger.error("No position provided and no current position set")
-                return False
-            position = self.current_position
-            
-        x, y = position
-        
-        # If this is a click action and a region is specified, pick a random point in the region
-        if action.type == ActionType.CLICK and hasattr(action, 'region') and action.region:
-            region = action.region
-            if isinstance(region, (list, tuple)) and len(region) == 4:
-                x = random.randint(region[0], region[0] + region[2] - 1)
-                y = random.randint(region[1], region[1] + region[3] - 1)
-                try:
-                    self.click_at(x, y, button=action.button, clicks=action.clicks)
-                    return True
-                except Exception as e:
-                    logger.error(f"Error executing random region click: {str(e)}")
-                    return False
-        # If this is a move_to action and random is set, move to a random point in the region
-        if action.type == ActionType.MOVE_TO and getattr(action, 'random', False) and hasattr(action, 'random_region') and action.random_region:
-            region = action.random_region
-            if isinstance(region, (list, tuple)) and len(region) == 4:
-                x = random.randint(region[0], region[0] + region[2] - 1)
-                y = random.randint(region[1], region[1] + region[3] - 1)
-                try:
-                    self.move_to(x, y, duration=action.duration)
-                    return True
-                except Exception as e:
-                    logger.error(f"Error executing random region move_to: {str(e)}")
-                    return False
-        
         try:
+            # Get current position if available
+            if position is None:
+                if hasattr(self, 'current_position') and self.current_position:
+                    position = self.current_position
+                else:
+                    logger.error("No position provided and no current position available")
+                    return False
+            
+            x, y = position
+            
+            # Handle different action types
             if action.type == ActionType.CLICK:
-                # Ensure button attribute exists and is valid
                 button = getattr(action, 'button', 'left')
                 clicks = getattr(action, 'clicks', 1)
-                self.click_at(x, y, button=button, clicks=clicks)
-                
-            elif action.type == ActionType.MOVE:
-                self.move_to(x, y, duration=getattr(action, 'duration', 0.0))
-                
-            elif action.type == ActionType.MOVE_TO:
-                self.move_to(x, y, duration=getattr(action, 'duration', 0.0))
+                return self.click_at(x, y, button=button, clicks=clicks)
                 
             elif action.type == ActionType.RIGHT_CLICK:
-                self.right_click_at(x, y)
+                return self.right_click_at(x, y)
                 
             elif action.type == ActionType.DOUBLE_CLICK:
-                self.double_click_at(x, y)
+                return self.double_click_at(x, y)
+                
+            elif action.type == ActionType.SCROLL:
+                pixels = getattr(action, 'pixels', 0)
+                self.scroll(pixels)
+                return True
+                
+            elif action.type == ActionType.WAIT:
+                seconds = getattr(action, 'seconds', 1.0)
+                self.wait(seconds)
+                return True
                 
             elif action.type == ActionType.TYPE:
                 text = getattr(action, 'text', '')
                 if text:
                     self.type_text(text)
-                else:
-                    logger.warning("No text provided for TYPE action")
-                    return False
-                    
+                    return True
+                logger.warning("No text provided for TYPE action")
+                return False
+                
             elif action.type == ActionType.KEY_PRESS:
                 key = getattr(action, 'key', None)
                 if key:
                     self.press_key(key)
-                else:
-                    logger.warning("No key provided for KEY_PRESS action")
-                    return False
-                    
-            elif action.type == ActionType.WAIT:
-                seconds = getattr(action, 'seconds', 1.0)
-                self.wait(seconds)
-                
-            elif action.type == ActionType.SCROLL:
-                pixels = getattr(action, 'pixels', 0)
-                self.scroll(pixels)
-                
-            elif action.type == ActionType.CLICK_AND_HOLD:
-                try:
-                    if self.current_position is None:
-                        logger.error("No current position set for CLICK_AND_HOLD")
-                        return False
-                        
-                    x, y = self.current_position
-                    duration = getattr(action, 'duration', 1.0)
-                    button = getattr(action, 'button', 'left')
-                    
-                    logger.info(f"Executing CLICK_AND_HOLD at current position: ({x}, {y}) for {duration} seconds")
-                    
-                    # Move to the position first
-                    self.move_to(x, y, duration=0.1)
-                    
-                    # Perform the click and hold
-                    pyautogui.mouseDown(button=button)
-                    time.sleep(duration)
-                    pyautogui.mouseUp(button=button)
-                    
                     return True
-                except Exception as e:
-                    logger.error(f"Error in CLICK_AND_HOLD: {str(e)}")
-                    return False
-            else:
-                logger.error(f"Unsupported action type: {action.type}")
+                logger.warning("No key provided for KEY_PRESS action")
                 return False
                 
-            return True
+            elif action.type == ActionType.CLICK_AND_HOLD:
+                duration = getattr(action, 'duration', 1.0)
+                button = getattr(action, 'button', 'left')
+                
+                logger.info(f"Executing CLICK_AND_HOLD at position: ({x}, {y}) for {duration} seconds")
+                
+                # Move to the position first
+                if not self.move_to(x, y, duration=0.1):
+                    return False
+                
+                # Perform the click and hold
+                pyautogui.mouseDown(button=button)
+                time.sleep(duration)
+                pyautogui.mouseUp(button=button)
+                
+                return True
+                
+            logger.error(f"Unsupported action type: {action.type}")
+            return False
             
         except Exception as e:
-            logger.error(f"Error executing action {action.type.value}: {str(e)}")
+            logger.error(f"Error executing action {getattr(action, 'type', 'UNKNOWN')}: {str(e)}")
             return False
             
     def execute_action(self, action: Action) -> bool:
@@ -573,26 +560,56 @@ class ImageDetectionBot:
             bool: True if action was executed successfully, False otherwise
         """
         try:
-            if action.type == ActionType.MOVE and action.x is not None and action.y is not None:
-                # For MOVE action with absolute coordinates
+            # Get current position if available
+            current_pos = getattr(self, 'current_position', None)
+            
+            # Handle MOVE actions
+            if action.type == ActionType.MOVE:
                 if getattr(action, 'random', False) and hasattr(action, 'random_region') and action.random_region:
                     region = action.random_region
                     if isinstance(region, (list, tuple)) and len(region) == 4:
                         x = random.randint(region[0], region[0] + region[2] - 1)
                         y = random.randint(region[1], region[1] + region[3] - 1)
-                        pyautogui.moveTo(x, y, duration=action.duration)
-                        return True
+                        result = self.move_to(x, y, duration=getattr(action, 'duration', 0.0), random_region=region)
+                        if result:
+                            self.current_position = (x, y)
+                        return result
+                elif hasattr(action, 'x') and hasattr(action, 'y'):
+                    result = self.move_to(action.x, action.y, duration=getattr(action, 'duration', 0.0))
+                    if result:
+                        self.current_position = (action.x, action.y)
+                    return result
                 else:
-                    pyautogui.moveTo(action.x, action.y, duration=action.duration)
-                    return True
-            elif action.type == ActionType.CLICK_AND_HOLD:
-                # Allow click_and_hold to be executed directly, using current mouse position
-                return self.execute_action_at_position(action, self.current_position)
-            else:
-                # For other actions, use execute_action_at_position with current position
-                return self.execute_action_at_position(action, self.current_position)
+                    logger.error("MOVE action requires either random_region or x and y coordinates")
+                    return False
+            
+            # For click actions, ensure we have a position
+            if action.type in [ActionType.CLICK, ActionType.RIGHT_CLICK, ActionType.DOUBLE_CLICK, ActionType.CLICK_AND_HOLD]:
+                x = getattr(action, 'x', None)
+                y = getattr(action, 'y', None)
+                
+                if x is None or y is None:
+                    if current_pos:
+                        x, y = current_pos
+                        # Create a new action with the position
+                        new_action = Action(
+                            type=action.type,
+                            x=x,
+                            y=y,
+                            button=getattr(action, 'button', 'left'),
+                            clicks=getattr(action, 'clicks', 1),
+                            duration=getattr(action, 'duration', 0.0)
+                        )
+                        return self.execute_action_at_position(new_action, (x, y))
+                    else:
+                        logger.error(f"No position available for {action.type} action")
+                        return False
+            
+            # Execute the action with its own position handling
+            return self.execute_action_at_position(action)
+            
         except Exception as e:
-            logger.error(f"Error executing {action.type.value if hasattr(action.type, 'value') else action.type} action: {str(e)}")
+            logger.error(f"Error in execute_action: {str(e)}")
             return False
             
     def execute_actions(self, actions: List[Action]) -> bool:
@@ -600,14 +617,61 @@ class ImageDetectionBot:
         Execute a list of actions.
         
         Args:
-            actions: List of actions to execute
+            actions: List of Action objects to execute
             
         Returns:
             bool: True if all actions were executed successfully, False otherwise
         """
+        # Initialize with current position if available
+        last_position = getattr(self, 'current_position', None)
+        
         for action in actions:
+            # Create a copy of action data to avoid modifying the original
+            action_data = action.__dict__.copy()
+            
+            # Handle MOVE with random region first
+            if action.type == ActionType.MOVE and action_data.get('random') and action_data.get('random_region'):
+                region = action_data['random_region']
+                if isinstance(region, (list, tuple)) and len(region) == 4:
+                    x = random.randint(region[0], region[0] + region[2] - 1)
+                    y = random.randint(region[1], region[1] + region[3] - 1)
+                    if not self.move_to(x, y, duration=action_data.get('duration', 0.0)):
+                        return False
+                    last_position = (x, y)
+                    self.current_position = last_position
+                    continue
+            # Handle regular MOVE
+            elif action.type == ActionType.MOVE and 'x' in action_data and 'y' in action_data:
+                if not self.move_to(action_data['x'], action_data['y'], duration=action_data.get('duration', 0.0)):
+                    return False
+                last_position = (action_data['x'], action_data['y'])
+                self.current_position = last_position
+                continue
+                
+            # For click actions, ensure we have a position
+            if action.type in [ActionType.CLICK, ActionType.RIGHT_CLICK, ActionType.DOUBLE_CLICK]:
+                if last_position is None:
+                    logger.error(f"No position available for {action.type} action")
+                    return False
+                    
+                # Create a new action with position
+                new_action = Action(
+                    type=action.type,
+                    x=last_position[0],
+                    y=last_position[1],
+                    button=action_data.get('button', 'left'),
+                    clicks=action_data.get('clicks', 1)
+                )
+                
+                # Execute the new action with position
+                if not self.execute_action(new_action):
+                    return False
+                continue
+                
+            # Execute other actions normally
             if not self.execute_action(action):
                 return False
+                
         return True
     
     def scroll(self, pixels: int) -> None:
@@ -634,11 +698,16 @@ def load_config(config_path: str) -> dict:
 def parse_action(action_dict: Dict[str, Any]) -> Action:
     """Parse action dictionary into Action object."""
     try:
+        logger.debug(f"Parsing action data: {action_dict}")
         action_type = ActionType(action_dict['type'])
         action_args = {k: v for k, v in action_dict.items() if k != 'type'}
-        return Action(type=action_type, **action_args)
+        logger.debug(f"Creating action with type={action_type}, args={action_args}")
+        action = Action(type=action_type, **action_args)
+        logger.debug(f"Created action: {action}")
+        return action
     except (KeyError, ValueError) as e:
         logger.error(f"Error parsing action: {str(e)}")
+        logger.error(f"Action data: {action_dict}")
         raise
 
 def execute_sequence(bot: ImageDetectionBot, sequence: Dict[str, Any]) -> bool:
@@ -694,7 +763,18 @@ def execute_sequence(bot: ImageDetectionBot, sequence: Dict[str, Any]) -> bool:
             for action in actions:
                 # Handle MOVE action first to update the last position
                 if action.type == ActionType.MOVE:
-                    if action.x is not None and action.y is not None:
+                    if getattr(action, 'random', False) and hasattr(action, 'random_region') and action.random_region:
+                        # Use random region for movement
+                        region = action.random_region
+                        if isinstance(region, (list, tuple)) and len(region) == 4:
+                            x = random.randint(region[0], region[0] + region[2] - 1)
+                            y = random.randint(region[1], region[1] + region[3] - 1)
+                            bot.move_to(x, y, duration=action.duration, random_region=region)
+                            last_move_position = (x, y)
+                            position = last_move_position
+                            continue
+                    elif action.x is not None and action.y is not None:
+                        # Use direct coordinates
                         bot.move_to(action.x, action.y, duration=action.duration)
                         last_move_position = (action.x, action.y)
                         position = last_move_position  # Keep this for backward compatibility

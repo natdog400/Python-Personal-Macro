@@ -701,10 +701,14 @@ class ActionEditor(QWidget):
         # Action type
         self.type_combo = QComboBox()
         # Add action types directly as strings to match ActionType enum values
-        action_types = ["click", "move", "move_to", "right_click", "double_click", "type", "key_press", "wait", "scroll", "click_and_hold"]
+        # Removed 'move_to' as it's redundant with 'move'
+        action_types = ["click", "move", "right_click", "double_click", "type", "key_press", "wait", "scroll", "click_and_hold"]
         self.type_combo.addItems(action_types)
         if "type" in self.action_data:
             action_type = self.action_data["type"]
+            # If the action type is 'move_to', convert it to 'move' for backward compatibility
+            if action_type == "move_to":
+                action_type = "move"
             self.type_combo.setCurrentText(action_type)
         
         # Action parameters
@@ -780,33 +784,18 @@ class ActionEditor(QWidget):
                 lambda value, key="seconds": self.update_action_param(key, value))
             self.params_layout.addWidget(seconds_spin)
             
-        elif action_type in ["move", "move_to"]:
-            # Add X coordinate
-            self.params_layout.addWidget(QLabel("X:"))
-            x_spin = QSpinBox()
-            x_spin.setRange(0, 10000)
-            x_spin.setValue(self.action_data.get("x", 0))
-            x_spin.valueChanged.connect(
-                lambda value, key="x": self.update_action_param(key, value))
-            self.params_layout.addWidget(x_spin)
-            
-            # Add Y coordinate
-            self.params_layout.addWidget(QLabel("Y:"))
-            y_spin = QSpinBox()
-            y_spin.setRange(0, 10000)
-            y_spin.setValue(self.action_data.get("y", 0))
-            y_spin.valueChanged.connect(
-                lambda value, key="y": self.update_action_param(key, value))
-            self.params_layout.addWidget(y_spin)
-            
-            # Toggle random checkbox
-            self.random_checkbox = QCheckBox("Toggle Random")
-            self.random_checkbox.setChecked(self.action_data.get("random", False))
-            self.random_checkbox.toggled.connect(lambda checked: self.update_action_param("random", checked) or self.update_params())
+        elif action_type == "move":
+            # Toggle random checkbox - moved to top
+            self.random_checkbox = QCheckBox("Random Position in Region")
+            is_random = self.action_data.get("random", False)
+            self.random_checkbox.setChecked(is_random)
+            self.random_checkbox.toggled.connect(
+                lambda checked: self.update_action_param("random", checked) or self.update_params()
+            )
             self.params_layout.addWidget(self.random_checkbox)
 
-            # If random is checked, allow region selection
-            if self.action_data.get("random", False):
+            # If random is checked, show region selection
+            if is_random:
                 region_btn = QPushButton("Select Region")
                 region_btn.clicked.connect(self.select_random_region)
                 self.params_layout.addWidget(region_btn)
@@ -814,9 +803,26 @@ class ActionEditor(QWidget):
                 self.params_layout.addWidget(self.random_region_label)
                 self.update_random_region_label()
             else:
-                # Show info
-                info_label = QLabel("Moves to center of detected template")
-                self.params_layout.addWidget(info_label)
+                # Only show X/Y inputs when not using random region
+                self.params_layout.addWidget(QLabel("X:"))
+                x_spin = QSpinBox()
+                x_spin.setRange(0, 10000)
+                x_spin.setValue(self.action_data.get("x", 0))
+                x_spin.valueChanged.connect(
+                    lambda value, key="x": self.update_action_param(key, value))
+                self.params_layout.addWidget(x_spin)
+                
+                self.params_layout.addWidget(QLabel("Y:"))
+                y_spin = QSpinBox()
+                y_spin.setRange(0, 10000)
+                y_spin.setValue(self.action_data.get("y", 0))
+                y_spin.valueChanged.connect(
+                    lambda value, key="y": self.update_action_param(key, value))
+                self.params_layout.addWidget(y_spin)
+            
+            # Add info label
+            info_label = QLabel("Moves to specified position" if not is_random else "Moves to random position in selected region")
+            self.params_layout.addWidget(info_label)
 
             # Duration
             self.params_layout.addWidget(QLabel("Duration (s):"))
@@ -859,11 +865,30 @@ class ActionEditor(QWidget):
     
     def update_action_param(self, key: str, value: Any):
         self.action_data[key] = value
+        # If we're updating the random checkbox, update the UI
+        if key == 'random':
+            self.update_params()
     
     def get_action_data(self) -> dict:
-        action_type = self.type_combo.currentText()
-        self.action_data["type"] = action_type
-        return self.action_data
+        # Create a new dictionary to avoid modifying the original
+        result = self.action_data.copy()
+        
+        # Always include the action type
+        result["type"] = self.type_combo.currentText()
+        
+        # If we have a random region in the UI, include it
+        if hasattr(self, 'random_region_label') and hasattr(self, 'action_data'):
+            if 'random_region' in self.action_data:
+                result['random_region'] = self.action_data['random_region']
+            elif hasattr(self, 'random_region'):
+                result['random_region'] = getattr(self, 'random_region', None)
+        
+        # Always include the random flag if it's set
+        if 'random' in self.action_data:
+            result['random'] = self.action_data['random']
+            
+        logger.debug(f"Action data being saved: {result}")
+        return result
     
     def remove_self(self):
         # Try to find the parent StepEditor that has the remove_action method
@@ -898,7 +923,10 @@ class ActionEditor(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             rect = dialog.get_capture_rect()
             if rect and rect.isValid():
+                self.action_data["random"] = True  # Ensure random is enabled
                 self.action_data["random_region"] = [rect.x(), rect.y(), rect.width(), rect.height()]
+                if hasattr(self, 'random_checkbox') and not self.random_checkbox.isChecked():
+                    self.random_checkbox.setChecked(True)
                 self.update_random_region_label()
             else:
                 self.action_data.pop("random_region", None)
@@ -1061,6 +1089,10 @@ class StepEditor(QGroupBox):
         btn_layout.setContentsMargins(5, 5, 5, 5)
         
         for action_type in ActionType:
+            # Skip MOVE_TO as it's redundant with MOVE
+            if action_type == ActionType.MOVE_TO:
+                continue
+                
             btn = QPushButton(f"Add {action_type.value}")
             btn.clicked.connect(
                 lambda checked, at=action_type.value: self.add_action({"type": at}))
