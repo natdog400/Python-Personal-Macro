@@ -13,10 +13,10 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QGroupBox, QScrollArea, QSplitter, QFrame, QSizePolicy, QToolBar, 
                             QStatusBar, QDialog, QFormLayout, QListWidgetItem, QInputDialog, QMenu,
                             QDialogButtonBox, QMenuBar, QTableWidget, QTableWidgetItem,
-                            QHeaderView, QAbstractItemView, QTabWidget, QGridLayout, QSlider)
-from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QThread, QObject, QPoint, QRect, QEvent, QDateTime
+                            QHeaderView, QAbstractItemView, QTabWidget, QGridLayout, QSlider, QLayout)
+from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QThread, QObject, QPoint, QRect, QEvent, QDateTime, QMimeData
 from PyQt6.QtGui import (QAction, QIcon, QPixmap, QImage, QPainter, QPen, QColor, 
-                        QScreen, QGuiApplication, QKeySequence, QShortcut, QKeyEvent)
+                        QScreen, QGuiApplication, QKeySequence, QShortcut, QKeyEvent, QDrag)
 import pyautogui
 import numpy as np
 from PIL import ImageGrab, Image
@@ -688,12 +688,124 @@ class TemplatePreview(QWidget):
             "path": self.path_edit.text()
         }
 
-class ActionEditor(QWidget):
+class ActionEditor(QFrame):
     """Widget to edit a single action in a step."""
+    remove_requested = pyqtSignal()
+    
     def __init__(self, action_data: Optional[dict] = None, parent=None):
         super().__init__(parent)
         self.action_data = action_data or {"type": "click"}
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet("""
+            ActionEditor {
+                background: #3a3a3a;
+                border: 1px solid #4a4a4a;
+                border-radius: 4px;
+                padding: 8px;
+                margin: 2px 0;
+            }
+            ActionEditor QLabel {
+                color: #ffffff;
+                padding: 2px 0;
+            }
+            ActionEditor QComboBox, ActionEditor QLineEdit, 
+            ActionEditor QSpinBox, ActionEditor QDoubleSpinBox {
+                background: #2a2a2a;
+                color: #ffffff;
+                border: 1px solid #4a4a4a;
+                padding: 4px;
+                border-radius: 3px;
+                min-width: 80px;
+            }
+            ActionEditor QPushButton {
+                background: #4a4a4a;
+                color: #ffffff;
+                border: 1px solid #5a5a5a;
+                padding: 4px 8px;
+                border-radius: 3px;
+            }
+            ActionEditor QPushButton:hover {
+                background: #5a5a5a;
+                border-color: #6a6a6a;
+            }
+            ActionEditor QCheckBox {
+                color: #ffffff;
+                spacing: 5px;
+            }
+            ActionEditor:hover {
+                border: 1px solid #4a9ff5;
+                background: #3f3f3f;
+            }
+        """)
+        self.setMinimumHeight(40)
+        self.setAcceptDrops(True)
         self.init_ui()
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_start_position = event.pos()
+        super().mousePressEvent(event)
+        
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+            
+        if (event.pos() - self.drag_start_position).manhattanLength() < QApplication.startDragDistance():
+            return
+            
+        # Create the drag object
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        
+        # Store the widget's index in the parent's layout
+        if hasattr(self, 'step_editor'):
+            index = self.step_editor.action_widgets.index(self)
+            mime_data.setText(str(index))
+            drag.setMimeData(mime_data)
+            
+            # Start the drag operation
+            drag.exec(Qt.DropAction.MoveAction)
+        
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+            
+    def dropEvent(self, event):
+        if not event.mimeData().hasText():
+            return
+            
+        source_index = int(event.mimeData().text())
+        target_index = self.step_editor.action_widgets.index(self)
+        
+        # Don't drop on self
+        if source_index == target_index:
+            return
+            
+        # Get the source widget
+        source_widget = self.step_editor.action_widgets[source_index]
+        
+        # Remove from current position
+        self.step_editor.action_widgets.pop(source_index)
+        
+        # Insert at new position
+        if target_index > source_index:
+            target_index -= 1
+            
+        self.step_editor.action_widgets.insert(target_index, source_widget)
+        
+        # Rebuild the layout
+        for i in reversed(range(self.step_editor.actions_layout.count())):
+            widget = self.step_editor.actions_layout.itemAt(i).widget()
+            if widget and widget != source_widget:  # Don't remove the source widget yet
+                widget.setParent(None)
+                
+        # Re-add all widgets in new order
+        for i, widget in enumerate(self.step_editor.action_widgets):
+            self.step_editor.actions_layout.insertWidget(i, widget)
+            
+        # Ensure the source widget is visible
+        source_widget.show()
+        event.acceptProposedAction()
     
     def init_ui(self):
         layout = QHBoxLayout()
@@ -732,60 +844,35 @@ class ActionEditor(QWidget):
         self.setLayout(layout)
     
     def update_params(self):
-        # Clear existing params
-        while self.params_layout.count():
+        # Clear previous parameters
+        while self.params_layout.count() > 0:
             item = self.params_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         
         action_type = self.type_combo.currentText()
         
-        # Add appropriate parameter controls based on action type
-        if action_type == "click":
+        if action_type in ["click", "right_click", "double_click"]:
+            # Add button type selector
             self.params_layout.addWidget(QLabel("Button:"))
             button_combo = QComboBox()
             button_combo.addItems(["left", "middle", "right"])
             button_combo.setCurrentText(self.action_data.get("button", "left"))
             button_combo.currentTextChanged.connect(
-                lambda text, key="button": self.update_action_param(key, text))
+                lambda text, k="button": self.update_action_param(k, text))
             self.params_layout.addWidget(button_combo)
             
+            # Add click count selector
             self.params_layout.addWidget(QLabel("Clicks:"))
             clicks_spin = QSpinBox()
             clicks_spin.setRange(1, 10)
             clicks_spin.setValue(self.action_data.get("clicks", 1))
             clicks_spin.valueChanged.connect(
-                lambda value, key="clicks": self.update_action_param(key, value))
+                lambda value, k="clicks": self.update_action_param(k, value))
             self.params_layout.addWidget(clicks_spin)
-
-            # --- Region selection for random click ---
-            region_btn = QPushButton("Select Region")
-            region_btn.clicked.connect(self.select_region)
-            self.params_layout.addWidget(region_btn)
-            self.region_label = QLabel()
-            self.params_layout.addWidget(self.region_label)
-            self.update_region_label()
-            
-        elif action_type in ["type", "key_press"]:
-            param_name = "text" if action_type == "type" else "key"
-            self.params_layout.addWidget(QLabel(f"{param_name.title()}: "))
-            text_edit = QLineEdit(self.action_data.get(param_name, ""))
-            text_edit.textChanged.connect(
-                lambda text, key=param_name: self.update_action_param(key, text))
-            self.params_layout.addWidget(text_edit)
-            
-        elif action_type == "wait":
-            self.params_layout.addWidget(QLabel("Seconds:"))
-            seconds_spin = QDoubleSpinBox()
-            seconds_spin.setRange(0.1, 60.0)
-            seconds_spin.setValue(self.action_data.get("seconds", 1.0))
-            seconds_spin.setSingleStep(0.1)
-            seconds_spin.valueChanged.connect(
-                lambda value, key="seconds": self.update_action_param(key, value))
-            self.params_layout.addWidget(seconds_spin)
             
         elif action_type == "move":
-            # Toggle random checkbox - moved to top
+            # Toggle random checkbox
             self.random_checkbox = QCheckBox("Random Position in Region")
             is_random = self.action_data.get("random", False)
             self.random_checkbox.setChecked(is_random)
@@ -793,74 +880,87 @@ class ActionEditor(QWidget):
                 lambda checked: self.update_action_param("random", checked) or self.update_params()
             )
             self.params_layout.addWidget(self.random_checkbox)
-
-            # If random is checked, show region selection
+            
             if is_random:
+                # Add random region button and label
                 region_btn = QPushButton("Select Region")
                 region_btn.clicked.connect(self.select_random_region)
                 self.params_layout.addWidget(region_btn)
-                self.random_region_label = QLabel()
-                self.params_layout.addWidget(self.random_region_label)
-                self.update_random_region_label()
-            else:
-                # Only show X/Y inputs when not using random region
-                self.params_layout.addWidget(QLabel("X:"))
-                x_spin = QSpinBox()
-                x_spin.setRange(0, 10000)
-                x_spin.setValue(self.action_data.get("x", 0))
-                x_spin.valueChanged.connect(
-                    lambda value, key="x": self.update_action_param(key, value))
-                self.params_layout.addWidget(x_spin)
                 
-                self.params_layout.addWidget(QLabel("Y:"))
-                y_spin = QSpinBox()
-                y_spin.setRange(0, 10000)
-                y_spin.setValue(self.action_data.get("y", 0))
-                y_spin.valueChanged.connect(
-                    lambda value, key="y": self.update_action_param(key, value))
-                self.params_layout.addWidget(y_spin)
-            
-            # Add info label
-            info_label = QLabel("Moves to specified position" if not is_random else "Moves to random position in selected region")
-            self.params_layout.addWidget(info_label)
-
-            # Duration
-            self.params_layout.addWidget(QLabel("Duration (s):"))
-            duration_spin = QDoubleSpinBox()
-            duration_spin.setRange(0.0, 10.0)
-            duration_spin.setSingleStep(0.1)
-            duration_spin.setValue(self.action_data.get("duration", 0.0))
-            duration_spin.valueChanged.connect(
-                lambda value, key="duration": self.update_action_param(key, value))
-            self.params_layout.addWidget(duration_spin)
+                self.random_region_label = QLabel("Region: Not set")
+                self.update_random_region_label()
+                self.params_layout.addWidget(self.random_region_label)
+            else:
+                # Add X and Y coordinates
+                for coord in ["x", "y"]:
+                    self.params_layout.addWidget(QLabel(f"{coord.upper()}:"))
+                    spin = QSpinBox()
+                    spin.setRange(0, 9999)
+                    spin.setValue(self.action_data.get(coord, 0))
+                    spin.valueChanged.connect(
+                        lambda value, k=coord: self.update_action_param(k, value))
+                    self.params_layout.addWidget(spin)
         
+        elif action_type == "type":
+            # Add text input
+            text_edit = QLineEdit()
+            text_edit.setText(self.action_data.get("text", ""))
+            text_edit.textChanged.connect(
+                lambda text, k="text": self.update_action_param(k, text))
+            self.params_layout.addWidget(QLabel("Text:"))
+            self.params_layout.addWidget(text_edit)
+            
+        elif action_type == "key_press":
+            # Add key selector
+            key_edit = QLineEdit()
+            key_edit.setText(self.action_data.get("key", ""))
+            key_edit.setPlaceholderText("Press a key...")
+            key_edit.keyPressEvent = lambda e: (
+                key_edit.setText(QKeySequence(e.key()).toString()),
+                self.update_action_param("key", QKeySequence(e.key()).toString())
+            )
+            self.params_layout.addWidget(QLabel("Key:"))
+            self.params_layout.addWidget(key_edit)
+            
+        elif action_type == "wait":
+            # Add wait time selector
+            wait_spin = QDoubleSpinBox()
+            wait_spin.setRange(0.1, 60.0)
+            wait_spin.setValue(self.action_data.get("seconds", 1.0))
+            wait_spin.setSingleStep(0.1)
+            wait_spin.valueChanged.connect(
+                lambda value, k="seconds": self.update_action_param(k, value))
+            self.params_layout.addWidget(QLabel("Seconds:"))
+            self.params_layout.addWidget(wait_spin)
+            
         elif action_type == "scroll":
-            self.params_layout.addWidget(QLabel("Pixels:"))
-            pixels_spin = QSpinBox()
-            pixels_spin.setRange(-1000, 1000)
-            pixels_spin.setValue(self.action_data.get("pixels", 0))
-            pixels_spin.valueChanged.connect(
-                lambda value, key="pixels": self.update_action_param(key, value))
-            self.params_layout.addWidget(pixels_spin)
+            # Add scroll amount
+            scroll_spin = QSpinBox()
+            scroll_spin.setRange(-100, 100)
+            scroll_spin.setValue(self.action_data.get("clicks", 1))
+            scroll_spin.valueChanged.connect(
+                lambda value, k="clicks": self.update_action_param(k, value))
+            self.params_layout.addWidget(QLabel("Clicks:"))
+            self.params_layout.addWidget(scroll_spin)
+            
+            # Add direction
+            direction_combo = QComboBox()
+            direction_combo.addItems(["up", "down", "left", "right"])
+            direction_combo.setCurrentText(self.action_data.get("direction", "down"))
+            direction_combo.currentTextChanged.connect(
+                lambda text, k="direction": self.update_action_param(k, text))
+            self.params_layout.addWidget(QLabel("Direction:"))
+            self.params_layout.addWidget(direction_combo)
             
         elif action_type == "click_and_hold":
-            # Add button selection
-            self.params_layout.addWidget(QLabel("Button:"))
-            button_combo = QComboBox()
-            button_combo.addItems(["left", "middle", "right"])
-            button_combo.setCurrentText(self.action_data.get("button", "left"))
-            button_combo.currentTextChanged.connect(
-                lambda text, key="button": self.update_action_param(key, text))
-            self.params_layout.addWidget(button_combo)
-            
-            # Add duration control
-            self.params_layout.addWidget(QLabel("Hold for (s):"))
+            # Add duration
             duration_spin = QDoubleSpinBox()
             duration_spin.setRange(0.1, 60.0)
-            duration_spin.setSingleStep(0.1)
             duration_spin.setValue(self.action_data.get("duration", 1.0))
+            duration_spin.setSingleStep(0.1)
             duration_spin.valueChanged.connect(
-                lambda value, key="duration": self.update_action_param(key, value))
+                lambda value, k="duration": self.update_action_param(k, value))
+            self.params_layout.addWidget(QLabel("Duration (s):"))
             self.params_layout.addWidget(duration_spin)
     
     def update_action_param(self, key: str, value: Any):
@@ -1069,15 +1169,63 @@ class StepEditor(QGroupBox):
         actions_scroll = QScrollArea()
         actions_scroll.setWidgetResizable(True)
         actions_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        # Set minimum height to accommodate 5 actions (each action is ~30px tall)
-        actions_scroll.setMinimumHeight(150)  # 5 actions * 30px per action
+        actions_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        actions_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        actions_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        actions_scroll.setMinimumHeight(200)  # Ensure minimum height for the scroll area
         
-        # Container for action widgets
+        # Container for action widgets with drag and drop support
         self.actions_container = QWidget()
+        self.actions_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
         self.actions_layout = QVBoxLayout(self.actions_container)
-        self.actions_layout.setSpacing(5)
-        self.actions_layout.setContentsMargins(0, 0, 5, 0)
+        self.actions_layout.setSpacing(10)  # Increased spacing between actions
+        self.actions_layout.setContentsMargins(5, 5, 5, 5)
+        self.actions_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
+        
+        # Add a container widget for the actions (helps with layout management)
+        self.actions_inner_container = QWidget()
+        self.actions_inner_layout = QVBoxLayout(self.actions_inner_container)
+        self.actions_inner_layout.setSpacing(10)
+        self.actions_inner_layout.setContentsMargins(0, 0, 0, 0)
+        self.actions_inner_layout.addStretch()
+        
+        self.actions_layout.addWidget(self.actions_inner_container)
         self.actions_layout.addStretch()  # Add stretch to push actions to top
+        
+        # Enable drag and drop for the container
+        self.actions_container.setAcceptDrops(True)
+        self.actions_container.setStyleSheet("""
+            QWidget#actions_container {
+                background: #2a2a2a;
+                border: 1px dashed #4a4a4a;
+                border-radius: 4px;
+                min-height: 150px;
+                min-width: 300px;
+                padding: 5px;
+            }
+            QScrollArea {
+                border: none;
+                background: transparent;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #2a2a2a;
+                width: 10px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #4a4a4a;
+                min-height: 20px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #5a5a5a;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
+        self.actions_container.setObjectName("actions_container")
         
         actions_scroll.setWidget(self.actions_container)
         actions_layout.addWidget(actions_scroll)
@@ -1137,12 +1285,32 @@ class StepEditor(QGroupBox):
         if hasattr(self.parent_sequence, 'remove_step'):
             self.parent_sequence.remove_step(self)
     
-    def add_action(self, action_data: dict):
-        action_editor = ActionEditor(action_data, self)
-        # Insert before the stretch at the end
-        self.actions_layout.insertWidget(self.actions_layout.count() - 1, action_editor)
-        self.action_widgets.append(action_editor)
-        return action_editor
+    def add_action(self, action_data: dict, index: int = None):
+        """Add a new action to the step."""
+        action_widget = ActionEditor(action_data, self)
+        
+        # Make action widget draggable
+        action_widget.setAcceptDrops(True)
+        action_widget.drag_start_position = None
+        
+        # Set minimum height for the action editor
+        action_widget.setMinimumHeight(60)
+        
+        # Store reference to parent step editor
+        action_widget.step_editor = self
+        
+        # Add to widgets list
+        if index is not None:
+            self.action_widgets.insert(index, action_widget)
+        else:
+            self.action_widgets.append(action_widget)
+        
+        # Insert before the stretch at the end or at specified index
+        insert_pos = index if index is not None else (self.actions_layout.count() - 1)
+        self.actions_layout.insertWidget(insert_pos, action_widget)
+        
+        # Connect remove signal
+        action_widget.remove_requested.connect(self.remove_action)
     
     def remove_action(self, action_widget):
         if action_widget in self.action_widgets:
