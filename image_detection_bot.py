@@ -11,7 +11,6 @@ import logging
 from enum import Enum
 from dataclasses import dataclass, asdict
 import random
-import math
 
 # Configure logging
 logging.basicConfig(
@@ -38,28 +37,19 @@ class ActionType(Enum):
 
 @dataclass
 class Action:
-    """Represents a single action to be performed."""
     type: ActionType
-    x: Optional[int] = None
-    y: Optional[int] = None
-    button: str = 'left'
+    button: str = "left"
     clicks: int = 1
     text: Optional[str] = None
     key: Optional[str] = None
     seconds: float = 1.0
     pixels: int = 0
+    x: Optional[int] = None
+    y: Optional[int] = None
     duration: float = 0.0
-    region: Optional[List[int]] = None
+    region: Optional[Tuple[int, int, int, int]] = None
     random: bool = False
-    random_region: Optional[List[int]] = None
-    
-    def __str__(self) -> str:
-        attrs = []
-        for k, v in self.__dict__.items():
-            if v is not None and not k.startswith('_'):
-                attrs.append(f"{k}={v}")
-        return f"Action({', '.join(attrs)})"
-    duration: float = 0.0
+    random_region: Optional[Tuple[int, int, int, int]] = None
 
 class ImageDetectionBot:
     def __init__(self, confidence: float = 0.8):
@@ -72,9 +62,6 @@ class ImageDetectionBot:
         self.confidence = confidence
         self.templates: Dict[str, np.ndarray] = {}
         self.current_position: Optional[Tuple[int, int]] = None
-        self.use_curved_movement = False  # Add default value for movement type
-        # Dummy stop event that accepts any arguments but always returns False
-        self.stop_event = type('StopEvent', (), {'is_set': lambda *args, **kwargs: False})()
         
     def load_template(self, name: str, image_path: str) -> bool:
         """
@@ -126,28 +113,26 @@ class ImageDetectionBot:
             logger.error(error_msg, exc_info=True)
             return False
     
-    def find_on_screen(self, template_name: str, region: Optional[Tuple[int, int, int, int]] = None, 
-                      draw_matches: bool = False) -> Tuple[Optional[Tuple[int, int]], float, Optional[np.ndarray]]:
+    def find_on_screen(self, template_name: str, region: Optional[Tuple[int, int, int, int]] = None) -> Optional[Tuple[int, int]]:
         """
         Find a template on the screen.
         
         Args:
             template_name: Name of the loaded template to find
             region: Optional (x, y, width, height) region to search in
-            draw_matches: If True, returns the screenshot with matches drawn
             
         Returns:
-            Tuple containing:
-                - Tuple[int, int] or None: (x, y) coordinates of the center of the found image, or None if not found
-                - float: Confidence score (0.0 to 1.0)
-                - np.ndarray or None: Screenshot with matches drawn (if draw_matches=True)
+            Optional[Tuple[int, int]]: (x, y) coordinates of the center of the found image, or None if not found
         """
         logger.debug(f"Searching for template: '{template_name}' in region: {region}")
         
         if template_name not in self.templates:
+            # Log available templates for debugging
             available_templates = list(self.templates.keys())
-            logger.error(f"Template '{template_name}' not found. Available templates: {available_templates}")
-            return None, 0, None
+            logger.error(
+                f"Template '{template_name}' not found. Available templates: {available_templates}"
+            )
+            return None
             
         template = self.templates[template_name]
         logger.debug(f"Template dimensions: {template.shape[1]}x{template.shape[0]}")
@@ -155,24 +140,22 @@ class ImageDetectionBot:
         try:
             # Take screenshot of the specified region or full screen
             screenshot = pyautogui.screenshot(region=region)
-            screenshot_np = np.array(screenshot)
-            screenshot_bgr = cv2.cvtColor(screenshot_np, cv2.COLOR_RGB2BGR)
+            screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
             
-            # Convert both images to grayscale for matching
-            gray_screenshot = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
+            # Convert both images to grayscale
+            gray_screenshot = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
             gray_template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
             
             # Try multiple template matching methods
             methods = [
-                (cv2.TM_CCOEFF_NORMED, "CCOEFF_NORMED"),  # Best for most cases
-                (cv2.TM_CCORR_NORMED, "CCORR_NORMED"),    # Good for some cases where CCOEFF fails
+                cv2.TM_CCOEFF_NORMED,  # Best for most cases
+                cv2.TM_CCORR_NORMED,   # Good for some cases where CCOEFF fails
             ]
             
+            best_match = None
             best_confidence = 0
-            best_method = ""
-            best_loc = None
             
-            for method, method_name in methods:
+            for method in methods:
                 # Perform template matching
                 result = cv2.matchTemplate(gray_screenshot, gray_template, method)
                 min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
@@ -188,7 +171,6 @@ class ImageDetectionBot:
                 if confidence > best_confidence:
                     best_confidence = confidence
                     best_loc = loc
-                    best_method = method_name
             
             if best_confidence >= self.confidence:
                 # Calculate center coordinates
@@ -199,44 +181,23 @@ class ImageDetectionBot:
                 if region:
                     x += region[0]
                     y += region[1]
-                
-                logger.debug(f"Found '{template_name}' at ({x}, {y}) with confidence {best_confidence:.4f} using {best_method}")
-                
-                if draw_matches:
-                    # Draw the match on the screenshot
-                    top_left = best_loc
-                    bottom_right = (top_left[0] + w, top_left[1] + h)
                     
-                    # Draw rectangle around the match
-                    cv2.rectangle(screenshot_bgr, top_left, bottom_right, (0, 255, 0), 2)
-                    
-                    # Add text with confidence score
-                    text = f"{template_name}: {best_confidence:.2f}"
-                    cv2.putText(screenshot_bgr, text, 
-                              (top_left[0], top_left[1] - 10),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                    
-                    # Convert back to RGB for display
-                    screenshot_rgb = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2RGB)
-                    return (x, y), best_confidence, screenshot_rgb
-                
-                return (x, y), best_confidence, None
+                logger.debug(f"Found '{template_name}' at ({x}, {y}) with confidence {best_confidence:.4f}")
+                return (x, y)
             else:
-                logger.debug(f"Could not find '{template_name}' (best match confidence: {best_confidence:.4f} using {best_method})")
-                if draw_matches:
-                    # Return the screenshot even if no match was found
-                    return None, 0, cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2RGB)
-                return None, 0, None
+                logger.debug(f"Could not find '{template_name}' (best match confidence: {best_confidence:.4f})")
+                # Save the screenshot and template for debugging
+                debug_dir = os.path.join(os.path.dirname(__file__), 'debug')
+                os.makedirs(debug_dir, exist_ok=True)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                cv2.imwrite(os.path.join(debug_dir, f'screenshot_{timestamp}.png'), screenshot)
+                cv2.imwrite(os.path.join(debug_dir, f'template_{timestamp}.png'), template)
+                logger.info(f"Saved debug images to {debug_dir}")
+                return None
                 
         except Exception as e:
-            logger.error(f"Error in find_on_screen: {str(e)}")
-            if draw_matches:
-                # Return a black image if there was an error
-                error_img = np.zeros((100, 100, 3), dtype=np.uint8)
-                cv2.putText(error_img, "Error", (10, 50), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                return None, 0, error_img
-            return None, 0, None
+            logger.error(f"Error finding template '{template_name}': {str(e)}", exc_info=True)
+            return None
     
     def find_image(self, template_name: str, region: Optional[Tuple[int, int, int, int]] = None, 
                    timeout: float = 10.0, check_interval: float = 0.5, 
@@ -249,44 +210,103 @@ class ImageDetectionBot:
             region: Optional (x, y, width, height) region to search in
             timeout: Maximum time in seconds to search for the image
             check_interval: Time in seconds between search attempts
-            confidence: Optional confidence threshold (0.0 to 1.0)
+            confidence: Confidence threshold (0.0 to 1.0). If None, uses the bot's default confidence.
             
         Returns:
-            Optional[Tuple[int, int]]: (x, y) coordinates of the center of the found image, or None if not found
+            Tuple of (x, y) coordinates of the center of the found image, or None if not found
         """
-        start_time = time.time()
-        original_confidence = self.confidence
-        
-        try:
-            # Use the provided confidence if specified, otherwise use the instance confidence
-            if confidence is not None:
-                self.confidence = confidence
+        if template_name not in self.templates:
+            logger.error(f"Template '{template_name}' not found")
+            return None
             
-            while time.time() - start_time < timeout:
-                # Check if we should stop
-                if self.stop_event.is_set():
-                    logger.debug("Image search interrupted by stop event")
-                    return None
+        # Use provided confidence or fall back to instance confidence
+        conf_threshold = confidence if confidence is not None else self.confidence
+        start_time = time.time()
+        template = self.templates[template_name]
+        
+        while (time.time() - start_time) < timeout:
+            try:
+                # Take a screenshot of the specified region or full screen
+                screenshot = pyautogui.screenshot(region=region) if region else pyautogui.screenshot()
+                screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
                 
-                # Try to find the image
-                result = self.find_on_screen(template_name, region, draw_matches=False)
-                if result and result[0] is not None:
-                    return result[0]  # Return just the (x, y) position
+                # Perform template matching
+                result = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
                 
-                # Wait before trying again
+                # Check if the match is above the confidence threshold
+                if max_val >= conf_threshold:
+                    # Calculate the center of the matched region
+                    h, w = template.shape[:2]
+                    x = max_loc[0] + w // 2
+                    y = max_loc[1] + h // 2
+                    
+                    # Adjust coordinates if searching in a region
+                    if region:
+                        x += region[0]
+                        y += region[1]
+                        
+                    logger.info(f"Found '{template_name}' at ({x}, {y}) with confidence {max_val:.2f}")
+                    return (x, y)
+                
+                # Wait before next attempt
                 time.sleep(check_interval)
                 
-            logger.debug(f"Could not find '{template_name}' after {timeout} seconds")
-            return None
+            except Exception as e:
+                logger.error(f"Error during image search: {e}")
+                time.sleep(check_interval)
         
+        logger.info(f"Template '{template_name}' not found after {timeout} seconds (confidence threshold: {conf_threshold:.2f})")
+        return None
+    
+    def move_to(self, x: int, y: int, duration: float = 0.0) -> None:
+        """
+        Move mouse to the specified coordinates.
+        
+        Args:
+            x: Target x-coordinate
+            y: Target y-coordinate
+            duration: Time in seconds for the movement. If 0, the movement is instant.
+        """
+        try:
+            if duration > 0:
+                pyautogui.moveTo(x, y, duration=duration, tween=pyautogui.easeInOutQuad)
+            else:
+                pyautogui.moveTo(x, y)
+            self.current_position = (x, y)
+            logger.info(f"Moved to ({x}, {y}){f' over {duration:.2f}s' if duration > 0 else ''}")
         except Exception as e:
-            logger.error(f"Error finding image '{template_name}': {str(e)}")
-            return None
+            logger.error(f"Error moving to ({x}, {y}): {str(e)}")
+
+    def click_at(self, x: int, y: int, button: str = 'left', clicks: int = 1) -> None:
+        """
+        Click at the specified coordinates.
+        
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            button: Mouse button ('left', 'middle', or 'right')
+            clicks: Number of clicks
+        """
+        try:
+            self.move_to(x, y)
+            pyautogui.click(button=button, clicks=clicks)
+            logger.info(f"Clicked at ({x}, {y}) with {button} button")
+        except Exception as e:
+            logger.error(f"Error clicking at ({x}, {y}): {str(e)}")
             
+    def right_click_at(self, x: int, y: int) -> None:
+        """Right click at the specified coordinates."""
+        self.click_at(x, y, button='right')
+        
+    def double_click_at(self, x: int, y: int) -> None:
+        """Double click at the specified coordinates."""
+        self.click_at(x, y, clicks=2)
+        
     def type_text(self, text: str) -> None:
         """Type the specified text."""
         try:
-            pyautogui.write(text, interval=0.1)
+            pyautogui.write(text)
             logger.info(f"Typed: {text}")
         except Exception as e:
             logger.error(f"Error typing text: {str(e)}")
@@ -299,142 +319,6 @@ class ImageDetectionBot:
         except Exception as e:
             logger.error(f"Error pressing key {key}: {str(e)}")
             
-    def move_to(self, x: int, y: int, duration: float = 0.0, random_region: Optional[Tuple[int, int, int, int]] = None) -> bool:
-        """
-        Move the mouse to the specified coordinates.
-        
-        Args:
-            x: Target x-coordinate
-            y: Target y-coordinate
-            duration: Time in seconds for the movement
-            random_region: Optional (x, y, width, height) region for random movement
-            
-        Returns:
-            bool: True if movement was successful, False otherwise
-        """
-        try:
-            # Handle random region movement if specified
-            if random_region and len(random_region) == 4:
-                try:
-                    rx, ry, rw, rh = random_region
-                    # Ensure the random point is within the region
-                    target_x = random.randint(rx, rx + rw - 1)
-                    target_y = random.randint(ry, ry + rh - 1)
-                    logger.info(f"Moving to random position in region {random_region}: ({target_x}, {target_y})")
-                except Exception as e:
-                    logger.error(f"Error calculating random position: {str(e)}")
-                    return False
-            else:
-                target_x, target_y = x, y
-            
-            # Ensure coordinates are within screen bounds
-            screen_width, screen_height = pyautogui.size()
-            target_x = max(0, min(target_x, screen_width - 1))
-            target_y = max(0, min(target_y, screen_height - 1))
-            
-            # Perform the movement
-            if duration > 0:
-                # Use curved movement if enabled
-                if getattr(self, 'use_curved_movement', False):
-                    # Get current position
-                    current_x, current_y = pyautogui.position()
-                    
-                    # Generate control points for curve
-                    control_x = current_x + (target_x - current_x) * 0.5 + random.uniform(-100, 100)
-                    control_y = current_y + (target_y - current_y) * 0.5 + random.uniform(-50, 50)
-                    
-                    # Generate points along the curve
-                    steps = max(5, int(duration * 10))  # At least 5 steps
-                    points = []
-                    for i in range(steps + 1):
-                        t = i / steps
-                        # Quadratic bezier curve
-                        x = (1-t)**2 * current_x + 2*(1-t)*t*control_x + t**2 * target_x
-                        y = (1-t)**2 * current_y + 2*(1-t)*t*control_y + t**2 * target_y
-                        points.append((int(x), int(y)))
-                    
-                    # Move through the points
-                    for point in points:
-                        pyautogui.moveTo(*point)
-                        time.sleep(duration / steps)
-                else:
-                    # Linear movement
-                    pyautogui.moveTo(target_x, target_y, duration=duration)
-            else:
-                # Instant movement
-                pyautogui.moveTo(target_x, target_y)
-            
-            # Update current position
-            self.current_position = (target_x, target_y)
-            logger.debug(f"Moved to ({target_x}, {target_y}){f' over {duration:.2f}s' if duration > 0 else ''}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error in move_to: {str(e)}")
-            return False
-            
-    def click_at(self, x: int, y: int, button: str = 'left', clicks: int = 1, interval: float = 0.1) -> bool:
-        """
-        Click at the specified coordinates.
-        
-        Args:
-            x: X coordinate
-            y: Y coordinate
-            button: Mouse button to click ('left', 'middle', 'right')
-            clicks: Number of clicks
-            interval: Time between clicks in seconds
-            
-        Returns:
-            bool: True if click was successful, False otherwise
-        """
-        try:
-            # Move to the position first
-            if not self.move_to(x, y, duration=0.1):
-                logger.error(f"Failed to move to click position: ({x}, {y})")
-                return False
-                
-            # Small delay before clicking
-            time.sleep(0.1)
-            
-            # Perform the click(s)
-            for i in range(clicks):
-                pyautogui.click(button=button)
-                if i < clicks - 1:  # Don't wait after the last click
-                    time.sleep(interval)
-            
-            logger.debug(f"Clicked at ({x}, {y}) with {button} button ({clicks} clicks)")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error in click_at: {str(e)}")
-            return False
-            
-    def right_click_at(self, x: int, y: int) -> bool:
-        """
-        Right click at the specified coordinates.
-        
-        Args:
-            x: X coordinate
-            y: Y coordinate
-            
-        Returns:
-            bool: True if right click was successful, False otherwise
-        """
-        return self.click_at(x, y, button='right')
-        
-    def double_click_at(self, x: int, y: int) -> bool:
-        """
-        Double click at the specified coordinates.
-        
-        Args:
-            x: X coordinate
-            y: Y coordinate
-            
-        Returns:
-            bool: True if double click was successful, False otherwise
-        """
-        return self.click_at(x, y, clicks=2)
-    
     def wait(self, seconds: float) -> None:
         """Wait for the specified number of seconds."""
         time.sleep(seconds)
@@ -476,77 +360,87 @@ class ImageDetectionBot:
         Returns:
             bool: True if the action was executed successfully, False otherwise
         """
+        if position is None:
+            if self.current_position is None:
+                logger.error("No position provided and no current position set")
+                return False
+            position = self.current_position
+            
+        x, y = position
+        
+        # If this is a click action and a region is specified, pick a random point in the region
+        if action.type == ActionType.CLICK and hasattr(action, 'region') and action.region:
+            region = action.region
+            if isinstance(region, (list, tuple)) and len(region) == 4:
+                x = random.randint(region[0], region[0] + region[2] - 1)
+                y = random.randint(region[1], region[1] + region[3] - 1)
+                try:
+                    self.click_at(x, y, button=action.button, clicks=action.clicks)
+                    return True
+                except Exception as e:
+                    logger.error(f"Error executing random region click: {str(e)}")
+                    return False
+        # If this is a move_to action and random is set, move to a random point in the region
+        if action.type == ActionType.MOVE_TO and getattr(action, 'random', False) and hasattr(action, 'random_region') and action.random_region:
+            region = action.random_region
+            if isinstance(region, (list, tuple)) and len(region) == 4:
+                x = random.randint(region[0], region[0] + region[2] - 1)
+                y = random.randint(region[1], region[1] + region[3] - 1)
+                try:
+                    self.move_to(x, y, duration=action.duration)
+                    return True
+                except Exception as e:
+                    logger.error(f"Error executing random region move_to: {str(e)}")
+                    return False
+        
         try:
-            # Get current position if available
-            if position is None:
-                if hasattr(self, 'current_position') and self.current_position:
-                    position = self.current_position
-                else:
-                    logger.error("No position provided and no current position available")
-                    return False
-            
-            x, y = position
-            
-            # Handle different action types
             if action.type == ActionType.CLICK:
-                button = getattr(action, 'button', 'left')
-                clicks = getattr(action, 'clicks', 1)
-                return self.click_at(x, y, button=button, clicks=clicks)
-                
+                self.click_at(x, y, button=action.button, clicks=action.clicks)
+            elif action.type == ActionType.MOVE:
+                self.move_to(x, y, duration=action.duration)
+            elif action.type == ActionType.MOVE_TO:
+                self.move_to(x, y, duration=action.duration)
             elif action.type == ActionType.RIGHT_CLICK:
-                return self.right_click_at(x, y)
-                
+                self.right_click_at(x, y)
             elif action.type == ActionType.DOUBLE_CLICK:
-                return self.double_click_at(x, y)
-                
-            elif action.type == ActionType.SCROLL:
-                pixels = getattr(action, 'pixels', 0)
-                self.scroll(pixels)
-                return True
-                
+                self.double_click_at(x, y)
+            elif action.type == ActionType.TYPE and action.text:
+                self.type_text(action.text)
+            elif action.type == ActionType.KEY_PRESS and action.key:
+                self.press_key(action.key)
             elif action.type == ActionType.WAIT:
-                seconds = getattr(action, 'seconds', 1.0)
-                self.wait(seconds)
-                return True
-                
-            elif action.type == ActionType.TYPE:
-                text = getattr(action, 'text', '')
-                if text:
-                    self.type_text(text)
-                    return True
-                logger.warning("No text provided for TYPE action")
-                return False
-                
-            elif action.type == ActionType.KEY_PRESS:
-                key = getattr(action, 'key', None)
-                if key:
-                    self.press_key(key)
-                    return True
-                logger.warning("No key provided for KEY_PRESS action")
-                return False
-                
+                self.wait(action.seconds)
+            elif action.type == ActionType.SCROLL:
+                self.scroll(action.pixels)
             elif action.type == ActionType.CLICK_AND_HOLD:
-                duration = getattr(action, 'duration', 1.0)
-                button = getattr(action, 'button', 'left')
-                
-                logger.info(f"Executing CLICK_AND_HOLD at position: ({x}, {y}) for {duration} seconds")
-                
-                # Move to the position first
-                if not self.move_to(x, y, duration=0.1):
+                try:
+                    if self.current_position is None:
+                        logger.error("No current position set for CLICK_AND_HOLD")
+                        return False
+                        
+                    x, y = self.current_position
+                    logger.info(f"Executing CLICK_AND_HOLD at current position: ({x}, {y}) for {action.duration} seconds")
+                    
+                    # Move to the position first
+                    self.move_to(x, y, duration=0.1)
+                    
+                    # Perform the click and hold
+                    pyautogui.mouseDown(button=action.button)
+                    time.sleep(action.duration)
+                    pyautogui.mouseUp(button=action.button)
+                    
+                    return True
+                except Exception as e:
+                    logger.error(f"Error in CLICK_AND_HOLD: {str(e)}")
                     return False
+            else:
+                logger.error(f"Unsupported action type: {action.type}")
+                return False
                 
-                # Perform the click and hold
-                pyautogui.mouseDown(button=button)
-                time.sleep(duration)
-                pyautogui.mouseUp(button=button)
-                
-                return True
-                
-            logger.error(f"Unsupported action type: {action.type}")
-            return False
+            return True
             
         except Exception as e:
-            logger.error(f"Error executing action {getattr(action, 'type', 'UNKNOWN')}: {str(e)}")
+            logger.error(f"Error executing action {action.type.value}: {str(e)}")
             return False
             
     def execute_action(self, action: Action) -> bool:
@@ -560,56 +454,19 @@ class ImageDetectionBot:
             bool: True if action was executed successfully, False otherwise
         """
         try:
-            # Get current position if available
-            current_pos = getattr(self, 'current_position', None)
-            
-            # Handle MOVE actions
-            if action.type == ActionType.MOVE:
-                if getattr(action, 'random', False) and hasattr(action, 'random_region') and action.random_region:
-                    region = action.random_region
-                    if isinstance(region, (list, tuple)) and len(region) == 4:
-                        x = random.randint(region[0], region[0] + region[2] - 1)
-                        y = random.randint(region[1], region[1] + region[3] - 1)
-                        result = self.move_to(x, y, duration=getattr(action, 'duration', 0.0), random_region=region)
-                        if result:
-                            self.current_position = (x, y)
-                        return result
-                elif hasattr(action, 'x') and hasattr(action, 'y'):
-                    result = self.move_to(action.x, action.y, duration=getattr(action, 'duration', 0.0))
-                    if result:
-                        self.current_position = (action.x, action.y)
-                    return result
-                else:
-                    logger.error("MOVE action requires either random_region or x and y coordinates")
-                    return False
-            
-            # For click actions, ensure we have a position
-            if action.type in [ActionType.CLICK, ActionType.RIGHT_CLICK, ActionType.DOUBLE_CLICK, ActionType.CLICK_AND_HOLD]:
-                x = getattr(action, 'x', None)
-                y = getattr(action, 'y', None)
-                
-                if x is None or y is None:
-                    if current_pos:
-                        x, y = current_pos
-                        # Create a new action with the position
-                        new_action = Action(
-                            type=action.type,
-                            x=x,
-                            y=y,
-                            button=getattr(action, 'button', 'left'),
-                            clicks=getattr(action, 'clicks', 1),
-                            duration=getattr(action, 'duration', 0.0)
-                        )
-                        return self.execute_action_at_position(new_action, (x, y))
-                    else:
-                        logger.error(f"No position available for {action.type} action")
-                        return False
-            
-            # Execute the action with its own position handling
-            return self.execute_action_at_position(action)
-            
+            if action.type == ActionType.MOVE and action.x is not None and action.y is not None:
+                # For MOVE action with absolute coordinates
+                self.move_to(action.x, action.y, duration=action.duration)
+                return True
+            elif action.type == ActionType.CLICK_AND_HOLD:
+                # This should never be called directly - handled in execute_sequence
+                logger.warning("CLICK_AND_HOLD action should be handled in execute_sequence")
+                return False
+            else:
+                # For other actions, use execute_action_at_position with current position
+                return self.execute_action_at_position(action, self.current_position)
         except Exception as e:
-            logger.error(f"Error in execute_action: {str(e)}")
+            logger.error(f"Error executing {action.type.value if hasattr(action.type, 'value') else action.type} action: {str(e)}")
             return False
             
     def execute_actions(self, actions: List[Action]) -> bool:
@@ -617,61 +474,14 @@ class ImageDetectionBot:
         Execute a list of actions.
         
         Args:
-            actions: List of Action objects to execute
+            actions: List of actions to execute
             
         Returns:
             bool: True if all actions were executed successfully, False otherwise
         """
-        # Initialize with current position if available
-        last_position = getattr(self, 'current_position', None)
-        
         for action in actions:
-            # Create a copy of action data to avoid modifying the original
-            action_data = action.__dict__.copy()
-            
-            # Handle MOVE with random region first
-            if action.type == ActionType.MOVE and action_data.get('random') and action_data.get('random_region'):
-                region = action_data['random_region']
-                if isinstance(region, (list, tuple)) and len(region) == 4:
-                    x = random.randint(region[0], region[0] + region[2] - 1)
-                    y = random.randint(region[1], region[1] + region[3] - 1)
-                    if not self.move_to(x, y, duration=action_data.get('duration', 0.0)):
-                        return False
-                    last_position = (x, y)
-                    self.current_position = last_position
-                    continue
-            # Handle regular MOVE
-            elif action.type == ActionType.MOVE and 'x' in action_data and 'y' in action_data:
-                if not self.move_to(action_data['x'], action_data['y'], duration=action_data.get('duration', 0.0)):
-                    return False
-                last_position = (action_data['x'], action_data['y'])
-                self.current_position = last_position
-                continue
-                
-            # For click actions, ensure we have a position
-            if action.type in [ActionType.CLICK, ActionType.RIGHT_CLICK, ActionType.DOUBLE_CLICK]:
-                if last_position is None:
-                    logger.error(f"No position available for {action.type} action")
-                    return False
-                    
-                # Create a new action with position
-                new_action = Action(
-                    type=action.type,
-                    x=last_position[0],
-                    y=last_position[1],
-                    button=action_data.get('button', 'left'),
-                    clicks=action_data.get('clicks', 1)
-                )
-                
-                # Execute the new action with position
-                if not self.execute_action(new_action):
-                    return False
-                continue
-                
-            # Execute other actions normally
             if not self.execute_action(action):
                 return False
-                
         return True
     
     def scroll(self, pixels: int) -> None:
@@ -698,16 +508,11 @@ def load_config(config_path: str) -> dict:
 def parse_action(action_dict: Dict[str, Any]) -> Action:
     """Parse action dictionary into Action object."""
     try:
-        logger.debug(f"Parsing action data: {action_dict}")
         action_type = ActionType(action_dict['type'])
         action_args = {k: v for k, v in action_dict.items() if k != 'type'}
-        logger.debug(f"Creating action with type={action_type}, args={action_args}")
-        action = Action(type=action_type, **action_args)
-        logger.debug(f"Created action: {action}")
-        return action
+        return Action(type=action_type, **action_args)
     except (KeyError, ValueError) as e:
         logger.error(f"Error parsing action: {str(e)}")
-        logger.error(f"Action data: {action_dict}")
         raise
 
 def execute_sequence(bot: ImageDetectionBot, sequence: Dict[str, Any]) -> bool:
@@ -763,18 +568,7 @@ def execute_sequence(bot: ImageDetectionBot, sequence: Dict[str, Any]) -> bool:
             for action in actions:
                 # Handle MOVE action first to update the last position
                 if action.type == ActionType.MOVE:
-                    if getattr(action, 'random', False) and hasattr(action, 'random_region') and action.random_region:
-                        # Use random region for movement
-                        region = action.random_region
-                        if isinstance(region, (list, tuple)) and len(region) == 4:
-                            x = random.randint(region[0], region[0] + region[2] - 1)
-                            y = random.randint(region[1], region[1] + region[3] - 1)
-                            bot.move_to(x, y, duration=action.duration, random_region=region)
-                            last_move_position = (x, y)
-                            position = last_move_position
-                            continue
-                    elif action.x is not None and action.y is not None:
-                        # Use direct coordinates
+                    if action.x is not None and action.y is not None:
                         bot.move_to(action.x, action.y, duration=action.duration)
                         last_move_position = (action.x, action.y)
                         position = last_move_position  # Keep this for backward compatibility
