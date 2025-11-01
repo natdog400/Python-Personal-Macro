@@ -1036,26 +1036,33 @@ class StepEditor(QGroupBox):
         # Main layout for the group box
         actions_main_layout = QVBoxLayout(actions_group)
         actions_main_layout.setContentsMargins(5, 15, 5, 5)
+        actions_main_layout.setSpacing(5)
         
         # Scroll area for actions
-        actions_scroll = QScrollArea()
-        actions_scroll.setWidgetResizable(True)
-        actions_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        actions_scroll.setMinimumHeight(200)  # Set a minimum height to ensure visibility
+        self.actions_scroll = QScrollArea()
+        self.actions_scroll.setWidgetResizable(True)
+        self.actions_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.actions_scroll.setMinimumHeight(200)  # Set a minimum height to ensure visibility
+        self.actions_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         # Container for action widgets with proper size policies
         self.actions_container = QWidget()
-        self.actions_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.actions_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        
+        # Use a vertical layout for the container
         self.actions_layout = QVBoxLayout(self.actions_container)
         self.actions_layout.setSpacing(8)
         self.actions_layout.setContentsMargins(5, 5, 5, 5)
-        self.actions_layout.addStretch(1)  # Add stretch to push actions to top
+        self.actions_layout.setAlignment(Qt.AlignmentFlag.AlignTop)  # Align items to the top
+        
+        # Make sure the container doesn't expand vertically more than needed
+        self.actions_container.setMinimumHeight(50)  # Minimum height to show something
         
         # Set the container as the widget for the scroll area
-        actions_scroll.setWidget(self.actions_container)
+        self.actions_scroll.setWidget(self.actions_container)
         
-        # Add the scroll area to the main layout
-        actions_main_layout.addWidget(actions_scroll, 1)  # Allow the scroll area to expand
+        # Add the scroll area to the main layout with stretch
+        actions_main_layout.addWidget(self.actions_scroll, 1)  # Allow the scroll area to expand
         
         # Add action buttons in a frame at the bottom
         btn_frame = QFrame()
@@ -1121,16 +1128,29 @@ class StepEditor(QGroupBox):
     
     def remove_self(self):
         """Remove this step from the sequence."""
-        if hasattr(self.parent_sequence, 'remove_step'):
+        if self.parent_sequence:
             self.parent_sequence.remove_step(self)
     
     def add_action(self, action_data: dict):
         action_editor = ActionEditor(action_data, self)
+        # Set size policy to fixed vertical size
+        action_editor.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed
+        )
+        action_editor.setMinimumHeight(80)  # Set a reasonable minimum height for each action
+        
         # Insert before the stretch at the end
-        self.actions_layout.insertWidget(self.actions_layout.count() - 1, action_editor, stretch=0)
+        self.actions_layout.insertWidget(self.actions_layout.count(), action_editor)
         self.action_widgets.append(action_editor)
+        
+        # Update the container's minimum height based on number of actions
+        min_height = max(50, len(self.action_widgets) * 80)
+        self.actions_container.setMinimumHeight(min_height)
+        
         # Ensure the new action is visible
-        self.actions_container.updateGeometry()
+        QTimer.singleShot(50, lambda: self.actions_scroll.ensureWidgetVisible(action_editor))
+        
         return action_editor
     
     def remove_action(self, action_widget):
@@ -1142,6 +1162,11 @@ class StepEditor(QGroupBox):
             # Delete the widget
             action_widget.setParent(None)
             action_widget.deleteLater()
+            
+            # Update the container's minimum height based on remaining actions
+            min_height = max(50, len(self.action_widgets) * 80)
+            self.actions_container.setMinimumHeight(min_height)
+            self.actions_container.updateGeometry()
     
     def select_search_region(self):
         """Open a dialog to select a search region for this step."""
@@ -1243,16 +1268,19 @@ class SequenceEditor(QGroupBox):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         # Container widget for steps
         self.steps_container = QWidget()
+        self.steps_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self.steps_layout = QVBoxLayout(self.steps_container)
         self.steps_layout.setSpacing(10)
-        self.steps_layout.setContentsMargins(0, 0, 10, 0)
+        self.steps_layout.setContentsMargins(0, 0, 10, 10)
         self.steps_layout.addStretch()  # Add stretch to push steps to top
         
         # Set up the scroll area
         self.scroll_area.setWidget(self.steps_container)
+        self.scroll_area.setWidgetResizable(True)
         
         # Add widgets to main layout
         main_layout.addLayout(header_layout)
@@ -1475,6 +1503,9 @@ class SequenceEditor(QGroupBox):
                 "actions": [{"type": "click"}]
             }, self.templates, self)
         
+        # Set size policy for the step editor
+        step_editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
         # Insert the new step before the stretch at the end
         self.steps_layout.insertWidget(self.steps_layout.count() - 1, step_editor)
         
@@ -1484,20 +1515,36 @@ class SequenceEditor(QGroupBox):
         # Update the step numbers
         self.update_step_numbers()
         
-        return step_editor
+        # Ensure the new step is visible
+        QTimer.singleShot(100, lambda: self.scroll_area.ensureWidgetVisible(step_editor))
         
-    def remove_step(self, step_widget):
-        """Remove a step from the sequence."""
-        if step_widget in self.step_widgets:
+        # Update the container size
+        self.steps_container.adjustSize()
+        
+        return step_editor
+    
+    def remove_step(self, step_editor):
+        """Remove a step from the sequence.
+        
+        Args:
+            step_editor: The StepEditor widget to remove
+        """
+        if step_editor in self.step_widgets:
             # Remove from layout
-            self.steps_layout.removeWidget(step_widget)
-            # Remove from list
-            self.step_widgets.remove(step_widget)
+            self.steps_layout.removeWidget(step_editor)
+            
+            # Remove from our list
+            self.step_widgets.remove(step_editor)
+            
             # Delete the widget
-            step_widget.setParent(None)
-            step_widget.deleteLater()
+            step_editor.setParent(None)
+            step_editor.deleteLater()
+            
             # Update step numbers
             self.update_step_numbers()
+            
+            # Update the container size
+            self.steps_container.adjustSize()
     
     def update_step_numbers(self):
         """Update the step numbers in the UI."""
@@ -2649,11 +2696,16 @@ class MainWindow(QMainWindow):
             self.sequences_list.takeItem(row)
             
             # Clear the sequence editor if this was the selected sequence
-            if hasattr(self, 'sequence_editor_widget') and self.sequence_editor_widget.sequence_data.get('name') == sequence_name:
-                self.main_content_layout.removeWidget(self.current_sequence_widget)
-                self.current_sequence_widget.deleteLater()
-                del self.sequence_editor_widget
-                del self.current_sequence_widget
+            if hasattr(self, 'sequence_editor_widget') and hasattr(self.sequence_editor_widget, 'sequence_data') and \
+               self.sequence_editor_widget.sequence_data.get('name') == sequence_name:
+                if hasattr(self, 'main_content_layout') and hasattr(self, 'current_sequence_widget'):
+                    self.main_content_layout.removeWidget(self.current_sequence_widget)
+                if hasattr(self, 'current_sequence_widget'):
+                    self.current_sequence_widget.deleteLater()
+                if hasattr(self, 'sequence_editor_widget'):
+                    del self.sequence_editor_widget
+                if hasattr(self, 'current_sequence_widget'):
+                    del self.current_sequence_widget
             
             # Save changes
             self.save_config()
