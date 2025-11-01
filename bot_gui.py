@@ -2788,6 +2788,15 @@ class MainWindow(QMainWindow):
     
     def on_sequence_selected(self, current, previous):
         """Handle sequence selection change."""
+        # Enable/disable action buttons based on selection
+        has_selection = current is not None
+        if hasattr(self, 'duplicate_sequence_btn'):
+            self.duplicate_sequence_btn.setEnabled(has_selection)
+        if hasattr(self, 'rename_sequence_btn'):
+            self.rename_sequence_btn.setEnabled(has_selection)
+        if hasattr(self, 'remove_sequence_btn'):
+            self.remove_sequence_btn.setEnabled(has_selection)
+            
         if not current:
             return
             
