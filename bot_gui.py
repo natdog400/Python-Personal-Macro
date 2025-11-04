@@ -1879,15 +1879,22 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.config = {}
-        self.config_path = "config.json"
+        # Store the script's directory for relative paths
+        self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Default config path relative to script directory
+        self.config_path = os.path.join(self.script_dir, "config.json")
         self.bot = ImageDetectionBot()
         self.search_region = None  # Will store the search region (x, y, width, height)
         self.worker = None  # Will store the worker thread
         self.f8_pressed = False  # Track F8 key state
         
-        # Initialize images directory
-        self.images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
+        # Initialize directories relative to script location
+        self.images_dir = os.path.join(self.script_dir, "images")
+        self.failsafe_images_dir = os.path.join(self.script_dir, "failsafe_images")
+        
+        # Create necessary directories if they don't exist
         os.makedirs(self.images_dir, exist_ok=True)
+        os.makedirs(self.failsafe_images_dir, exist_ok=True)
         
         self.init_ui()
         self.load_config()
@@ -2246,7 +2253,7 @@ class MainWindow(QMainWindow):
             if os.path.exists(file_path):
                 with open(file_path, 'r') as f:
                     self.config = json.load(f)
-                self.config_path = file_path
+                self.config_path = os.path.abspath(file_path)  # Store absolute path
                 
                 # Load search region if it exists
                 if 'search_region' in self.config:
@@ -2258,21 +2265,46 @@ class MainWindow(QMainWindow):
                         self.search_region = None
                         self.region_status.setText("Region: Full Screen")
                 
-                # Update template paths to be absolute
+                # Convert template paths to absolute paths for the bot
                 if 'templates' in self.config:
                     updated_templates = {}
                     for name, path in self.config['templates'].items():
-                        # If path is relative, make it absolute relative to the config file
+                        # Convert to absolute path if it's not already
                         if not os.path.isabs(path):
-                            abs_path = os.path.join(os.path.dirname(os.path.abspath(file_path)), path)
-                            if os.path.exists(abs_path):
-                                path = abs_path
-                        updated_templates[name] = path
+                            abs_path = os.path.normpath(os.path.join(os.path.dirname(self.config_path), path))
+                            # Try to find the file in a few locations
+                            possible_paths = [
+                                abs_path,
+                                os.path.join(self.script_dir, path),
+                                os.path.join(self.images_dir, os.path.basename(path))
+                            ]
+                            
+                            found = False
+                            for possible_path in possible_paths:
+                                if os.path.exists(possible_path):
+                                    path = os.path.normpath(possible_path)
+                                    found = True
+                                    break
+                            
+                            if not found:
+                                logger.warning(f"Template file not found: {path}")
+                                continue
+                        
+                        # Load the template into the bot
+                        if hasattr(self, 'bot') and os.path.exists(path):
+                            success = self.bot.load_template(name, path)
+                            if success:
+                                updated_templates[name] = path
+                            else:
+                                logger.error(f"Failed to load template '{name}' from {path}")
+                        else:
+                            updated_templates[name] = path
+                    
                     self.config['templates'] = updated_templates
                 
-                # Update UI and load templates into the bot
+                # Update UI
                 self.update_ui_from_config()
-                self.statusBar().showMessage(f"Loaded configuration from {file_path}")
+                self.statusBar().showMessage(f"Loaded configuration from {os.path.basename(file_path)}")
             else:
                 self.statusBar().showMessage("No configuration file found, using defaults")
         except Exception as e:
@@ -2296,33 +2328,47 @@ class MainWindow(QMainWindow):
             # Ensure templates directory exists
             os.makedirs(self.images_dir, exist_ok=True)
             
-            # Ensure all template files exist and update their paths if needed
+            # Process template paths to use relative paths where possible
             if 'templates' in self.config:
                 updated_templates = {}
                 for name, path in self.config['templates'].items():
                     if not path:  # Skip empty paths
                         continue
                         
-                    # Convert to absolute path for checking existence
-                    abs_path = path if os.path.isabs(path) else os.path.join(os.path.dirname(os.path.abspath(self.config_path)), path)
+                    # Make sure path is absolute for checking
+                    abs_path = path if os.path.isabs(path) else os.path.join(os.path.dirname(self.config_path), path)
+                    abs_path = os.path.normpath(abs_path)
                     
+                    # If the file exists, use relative path if it's within the script directory
                     if os.path.exists(abs_path):
-                        # If the file is in the images directory, use relative path
-                        if os.path.commonpath([os.path.normpath(abs_path), os.path.normpath(self.images_dir)]) == os.path.normpath(self.images_dir):
-                            rel_path = os.path.relpath(abs_path, os.path.dirname(os.path.abspath(self.config_path)))
-                            updated_templates[name] = rel_path
-                        else:
+                        # Try to make path relative to config file
+                        try:
+                            rel_path = os.path.relpath(abs_path, os.path.dirname(self.config_path))
+                            # Use relative path if it's not going up too many directories
+                            if not rel_path.startswith('..' + os.sep) or rel_path.startswith('.' + os.sep):
+                                updated_templates[name] = rel_path
+                            else:
+                                updated_templates[name] = abs_path
+                        except ValueError:
+                            # If we can't make it relative (e.g., on different drives on Windows), use absolute path
                             updated_templates[name] = abs_path
+                    else:
+                        # If file doesn't exist, keep the path as is but warn the user
+                        logger.warning(f"Template file not found: {abs_path}")
+                        updated_templates[name] = path
+                
                 self.config['templates'] = updated_templates
             
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(os.path.abspath(self.config_path)), exist_ok=True)
+            # Ensure the config directory exists
+            config_dir = os.path.dirname(self.config_path)
+            if config_dir and not os.path.exists(config_dir):
+                os.makedirs(config_dir)
             
-            # Save to file
+            # Save to file with pretty printing
             with open(self.config_path, 'w') as f:
-                json.dump(self.config, f, indent=4)
-                
-            self.statusBar().showMessage(f"Configuration saved to {self.config_path}")
+                json.dump(self.config, f, indent=4, ensure_ascii=False)
+            
+            self.statusBar().showMessage(f"Configuration saved to {os.path.basename(self.config_path)}")
             return True
             
         except Exception as e:
@@ -2585,23 +2631,52 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(self, "Error", f"Image file not found: {path}")
                     return False
                 
-                # If the file is in the temp directory, move it to the main images directory
-                if os.path.dirname(path) != self.images_dir:
-                    new_path = os.path.join(self.images_dir, f"{name}{os.path.splitext(path)[1]}")
-                    shutil.move(path, new_path)
-                    path = new_path
+                # Ensure the images directory exists
+                os.makedirs(self.images_dir, exist_ok=True)
                 
-                # Make sure the path is absolute
-                if not os.path.isabs(path):
-                    path = os.path.join(os.path.dirname(os.path.abspath(self.config_path)), path)
+                # Determine the destination path in the images directory
+                dest_filename = f"{name}{os.path.splitext(path)[1]}"
+                dest_path = os.path.join(self.images_dir, dest_filename)
+                
+                # If the file is not already in the images directory, copy it there
+                if os.path.normpath(os.path.abspath(path)) != os.path.normpath(dest_path):
+                    try:
+                        # Check if destination file exists and is different from source
+                        if os.path.exists(dest_path):
+                            # If files are the same, just use the existing one
+                            if os.path.samefile(path, dest_path):
+                                path = dest_path
+                            else:
+                                # If different, ask user if they want to overwrite
+                                reply = QMessageBox.question(
+                                    self, 'File Exists',
+                                    f"A template with the name '{name}' already exists. Overwrite?",
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                    QMessageBox.StandardButton.No
+                                )
+                                if reply == QMessageBox.StandardButton.Yes:
+                                    shutil.copy2(path, dest_path)
+                                    path = dest_path
+                                else:
+                                    return False
+                        else:
+                            shutil.copy2(path, dest_path)
+                            path = dest_path
+                    except Exception as e:
+                        QMessageBox.warning(self, "Error", f"Failed to copy template to images directory: {str(e)}")
+                        return False
+                else:
+                    # If the file is already in the images directory, just use it as is
+                    path = dest_path
                 
                 # Add to config with relative path
-                rel_path = os.path.relpath(path, os.path.dirname(os.path.abspath(self.config_path)))
+                rel_path = os.path.relpath(path, os.path.dirname(self.config_path))
                 self.config.setdefault('templates', {})[name] = rel_path
                 
-                # Load the template into the bot
-                if hasattr(self, 'bot') and os.path.exists(path):
-                    success = self.bot.load_template(name, path)
+                # Load the template into the bot using the absolute path
+                abs_path = os.path.abspath(os.path.join(os.path.dirname(self.config_path), rel_path))
+                if hasattr(self, 'bot') and os.path.exists(abs_path):
+                    success = self.bot.load_template(name, abs_path)
                     if not success:
                         QMessageBox.warning(self, "Error", f"Failed to load template '{name}' into bot")
                         return False
@@ -2618,15 +2693,11 @@ class MainWindow(QMainWindow):
                         self.on_sequence_selected(self.sequences_list.currentItem(), None)
                 
                 # Save config
-                self.save_config()
+                if not self.save_config():
+                    return False
                 
                 # Update the Template Tester's template list
-                if hasattr(self, 'template_tester'):
-                    self.template_tester.templates = self.config.get('templates', {}).copy()
-                    self.template_tester.template_combo.clear()
-                    self.template_tester.template_combo.addItem("Select a template...", None)
-                    for name, path in sorted(self.template_tester.templates.items()):
-                        self.template_tester.template_combo.addItem(name, path)
+                self.update_template_tester_templates()
                 
                 # Show the template in the editor
                 self.on_template_selected(self.templates_list.currentItem(), None)
