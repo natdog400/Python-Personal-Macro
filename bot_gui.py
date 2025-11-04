@@ -708,15 +708,58 @@ class ActionEditor(QWidget):
         self.params_layout = QHBoxLayout(self.params_widget)
         self.params_layout.setContentsMargins(0, 0, 0, 0)
         
+        # Action buttons
+        btn_frame = QFrame()
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(2)
+        
+        # Move up button
+        self.move_up_btn = QPushButton("↑")
+        self.move_up_btn.setFixedSize(24, 24)
+        self.move_up_btn.setToolTip("Move action up")
+        self.move_up_btn.clicked.connect(self.move_up)
+        
+        # Move down button
+        self.move_down_btn = QPushButton("↓")
+        self.move_down_btn.setFixedSize(24, 24)
+        self.move_down_btn.setToolTip("Move action down")
+        self.move_down_btn.clicked.connect(self.move_down)
+        
         # Remove button
-        remove_btn = QPushButton("Remove")
+        remove_btn = QPushButton("×")
+        remove_btn.setFixedSize(24, 24)
+        remove_btn.setToolTip("Remove action")
         remove_btn.clicked.connect(self.remove_self)
         
+        # Style buttons
+        for btn in [self.move_up_btn, self.move_down_btn, remove_btn]:
+            btn.setStyleSheet("""
+                QPushButton {
+                    border: 1px solid #3a3a3a;
+                    border-radius: 3px;
+                    padding: 0px;
+                    margin: 0px;
+                    min-width: 20px;
+                    max-width: 20px;
+                    min-height: 20px;
+                    max-height: 20px;
+                }
+                QPushButton:hover {
+                    background: #3a3a3a;
+                }
+            """)
+        
+        # Add buttons to layout
+        btn_layout.addWidget(self.move_up_btn)
+        btn_layout.addWidget(self.move_down_btn)
+        btn_layout.addWidget(remove_btn)
+        
+        # Add widgets to main layout
         layout.addWidget(QLabel("Action:"))
-        layout.addWidget(self.type_combo)
-        layout.addWidget(self.params_widget)
-        layout.addStretch()
-        layout.addWidget(remove_btn)
+        layout.addWidget(self.type_combo, 1)  # Allow type combo to expand
+        layout.addWidget(self.params_widget, 2)  # Allow params to expand more
+        layout.addWidget(btn_frame)
         
         self.type_combo.currentTextChanged.connect(self.update_params)
         self.update_params()
@@ -749,14 +792,6 @@ class ActionEditor(QWidget):
             clicks_spin.valueChanged.connect(
                 lambda value, key="clicks": self.update_action_param(key, value))
             self.params_layout.addWidget(clicks_spin)
-
-            # --- Region selection for random click ---
-            region_btn = QPushButton("Select Region")
-            region_btn.clicked.connect(self.select_region)
-            self.params_layout.addWidget(region_btn)
-            self.region_label = QLabel()
-            self.params_layout.addWidget(self.region_label)
-            self.update_region_label()
             
         elif action_type in ["type", "key_press"]:
             param_name = "text" if action_type == "type" else "key"
@@ -861,8 +896,26 @@ class ActionEditor(QWidget):
         self.action_data["type"] = action_type
         return self.action_data
     
+    def move_up(self):
+        """Move this action up in the list."""
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, 'move_action_up'):
+                parent.move_action_up(self)
+                break
+            parent = parent.parent()
+    
+    def move_down(self):
+        """Move this action down in the list."""
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, 'move_action_down'):
+                parent.move_action_down(self)
+                break
+            parent = parent.parent()
+    
     def remove_self(self):
-        # Try to find the parent StepEditor that has the remove_action method
+        """Remove this action from its parent."""
         parent = self.parent()
         while parent is not None:
             if hasattr(parent, 'remove_action'):
@@ -1126,22 +1179,21 @@ class StepEditor(QGroupBox):
             }
         """)
     
-    def remove_self(self):
-        """Remove this step from the sequence."""
-        if self.parent_sequence:
-            self.parent_sequence.remove_step(self)
-    
-    def add_action(self, action_data: dict):
+    def add_action(self, action_data=None):
+        """Add a new action to this step.
+        
+        Args:
+            action_data: Optional dictionary containing action data. If None, creates a default click action.
+        """
+        if action_data is None:
+            action_data = {"type": "click"}
+            
+        # Create the action editor
         action_editor = ActionEditor(action_data, self)
-        # Set size policy to fixed vertical size
-        action_editor.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed
-        )
         action_editor.setMinimumHeight(80)  # Set a reasonable minimum height for each action
         
-        # Insert before the stretch at the end
-        self.actions_layout.insertWidget(self.actions_layout.count(), action_editor)
+        # Add to layout and widget list
+        self.actions_layout.addWidget(action_editor)
         self.action_widgets.append(action_editor)
         
         # Update the container's minimum height based on number of actions
@@ -1153,7 +1205,40 @@ class StepEditor(QGroupBox):
         
         return action_editor
     
+    def move_action_up(self, action_widget):
+        """Move the specified action up in the list."""
+        index = self.action_widgets.index(action_widget)
+        if index > 0:
+            # Remove from current position
+            self.actions_layout.removeWidget(action_widget)
+            self.action_widgets.pop(index)
+            
+            # Insert at new position
+            new_index = index - 1
+            self.actions_layout.insertWidget(new_index, action_widget)
+            self.action_widgets.insert(new_index, action_widget)
+            
+            # Ensure the moved action is visible
+            QTimer.singleShot(50, lambda: self.actions_scroll.ensureWidgetVisible(action_widget))
+    
+    def move_action_down(self, action_widget):
+        """Move the specified action down in the list."""
+        index = self.action_widgets.index(action_widget)
+        if index < len(self.action_widgets) - 1:
+            # Remove from current position
+            self.actions_layout.removeWidget(action_widget)
+            self.action_widgets.pop(index)
+            
+            # Insert at new position
+            new_index = index + 1
+            self.actions_layout.insertWidget(new_index, action_widget)
+            self.action_widgets.insert(new_index, action_widget)
+            
+            # Ensure the moved action is visible
+            QTimer.singleShot(50, lambda: self.actions_scroll.ensureWidgetVisible(action_widget))
+    
     def remove_action(self, action_widget):
+        """Remove the specified action from this step."""
         if action_widget in self.action_widgets:
             # Remove from layout
             self.actions_layout.removeWidget(action_widget)
@@ -1162,11 +1247,20 @@ class StepEditor(QGroupBox):
             # Delete the widget
             action_widget.setParent(None)
             action_widget.deleteLater()
-            
+
             # Update the container's minimum height based on remaining actions
             min_height = max(50, len(self.action_widgets) * 80)
             self.actions_container.setMinimumHeight(min_height)
             self.actions_container.updateGeometry()
+    
+    def remove_self(self):
+        """Remove this step from its parent."""
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, 'remove_step'):
+                parent.remove_step(self)
+                break
+            parent = parent.parent()
     
     def select_search_region(self):
         """Open a dialog to select a search region for this step."""
@@ -1601,6 +1695,7 @@ class TemplateTester(QWidget):
         self.bot = bot
         self.templates = templates
         self.template_path = ""
+        self.search_region = None  # Store the selected region (x, y, width, height)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_preview)
         self.init_ui()
@@ -1631,11 +1726,23 @@ class TemplateTester(QWidget):
         self.preview_label.setStyleSheet("background-color: #2d2d2d; border: 1px solid #3a3a3a;")
         
         # Controls
+        controls_layout = QHBoxLayout()
+        
+        self.region_btn = QPushButton("Select Region")
+        self.region_btn.clicked.connect(self.select_region)
+        self.region_btn.setToolTip("Select a region of the screen to search in")
+        
         self.start_btn = QPushButton("Start Preview")
-        self.start_btn.clicked.connect(self.toggle_preview)  # Connect to toggle_preview instead of start_preview
+        self.start_btn.clicked.connect(self.toggle_preview)
         self.start_btn.setEnabled(False)
         
+        controls_layout.addWidget(self.region_btn)
+        controls_layout.addWidget(self.start_btn)
+        
         # Status
+        self.region_status = QLabel("Region: Full Screen")
+        self.region_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
         self.status_label = QLabel("Select a template and click 'Start Preview'")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
@@ -1646,7 +1753,8 @@ class TemplateTester(QWidget):
         
         template_layout.addLayout(form_layout)
         template_layout.addWidget(self.preview_label)
-        template_layout.addWidget(self.start_btn)
+        template_layout.addLayout(controls_layout)
+        template_layout.addWidget(self.region_status)
         template_layout.addWidget(self.status_label)
         
         layout.addWidget(template_group)
@@ -1674,6 +1782,19 @@ class TemplateTester(QWidget):
                 self.start_btn.setText("Stop Preview")
                 self.status_label.setText("Preview active - Press F8 to stop")
     
+    def select_region(self):
+        """Open a dialog to select a region of the screen."""
+        dialog = ScreenCaptureDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            rect = dialog.get_capture_rect()
+            if rect and rect.isValid():
+                # Convert QRect to (x, y, width, height) tuple
+                self.search_region = (rect.x(), rect.y(), rect.width(), rect.height())
+                self.region_status.setText(f"Region: X={rect.x()}, Y={rect.y()}, W={rect.width()}, H={rect.height()}")
+            else:
+                self.search_region = None
+                self.region_status.setText("Region: Full Screen")
+    
     def update_preview(self):
         if not self.template_path or not os.path.exists(self.template_path):
             self.timer.stop()
@@ -1682,8 +1803,8 @@ class TemplateTester(QWidget):
             return
         
         try:
-            # Capture screen using pyautogui
-            screenshot = np.array(pyautogui.screenshot())
+            # Capture screen using pyautogui with the selected region
+            screenshot = np.array(pyautogui.screenshot(region=self.search_region) if self.search_region else pyautogui.screenshot())
             screenshot = cv2.cvtColor(screenshot, cv2.COLOR_RGB2BGR)
             if screenshot is None:
                 self.status_label.setText("Failed to capture screen")
@@ -1713,6 +1834,17 @@ class TemplateTester(QWidget):
             
             # Create a copy of the screenshot to draw on
             display_img = screenshot.copy()
+            
+            # Draw search region border if a region is selected
+            if self.search_region:
+                cv2.rectangle(display_img, 
+                            (0, 0),  # Top-left corner of region
+                            (display_img.shape[1]-1, display_img.shape[0]-1),  # Bottom-right corner of region
+                            (255, 0, 0),  # Blue border
+                            1,  # Thickness
+                            cv2.LINE_AA)
+            
+            # Draw match rectangle
             cv2.rectangle(display_img, top_left, bottom_right, (0, 255, 0), 2)
             
             # Add confidence text
@@ -1883,9 +2015,11 @@ class MainWindow(QMainWindow):
         self.loop_checkbox.toggled.connect(self.on_loop_toggled)
         self.loop_count_spin = QSpinBox()
         self.loop_count_spin.setMinimum(1)
-        self.loop_count_spin.setMaximum(9999)
+        self.loop_count_spin.setMaximum(999999)  # Increased from 9999 to 999999
         self.loop_count_spin.setValue(1)
         self.loop_count_spin.setEnabled(False)
+        # Set a fixed width to accommodate larger numbers
+        self.loop_count_spin.setFixedWidth(100)
         
         loop_control_layout.addWidget(self.loop_checkbox)
         loop_control_layout.addWidget(self.loop_count_spin)

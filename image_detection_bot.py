@@ -269,16 +269,38 @@ class ImageDetectionBot:
             duration: Time in seconds for the movement. If 0, the movement is instant.
         """
         try:
+            # Get current position for logging
+            start_x, start_y = pyautogui.position()
+            
+            # Move the mouse
             if duration > 0:
                 pyautogui.moveTo(x, y, duration=duration, tween=pyautogui.easeInOutQuad)
             else:
-                pyautogui.moveTo(x, y)
+                pyautogui.moveTo(x, y, duration=0.1)  # Small duration to ensure smooth movement
+            
+            # Update current position
             self.current_position = (x, y)
-            logger.info(f"Moved to ({x}, {y}){f' over {duration:.2f}s' if duration > 0 else ''}")
+            
+            # Get final position for verification
+            final_x, final_y = pyautogui.position()
+            
+            logger.info(f"Moved from ({start_x}, {start_y}) to ({x}, {y}) (final: {final_x}, {final_y}){f' over {duration:.2f}s' if duration > 0 else ''}")
+            
+            # If we didn't end up where we expected, log a warning
+            if abs(final_x - x) > 5 or abs(final_y - y) > 5:  # Allow 5px tolerance
+                logger.warning(f"Mouse did not reach target position. Expected: ({x}, {y}), Actual: ({final_x}, {final_y})")
+                
         except Exception as e:
             logger.error(f"Error moving to ({x}, {y}): {str(e)}")
-
-    def click_at(self, x: int, y: int, button: str = 'left', clicks: int = 1) -> None:
+            # Try to update position even if there was an error
+            try:
+                final_pos = pyautogui.position()
+                self.current_position = final_pos
+                logger.info(f"Updated current position to {final_pos} after move error")
+            except Exception as e2:
+                logger.error(f"Failed to update position after error: {str(e2)}")
+                
+    def click_at(self, x: int, y: int, button: str = 'left', clicks: int = 1, force_move: bool = False) -> None:
         """
         Click at the specified coordinates.
         
@@ -287,14 +309,45 @@ class ImageDetectionBot:
             y: Y coordinate
             button: Mouse button ('left', 'middle', or 'right')
             clicks: Number of clicks
+            force_move: If True, will move to the target position before clicking
         """
         try:
-            self.move_to(x, y)
-            pyautogui.click(button=button, clicks=clicks)
+            current_x, current_y = pyautogui.position()
+            
+            # Only move if we're not already at the target position and force_move is True
+            if (current_x, current_y) != (x, y):
+                if force_move:
+                    # For random region clicks, we want to move to the position
+                    pyautogui.moveTo(x, y, duration=0.1)
+                    time.sleep(0.1)  # Small delay to ensure movement is complete
+                else:
+                    # For regular clicks, just log the mismatch
+                    logger.warning(f"Mouse not at target position. Current: ({current_x}, {current_y}), Target: ({x}, {y})")
+                    logger.warning("Using current mouse position for click to prevent movement")
+                    x, y = current_x, current_y
+            
+            # Log the click position
+            logger.info(f"Clicking at position: ({x}, {y})")
+            
+            # Perform the click at the current position
+            for _ in range(clicks):
+                # Use direct mouse events for more control
+                pyautogui.mouseDown(button=button)
+                time.sleep(0.05)  # Short delay between down and up
+                pyautogui.mouseUp(button=button)
+                
+                # Small delay between multiple clicks
+                if _ < clicks - 1:
+                    time.sleep(0.1)
+            
+            # Update current position
+            self.current_position = (x, y)
             logger.info(f"Clicked at ({x}, {y}) with {button} button")
+            
         except Exception as e:
             logger.error(f"Error clicking at ({x}, {y}): {str(e)}")
-            
+            raise
+                
     def right_click_at(self, x: int, y: int) -> None:
         """Right click at the specified coordinates."""
         self.click_at(x, y, button='right')
@@ -456,12 +509,99 @@ class ImageDetectionBot:
         try:
             if action.type == ActionType.MOVE and action.x is not None and action.y is not None:
                 # For MOVE action with absolute coordinates
+                self.current_position = (action.x, action.y)
                 self.move_to(action.x, action.y, duration=action.duration)
                 return True
+            elif action.type == ActionType.MOVE_TO:
+                try:
+                    target_position = None
+                    
+                    # If we have a template to find
+                    if hasattr(action, 'find') and action.find:
+                        # Find the template position
+                        position = self.find_template(action.find, action.confidence, action.timeout, action.region)
+                        if position is None:
+                            logger.error(f"Could not find template: {action.find}")
+                            return False
+                        target_position = position
+                    # If we have explicit coordinates
+                    elif hasattr(action, 'x') and action.x is not None and hasattr(action, 'y') and action.y is not None:
+                        target_position = (action.x, action.y)
+                    else:
+                        logger.error("MOVE_TO action requires either a template to find or explicit coordinates")
+                        return False
+                    
+                    # If random is enabled, pick a random point in the region
+                    if getattr(action, 'random', False) and hasattr(action, 'random_region') and action.random_region:
+                        region = action.random_region
+                        x = random.randint(region[0], region[0] + region[2] - 1)
+                        y = random.randint(region[1], region[1] + region[3] - 1)
+                        target_position = (x, y)
+                    
+                    # Update and log the target position
+                    self.current_position = target_position
+                    logger.info(f"MOVE_TO target position set to: {target_position}")
+                    
+                    # Move to the position with the specified duration
+                    self.move_to(target_position[0], target_position[1], duration=action.duration)
+                    
+                    # Verify the final position
+                    final_pos = pyautogui.position()
+                    logger.info(f"Final mouse position after move: {final_pos}")
+                    
+                    return True
+                except Exception as e:
+                    logger.error(f"Error in MOVE_TO action: {str(e)}")
+                    return False
             elif action.type == ActionType.CLICK_AND_HOLD:
                 # This should never be called directly - handled in execute_sequence
                 logger.warning("CLICK_AND_HOLD action should be handled in execute_sequence")
                 return False
+            elif action.type == ActionType.CLICK:
+                try:
+                    button = getattr(action, 'button', 'left')
+                    clicks = getattr(action, 'clicks', 1)
+                    
+                    # Check if this is a random region click
+                    if getattr(action, 'random', False) and hasattr(action, 'random_region') and action.random_region:
+                        # For random region clicks, calculate a random point in the region
+                        region = action.random_region
+                        x = random.randint(region[0], region[0] + region[2] - 1)
+                        y = random.randint(region[1], region[1] + region[3] - 1)
+                        logger.info(f"Executing RANDOM CLICK at: ({x}, {y}) in region {region}")
+                        
+                        # Move to the position and click
+                        pyautogui.moveTo(x, y, duration=0.1)
+                        time.sleep(0.1)  # Small delay to ensure movement is complete
+                        
+                        # Perform the click at the current position
+                        for _ in range(clicks):
+                            pyautogui.mouseDown(button=button)
+                            time.sleep(0.05)
+                            pyautogui.mouseUp(button=button)
+                            if _ < clicks - 1:
+                                time.sleep(0.1)
+                                
+                        # Update current position
+                        self.current_position = (x, y)
+                    else:
+                        # For regular clicks, use current position without moving
+                        x, y = pyautogui.position()
+                        logger.info(f"Executing CLICK at current position: ({x}, {y})")
+                        
+                        # Use direct mouse events to avoid any movement
+                        for _ in range(clicks):
+                            pyautogui.mouseDown(button=button)
+                            time.sleep(0.05)
+                            pyautogui.mouseUp(button=button)
+                            if _ < clicks - 1:
+                                time.sleep(0.1)
+                    
+                    return True
+                    
+                except Exception as e:
+                    logger.error(f"Error executing click: {str(e)}")
+                    return False
             else:
                 # For other actions, use execute_action_at_position with current position
                 return self.execute_action_at_position(action, self.current_position)
