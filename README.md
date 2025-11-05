@@ -10,7 +10,7 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
 - **Action Types**: `click`, `right_click`, `double_click`, `move`, `move_to`, `type`, `key_press`, `wait`, `scroll`, `click_and_hold`
 - **Regions & Randomization**:
   - Step-level `search_region` for finding templates
-  - Click actions can target a random point in a selected region
+  - Click actions can target a random point in a selected region(REMOVED not needed)
   - Move-To actions can use a selected region with optional random movement
 - **Failsafe System**: Enable a template-based trigger, define a separate sequence, and test it with a button
 - **Template Tester**: Live preview of template matching with confidence meter and optional search region
@@ -51,7 +51,7 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
   - Add a sequence, then add steps
   - For each step: set `find` template, `required`, `timeout`, optional `confidence`
   - Add actions like Click, Move, Move-To, Type, Key Press, Wait, Scroll
-  - For Click: optionally select a region to click randomly inside
+  - For Click: (optionally select a region to click randomly inside)REMOVED not needed)
   - For Move-To: optionally enable random and select a region to move within
   - Run the selected sequence; press F8 to stop
 - Template Tester tab:
