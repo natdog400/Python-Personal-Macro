@@ -187,12 +187,15 @@ class ImageDetectionBot:
             else:
                 logger.debug(f"Could not find '{template_name}' (best match confidence: {best_confidence:.4f})")
                 # Save the screenshot and template for debugging
-                debug_dir = os.path.join(os.path.dirname(__file__), 'debug')
-                os.makedirs(debug_dir, exist_ok=True)
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
-                cv2.imwrite(os.path.join(debug_dir, f'screenshot_{timestamp}.png'), screenshot)
-                cv2.imwrite(os.path.join(debug_dir, f'template_{timestamp}.png'), template)
-                logger.info(f"Saved debug images to {debug_dir}")
+                try:
+                    debug_dir = os.path.join(os.path.dirname(__file__), 'debug')
+                    os.makedirs(debug_dir, exist_ok=True)
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    cv2.imwrite(os.path.join(debug_dir, f'screenshot_{timestamp}.png'), screenshot)
+                    cv2.imwrite(os.path.join(debug_dir, f'template_{timestamp}.png'), template)
+                    logger.info(f"Saved debug images to {debug_dir}")
+                except Exception as e:
+                    logger.error(f"Failed to save debug images: {str(e)}")
                 return None
                 
         except Exception as e:

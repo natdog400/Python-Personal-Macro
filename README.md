@@ -1,132 +1,167 @@
 # Image Detection Bot
 
-A powerful automation tool that uses image detection to perform sequences of actions. Built with Python and PyQt6, this application allows you to create and manage sequences of image-based actions for automation tasks.
+Automate mouse/keyboard actions by detecting on-screen images. This repo ships a PyQt6 GUI to manage templates, create sequences of actions, and configure a visual failsafe that can interrupt or be tested on demand. Built for personal automation, UI testing, and tinkering.
 
 ## Features
 
-- **Image Detection**: Find and interact with images on screen
-- **Sequence Editor**: Create/copy/delete/rename and manage sequences of actions
-- **Template Management**: Capture and manage image templates
-- **Mouse Control**: 
-  - Precise mouse movement and clicking
-  - Support for left/right/middle mouse buttons
-  - Configurable click intervals
-- **Failsafe System**: Jump to specific steps when certain images are detected
-- **Loop Support**: Run sequences multiple times
-- **Search Region**: Limit image detection to specific screen areas
-- **Configuration Management**: Save and load different configurations
-- **Error Handling**: Comprehensive logging and error recovery
+- **GUI Tabs**: Sequences, Failsafe, Templates, and Template Tester
+- **Template Management**: Create, preview, capture from screen, or load from file
+- **Sequence Editor**: Add steps that find a template and then run actions
+- **Action Types**: `click`, `right_click`, `double_click`, `move`, `move_to`, `type`, `key_press`, `wait`, `scroll`, `click_and_hold`
+- **Regions & Randomization**:
+  - Step-level `search_region` for finding templates
+  - Click actions can target a random point in a selected region
+  - Move-To actions can use a selected region with optional random movement
+- **Failsafe System**: Enable a template-based trigger, define a separate sequence, and test it with a button
+- **Template Tester**: Live preview of template matching with confidence meter and optional search region
+- **Hotkeys & Status**: F8 to stop; status bar updates; mouse position tracker
+- **Config Persistence**: Reads/writes `config.json` and keeps template paths relative when possible
 
 ## Requirements
 
-- Python 3.8 or higher
-- PyQt6
-- OpenCV
-- PyAutoGUI
-- NumPy
-- Pillow
-- darkdetect
+- Python 3.8+ (Windows batch launcher checks 3.8+)
+- `opencv-python`, `pyautogui`, `numpy`, `Pillow`, `PyQt6`, `pyqt6-tools`, `darkdetect`
+- Install via `requirements.txt`
 
 ## Installation
 
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/image_detection_bot.git
-cd image_detection_bot
+- Clone or download this repository
+- Install dependencies:
+  ```
+  pip install -r requirements.txt
+  ```
+- Launch the GUI:
+  - Cross-platform:
+    ```
+    python bot_gui.py
+    ```
+  - Windows convenience launcher:
+    ```
+    launch_gui.bat
+    ```
+
+## Quick Start
+
+- Templates tab:
+  - Click Add Template, set a name and image path
+  - Use Capture to grab from screen, or Load Image to pick a file
+  - Preview auto-updates
+- Sequences tab:
+  - Add a sequence, then add steps
+  - For each step: set `find` template, `required`, `timeout`, optional `confidence`
+  - Add actions like Click, Move, Move-To, Type, Key Press, Wait, Scroll
+  - For Click: optionally select a region to click randomly inside
+  - For Move-To: optionally enable random and select a region to move within
+  - Run the selected sequence; press F8 to stop
+- Template Tester tab:
+  - Pick a template, optionally select region, start live preview to see confidence value
+- Failsafe tab:
+  - Enable failsafe, choose a template and confidence, optionally set a search region
+  - Build a separate “failsafe sequence” of steps
+  - Click Test Failsafe to run only the failsafe sequence
+
+## Configuration File
+
+The app reads/writes `config.json` in the script directory. Template paths are converted to relative paths when possible.
+
+Top-level structure:
+
+```json
+{
+  "templates": {
+    "TemplateName": "images/Template.png"
+  },
+  "sequences": [
+    {
+      "name": "Example",
+      "steps": [
+        {
+          "find": "TemplateName",
+          "required": true,
+          "confidence": 0.8,
+          "timeout": 10,
+          "search_region": [x, y, width, height],
+          "actions": [
+            {"type": "move_to", "duration": 0.5},
+            {"type": "click"},
+            {"type": "type", "text": "hello"},
+            {"type": "key_press", "key": "enter"},
+            {"type": "wait", "seconds": 0.5},
+            {"type": "scroll", "pixels": -300},
+            {"type": "click_and_hold", "duration": 1.0}
+          ]
+        }
+      ],
+      "loop": false,
+      "loop_count": 1
+    }
+  ],
+  "failsafe": {
+    "enabled": true,
+    "template": "TemplateName",
+    "confidence": 0.8,
+    "region": [x, y, width, height],
+    "sequence": [
+      {
+        "find": "AnotherTemplate",
+        "required": true,
+        "timeout": 10,
+        "actions": [{"type": "click"}]
+      }
+    ]
+  }
+}
 ```
 
-2. Install required packages:
-```bash
-pip install -r requirements.txt
-```
+Action dictionary fields (as used across sequences and failsafe steps):
 
-## Usage
+- Common: `type`
+- Mouse actions:
+  - `button` (`left`/`right`/`middle`), `clicks` (int)
+  - `x`, `y` (for absolute `move`), `duration`
+  - `region` (for click randomization), `random`, `random_region` (for random move-to)
+- Keyboard: `text` (type), `key` (key_press)
+- Timing/scroll: `seconds` (wait), `pixels` (scroll)
 
-1. **Starting the Application**
-```bash
-python bot_gui2.py
-```
+## How Matching and Actions Work
 
-2. **Creating Templates**
-   - Go to the Templates tab
-   - Click "Add" to create a new template
-   - Choose between capturing from screen or selecting an image file
-   - Name your template and save it
+- Template matching uses OpenCV (`cv2.matchTemplate`). Confidence threshold is adjustable per step.
+- If a step has no `find` template, its actions run directly.
+- `move_to` can target the detected position or a random point inside a selected region.
+- `click` defaults to current mouse location unless `force_move` is used internally for region clicks.
+- `click_and_hold` acts at the bot’s current position—usually set by a prior `move`/`move_to`.
 
-3. **Creating Sequences**
-   - Go to the Sequence tab
-   - Click "Add" to create a new sequence
-   - Add steps to your sequence:
-     - Select a template to find
-     - Configure search region, confidence, and timeout
-     - Add actions (click, move, type, etc.)
-   - Configure loop settings if needed
-   - Set up failsafe conditions if desired
+## Failsafe Behavior
 
-4. **Mouse Movement Settings**
-   - Go to the Mouse Movement tab
-   - Configure global mouse movement settings:
-     - Enable/disable curved movement
-     - Set control points
-     - Adjust speed variation
-     - Set steps per second
+- The worker periodically checks the configured failsafe template (`check_failsafe_trigger`).
+- When detected, the failsafe sequence executes (`execute_failsafe_sequence`).
+- The Failsafe tab’s Test button runs only the failsafe sequence, using the current GUI configuration.
 
-5. **Running Sequences**
-   - Select a sequence from the list
-   - Click "Run" to start execution
-   - Use "Stop" to halt execution
-   - Press F8 for emergency stop
+## Logging & Debugging
 
-## Configuration
+- Runtime logs: `bot_debug.log`
+- On failed matches, screenshots and templates may be saved under a `debug/` folder next to the script
+- Press F8 to stop sequences; the status bar shows progress and messages
 
-The application saves configurations in JSON format, including:
-- Templates and their image paths
-- Sequences and their steps
-- Global settings
-- Search regions
+## Tips for Reliable Matching
 
-## Mouse Control
+- Use small, high-contrast templates of the exact UI you want to detect
+- Avoid scale/rotation changes; match works best for identical sizes
+- Consider using `search_region` to narrow detection for speed and accuracy
+- For random click/move regions, ensure coordinates are on-screen and correct
 
-The bot provides precise control over mouse movements and clicks with the following features:
+## Known Limitations
 
-### Movement
-- **Linear Movement**: Direct path to target coordinates
-- **Random Region Targeting**: Option to click within a specified region
-- **Speed Control**: Configurable movement duration
-
-### Click Actions
-- **Button Support**: Left, Right, and Middle mouse buttons
-- **Multiple Clicks**: Support for single or multiple clicks
-- **Click Intervals**: Configurable delay between multiple clicks
-- **Click Verification**: Confirms successful click execution
-
-### Error Handling
-- **Position Validation**: Ensures target coordinates are within screen bounds
-- **Movement Verification**: Confirms mouse reached target position
-- **Detailed Logging**: Comprehensive error messages for troubleshooting
-
-## Tips
-
-- Use the search region feature to limit image detection to specific areas
-- Adjust the confidence threshold for template matching to balance between accuracy and speed
-- Use the random region feature for more natural clicking behavior
-- Set up failsafes to handle unexpected situations
-- Save your configurations regularly
-- Check the logs for detailed information about bot operations
-
-## Troubleshooting
-
-- If image detection is not working:
-  - Check template quality and lighting conditions
-  - Adjust confidence threshold
-  - Verify search region settings
-- If mouse movement is erratic:
-  - Adjust speed variation
-  - Modify control points
-  - Check steps per second setting
+- Template matching is sensitive to scaling and rotation
+- Some GUI interactions are evolving; if you hit issues (e.g., editing failsafe steps), check logs and report
+- Not all advanced scenarios are fully implemented; contributions are welcome
 
 ## Contributing
 
-Fork your own version to modify please! Everything listed may not implemeted or is WIP!!
+- Issues and PRs are appreciated
+- Keep changes focused and documented
+- Please avoid using this tool for anything that breaks app/game ToS
 
+## License
 
+This project is for personal use; choose an appropriate license before public release if needed

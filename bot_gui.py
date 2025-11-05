@@ -44,12 +44,15 @@ import signal
 
 class BotWorker(QThread):
     """Worker thread for running bot operations."""
-    def __init__(self, bot, sequence, loop=False, loop_count=1):
+    def __init__(self, bot, sequence, loop=False, loop_count=1, non_required_wait=False, failsafe_config=None, failsafe_only=False):
         super().__init__()
         self.bot = bot
         self.sequence = sequence
         self.loop = loop
         self.loop_count = loop_count if loop else 1
+        self.non_required_wait = non_required_wait  # Whether to wait for non-required steps
+        self.failsafe_config = failsafe_config  # New failsafe configuration
+        self.failsafe_only = failsafe_only  # If True, run only the failsafe sequence and exit
         self.signals = WorkerSignals()
         self._is_running = True
         self._should_stop = False  # Flag to indicate if we should stop
@@ -57,7 +60,9 @@ class BotWorker(QThread):
         self.total_steps = 0
         self.current_iteration = 0
         self._process_pid = None  # Store the process ID for forceful termination
-        logger.info("BotWorker initialized with loop=%s, loop_count=%s", loop, loop_count)
+        self._executing_failsafe = False  # Flag to track if we're in failsafe execution
+        logger.info("BotWorker initialized with loop=%s, loop_count=%s, non_required_wait=%s, failsafe_config=%s", 
+                   loop, loop_count, non_required_wait, bool(failsafe_config))
     
     def run(self):
         """Run the sequence of steps with optional looping."""
@@ -65,17 +70,25 @@ class BotWorker(QThread):
         self._process_pid = os.getpid()
         logger.info(f"BotWorker started with PID: {self._process_pid}")
         
-        # --- Failsafe config ---
-        failsafe = self.sequence.get('failsafe', None)
-        failsafe_template = None
-        failsafe_goto_step = None
-        failsafe_confidence = 0.9
-        failsafe_region = None
-        if failsafe:
-            failsafe_template = failsafe.get('template')
-            failsafe_goto_step = failsafe.get('goto_step')
-            failsafe_confidence = failsafe.get('confidence', 0.9)
-            failsafe_region = failsafe.get('region')
+        # Failsafe configuration is now handled by self.failsafe_config
+        # If we're in failsafe-only mode (e.g., Test Failsafe button), execute and exit
+        if getattr(self, 'failsafe_only', False):
+            try:
+                self.signals.update.emit({
+                    "status": "Starting failsafe test...",
+                    "progress": 0
+                })
+                self.execute_failsafe_sequence()
+                self.signals.update.emit({
+                    "status": "Failsafe sequence completed.",
+                    "progress": 100
+                })
+            except Exception as e:
+                self.signals.error.emit(f"Error executing failsafe sequence: {str(e)}")
+            finally:
+                self._is_running = False
+                self.signals.finished.emit()
+                return
         
         try:
             while self._is_running and not self._should_stop and (not self.loop or self.current_iteration < self.loop_count):
@@ -150,20 +163,9 @@ class BotWorker(QThread):
                                             should_continue = False
                                             break
                                         # --- FAILSAFE CHECK ---
-                                        if failsafe_template is not None and failsafe_goto_step is not None:
-                                            pos = self.bot.find_image(
-                                                template_name=failsafe_template,
-                                                region=failsafe_region,
-                                                timeout=0.5,
-                                                confidence=failsafe_confidence
-                                            )
-                                            if pos is not None:
-                                                self.signals.update.emit({
-                                                    "status": f"Failsafe '{failsafe_template}' detected! Jumping to step {failsafe_goto_step+1}.",
-                                                    "progress": int((i / self.total_steps) * 100)
-                                                })
-                                                i = failsafe_goto_step
-                                                break  # break out of actions, will continue at new step
+                                        if self.check_failsafe_trigger():
+                                            # Failsafe sequence was executed, continue with next step
+                                            break
                                     except Exception as e:
                                         self.signals.error.emit(f"Error executing action: {str(e)}")
                                         should_continue = False
@@ -182,16 +184,22 @@ class BotWorker(QThread):
                                         should_continue = False
                                         break
                                     if search_region:
+                                        # For non-required steps, use 0.5s timeout if waiting is disabled
+                                        current_timeout = timeout if (required or self.non_required_wait) else 0.5
+                                        logger.info(f"Looking for template '{template_name}' with timeout={current_timeout}s (required={required}, non_required_wait={self.non_required_wait})")
                                         position = self.bot.find_image(
                                             template_name=template_name,
                                             region=search_region,
-                                            timeout=timeout if required else 0.5,
+                                            timeout=current_timeout,
                                             confidence=confidence
                                         )
                                     else:
                                         start_time = datetime.now()
                                         check_interval = 0.1
-                                        while not self._should_stop and (datetime.now() - start_time).total_seconds() < (timeout if required else 0.5):
+                                        # For non-required steps, use 0.5s timeout if waiting is disabled
+                                        current_timeout = timeout if (required or self.non_required_wait) else 0.5
+                                        logger.info(f"Looking for template '{template_name}' with timeout={current_timeout}s (required={required}, non_required_wait={self.non_required_wait})")
+                                        while not self._should_stop and (datetime.now() - start_time).total_seconds() < current_timeout:
                                             position = self.bot.find_image(
                                                 template_name=template_name,
                                                 confidence=confidence
@@ -253,20 +261,9 @@ class BotWorker(QThread):
                                                 should_continue = False
                                                 break
                                             # --- FAILSAFE CHECK ---
-                                            if failsafe_template is not None and failsafe_goto_step is not None:
-                                                pos = self.bot.find_image(
-                                                    template_name=failsafe_template,
-                                                    region=failsafe_region,
-                                                    timeout=0.5,
-                                                    confidence=failsafe_confidence
-                                                )
-                                                if pos is not None:
-                                                    self.signals.update.emit({
-                                                        "status": f"Failsafe '{failsafe_template}' detected! Jumping to step {failsafe_goto_step+1}.",
-                                                        "progress": int((i / self.total_steps) * 100)
-                                                    })
-                                                    i = failsafe_goto_step
-                                                    break  # break out of actions, will continue at new step
+                                            if self.check_failsafe_trigger():
+                                                # Failsafe sequence was executed, continue with next step
+                                                break
                                         except Exception as e:
                                             logger.error(f"Exception during action {action_data.get('type')}: {str(e)}")
                                             if action_data.get('type') == 'wait':
@@ -323,6 +320,133 @@ class BotWorker(QThread):
             self._is_running = False
             self.signals.finished.emit()
             self.wait()
+
+    def execute_failsafe_sequence(self):
+        """Execute the failsafe sequence when the failsafe template is detected."""
+        if not isinstance(self.failsafe_config, dict) or not self.failsafe_config.get('enabled'):
+            return False
+            
+        failsafe_sequence = self.failsafe_config.get('sequence', [])
+        # Normalize sequence format if provided as {"steps": [...]} from editor
+        if isinstance(failsafe_sequence, dict):
+            failsafe_sequence = failsafe_sequence.get('steps', [])
+        if not isinstance(failsafe_sequence, list):
+            logger.warning("Invalid failsafe sequence format; expected a list of steps")
+            return False
+        if not failsafe_sequence:
+            return False
+            
+        logger.info("Executing failsafe sequence")
+        self._executing_failsafe = True
+        
+        try:
+            self.signals.update.emit({
+                "status": "Failsafe triggered! Executing failsafe sequence...",
+                "progress": 0
+            })
+            
+            for i, step in enumerate(failsafe_sequence):
+                if not self._is_running or self._should_stop:
+                    break
+                    
+                self.signals.update.emit({
+                    "status": f"Failsafe step {i+1}/{len(failsafe_sequence)}: {step.get('name', 'Unnamed step')}",
+                    "progress": int((i / len(failsafe_sequence)) * 100)
+                })
+                
+                # Execute the failsafe step
+                template_name = step.get('find', '')
+                actions = step.get('actions', [])
+                
+                if template_name and str(template_name).lower() != 'none':
+                    # Find template first
+                    position = self.bot.find_image(
+                        template_name=template_name,
+                        region=step.get('search_region'),
+                        timeout=step.get('timeout', 5.0),
+                        confidence=step.get('confidence', 0.9)
+                    )
+                    
+                    if position is None and step.get('required', True):
+                        logger.warning(f"Required template '{template_name}' not found in failsafe sequence")
+                        continue
+                        
+                    # Execute actions at found position
+                    for action_data in actions:
+                        if not self._is_running or self._should_stop:
+                            break
+                            
+                        try:
+                            action = parse_action(action_data)
+                            if position is not None and action.type in [ActionType.CLICK, ActionType.MOVE_TO]:
+                                success = self.bot.execute_action_at_position(action, position)
+                            else:
+                                success = self.bot.execute_action(action)
+                                
+                            if not success:
+                                logger.warning(f"Failed to execute {action.type.value} in failsafe sequence")
+                                
+                        except Exception as e:
+                            logger.error(f"Error executing failsafe action: {str(e)}")
+                            
+                else:
+                    # Execute actions without template
+                    for action_data in actions:
+                        if not self._is_running or self._should_stop:
+                            break
+                            
+                        try:
+                            action = parse_action(action_data)
+                            success = self.bot.execute_action(action)
+                            if not success:
+                                logger.warning(f"Failed to execute {action.type.value} in failsafe sequence")
+                                
+                        except Exception as e:
+                            logger.error(f"Error executing failsafe action: {str(e)}")
+            
+            self.signals.update.emit({
+                "status": "Failsafe sequence completed",
+                "progress": 100
+            })
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error executing failsafe sequence: {str(e)}")
+            self.signals.error.emit(f"Error in failsafe sequence: {str(e)}")
+            return False
+            
+        finally:
+            self._executing_failsafe = False
+
+    def check_failsafe_trigger(self):
+        """Check if the failsafe template is detected and trigger failsafe sequence if found."""
+        if not self.failsafe_config or not self.failsafe_config.get('enabled'):
+            return False
+            
+        if self._executing_failsafe:  # Don't trigger failsafe while already executing it
+            return False
+            
+        failsafe_template = self.failsafe_config.get('template')
+        failsafe_confidence = self.failsafe_config.get('confidence', 0.8)
+        failsafe_region = self.failsafe_config.get('region')
+        
+        if not failsafe_template:
+            return False
+            
+        # Quick check for failsafe template
+        pos = self.bot.find_image(
+            template_name=failsafe_template,
+            region=failsafe_region,
+            timeout=0.1,  # Very short timeout for quick checks
+            confidence=failsafe_confidence
+        )
+        
+        if pos is not None:
+            logger.info(f"Failsafe template '{failsafe_template}' detected at {pos}")
+            return self.execute_failsafe_sequence()
+            
+        return False
 
     def stop(self):
         """Request the worker to stop."""
@@ -1255,6 +1379,21 @@ class StepEditor(QGroupBox):
     
     def remove_self(self):
         """Remove this step from its parent."""
+        try:
+            # Log attempt to remove for debugging
+            if hasattr(self, 'parent_sequence') and self.parent_sequence and hasattr(self.parent_sequence, 'step_widgets'):
+                try:
+                    idx = self.parent_sequence.step_widgets.index(self)
+                    logger.info(f"Removing failsafe step at index {idx}")
+                except ValueError:
+                    logger.info("Removing failsafe step (not found in step_widgets list)")
+        except Exception as e:
+            logger.debug(f"Remove step: logging index failed: {e}")
+        # Prefer the explicit parent_sequence reference to avoid QWidget parent chain issues
+        if hasattr(self, 'parent_sequence') and self.parent_sequence and hasattr(self.parent_sequence, 'remove_step'):
+            self.parent_sequence.remove_step(self)
+            return
+        # Fallback: walk up the QWidget parent chain to find a container with remove_step
         parent = self.parent()
         while parent is not None:
             if hasattr(parent, 'remove_step'):
@@ -1299,9 +1438,6 @@ class SequenceEditor(QGroupBox):
         self.sequence_data = sequence_data or {"name": "New Sequence", "steps": []}
         self.templates = templates or []
         self.step_widgets = []
-        # Failsafe image folder
-        self.failsafe_images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "failsafe_images")
-        os.makedirs(self.failsafe_images_dir, exist_ok=True)
         self._ui_initialized = False
         self.init_ui()
     
@@ -1411,166 +1547,8 @@ class SequenceEditor(QGroupBox):
                 height: 0px;
             }
         """)
-        
-        # --- FAILSAFE SECTION ---
-        failsafe_group = QGroupBox("Failsafe")
-        failsafe_layout = QVBoxLayout(failsafe_group)
-
-        # Enable Failsafe checkbox
-        self.failsafe_enable_checkbox = QCheckBox("Enable Failsafe")
-        self.failsafe_enable_checkbox.setChecked(bool(self.sequence_data.get('failsafe')))
-        self.failsafe_enable_checkbox.toggled.connect(self.toggle_failsafe_ui)
-        failsafe_layout.addWidget(self.failsafe_enable_checkbox)
-
-        # Row: Image picker and preview
-        fs_img_layout = QHBoxLayout()
-        self.failsafe_path_edit = QLineEdit()
-        self.failsafe_path_edit.setReadOnly(True)
-        self.failsafe_preview = QLabel()
-        self.failsafe_preview.setFixedSize(100, 80)
-        self.failsafe_preview.setStyleSheet("border: 1px solid #ccc;")
-        self.update_failsafe_preview()
-        fs_img_layout.addWidget(QLabel("Image:"))
-        fs_img_layout.addWidget(self.failsafe_path_edit)
-        fs_img_layout.addWidget(self.failsafe_preview)
-        fs_img_layout.addStretch()
-        # Buttons
-        self.fs_capture_btn = QPushButton("Capture")
-        self.fs_capture_btn.clicked.connect(self.capture_failsafe_image)
-        self.fs_select_btn = QPushButton("Select File")
-        self.fs_select_btn.clicked.connect(self.select_failsafe_image)
-        fs_img_layout.addWidget(self.fs_capture_btn)
-        fs_img_layout.addWidget(self.fs_select_btn)
-        failsafe_layout.addLayout(fs_img_layout)
-
-        # Row: Step index selector
-        fs_step_layout = QHBoxLayout()
-        fs_step_layout.addWidget(QLabel("Jump to Step:"))
-        self.fs_step_combo = QComboBox()
-        self.update_failsafe_step_combo()
-        fs_step_layout.addWidget(self.fs_step_combo)
-        fs_step_layout.addStretch()
-        failsafe_layout.addLayout(fs_step_layout)
-
-        # Row: Confidence
-        fs_conf_layout = QHBoxLayout()
-        fs_conf_layout.addWidget(QLabel("Confidence:"))
-        self.fs_conf_spin = QDoubleSpinBox()
-        self.fs_conf_spin.setRange(0.1, 1.0)
-        self.fs_conf_spin.setSingleStep(0.05)
-        self.fs_conf_spin.setValue(self.sequence_data.get('failsafe', {}).get('confidence', 0.9))
-        self.fs_conf_spin.setDecimals(2)
-        fs_conf_layout.addWidget(self.fs_conf_spin)
-        fs_conf_layout.addStretch()
-        failsafe_layout.addLayout(fs_conf_layout)
-
-        # Row: Region selection
-        fs_region_layout = QHBoxLayout()
-        self.fs_region_btn = QPushButton("Select Region")
-        self.fs_region_btn.clicked.connect(self.select_failsafe_region)
-        self.fs_region_label = QLabel("Region: Full Screen")
-        fs_region_layout.addWidget(self.fs_region_btn)
-        fs_region_layout.addWidget(self.fs_region_label)
-        fs_region_layout.addStretch()
-        failsafe_layout.addLayout(fs_region_layout)
-        self.failsafe_region = None  # (x, y, w, h) or None
-
-        main_layout.addWidget(failsafe_group)
-
-        # Load failsafe config if present
-        self.load_failsafe_config()
-        # Set failsafe UI enabled/disabled based on checkbox
-        self.toggle_failsafe_ui(self.failsafe_enable_checkbox.isChecked())
     
-    def update_failsafe_preview(self):
-        path = self.failsafe_path_edit.text()
-        if path and os.path.exists(path):
-            pixmap = QPixmap(path)
-            if not pixmap.isNull():
-                self.failsafe_preview.setPixmap(
-                    pixmap.scaled(self.failsafe_preview.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                                 Qt.TransformationMode.SmoothTransformation))
-                return
-        self.failsafe_preview.setText("No preview")
 
-    def update_failsafe_step_combo(self):
-        self.fs_step_combo.clear()
-        for i, step in enumerate(self.sequence_data.get('steps', [])):
-            name = step.get('find', f"Step {i+1}")
-            self.fs_step_combo.addItem(f"{i+1}: {name}", i)
-        # Set current index if present
-        fs = self.sequence_data.get('failsafe', {})
-        goto = fs.get('goto_step')
-        if goto is not None and 0 <= goto < self.fs_step_combo.count():
-            self.fs_step_combo.setCurrentIndex(goto)
-
-    def capture_failsafe_image(self):
-        dialog = ScreenCaptureDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            rect = dialog.get_capture_rect()
-            if rect and rect.isValid():
-                from PIL import ImageGrab
-                screenshot = ImageGrab.grab(bbox=(rect.x(), rect.y(), rect.x()+rect.width(), rect.y()+rect.height()))
-                # Prompt for custom name
-                from PyQt6.QtWidgets import QInputDialog
-                name, ok = QInputDialog.getText(self, "Failsafe Image Name", "Enter a name for this failsafe image:")
-                if not ok or not name.strip():
-                    return  # Cancelled or empty name
-                # Sanitize name
-                import re
-                safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', name.strip())
-                fname = f"{safe_name}.png"
-                path = os.path.join(self.failsafe_images_dir, fname)
-                screenshot.save(path, "PNG")
-                self.failsafe_path_edit.setText(path)
-                self.update_failsafe_preview()
-
-    def select_failsafe_image(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select Failsafe Image", "", "Images (*.png *.jpg *.jpeg *.bmp)")
-        if file_path:
-            # Copy to failsafe_images dir
-            import shutil
-            fname = os.path.basename(file_path)
-            dest_path = os.path.join(self.failsafe_images_dir, fname)
-            if not os.path.exists(dest_path):
-                shutil.copy2(file_path, dest_path)
-            self.failsafe_path_edit.setText(dest_path)
-            self.update_failsafe_preview()
-
-    def load_failsafe_config(self):
-        fs = self.sequence_data.get('failsafe', {})
-        path = fs.get('template')
-        if path:
-            # If relative, make absolute
-            if not os.path.isabs(path):
-                path = os.path.join(self.failsafe_images_dir, os.path.basename(path))
-            self.failsafe_path_edit.setText(path)
-            self.update_failsafe_preview()
-        goto = fs.get('goto_step')
-        if goto is not None and self.fs_step_combo.count() > goto:
-            self.fs_step_combo.setCurrentIndex(goto)
-        conf = fs.get('confidence')
-        if conf:
-            self.fs_conf_spin.setValue(conf)
-        region = fs.get('region')
-        if region and isinstance(region, (list, tuple)) and len(region) == 4:
-            self.failsafe_region = tuple(region)
-            x, y, w, h = self.failsafe_region
-            self.fs_region_label.setText(f"Region: ({x}, {y}, {w}x{h})")
-        else:
-            self.failsafe_region = None
-            self.fs_region_label.setText("Region: Full Screen")
-
-    def select_failsafe_region(self):
-        dialog = ScreenCaptureDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            rect = dialog.get_capture_rect()
-            if rect and rect.isValid():
-                self.failsafe_region = (rect.x(), rect.y(), rect.width(), rect.height())
-                self.fs_region_label.setText(f"Region: ({rect.x()}, {rect.y()}, {rect.width()}x{rect.height()})")
-            else:
-                self.failsafe_region = None
-                self.fs_region_label.setText("Region: Full Screen")
 
     def add_step(self, step_data: Optional[dict] = None):
         """Add a new step to the sequence."""
@@ -1624,6 +1602,11 @@ class SequenceEditor(QGroupBox):
             step_editor: The StepEditor widget to remove
         """
         if step_editor in self.step_widgets:
+            try:
+                idx = self.step_widgets.index(step_editor)
+                logger.info(f"FailsafeSequenceEditor: removing step at index {idx}")
+            except Exception:
+                logger.info("FailsafeSequenceEditor: removing step (index unknown)")
             # Remove from layout
             self.steps_layout.removeWidget(step_editor)
             
@@ -1639,6 +1622,28 @@ class SequenceEditor(QGroupBox):
             
             # Update the container size
             self.steps_container.adjustSize()
+            self.steps_container.update()
+            self.scroll_area.update()
+        else:
+            # Fallback: if the widget isn't tracked (edge case), remove it anyway
+            logger.info("FailsafeSequenceEditor: step not tracked; removing widget directly")
+            try:
+                self.steps_layout.removeWidget(step_editor)
+            except Exception:
+                pass
+            try:
+                step_editor.setParent(None)
+                step_editor.deleteLater()
+            except Exception:
+                pass
+            # Try to refresh numbering and layout
+            try:
+                self.update_step_numbers()
+            except Exception:
+                pass
+            self.steps_container.adjustSize()
+            self.steps_container.update()
+            self.scroll_area.update()
     
     def update_step_numbers(self):
         """Update the step numbers in the UI."""
@@ -1652,41 +1657,7 @@ class SequenceEditor(QGroupBox):
             "name": self.name_edit.text(),
             "steps": [w.get_step_data() for w in self.step_widgets]
         }
-        # Failsafe config (only if enabled)
-        if self.failsafe_enable_checkbox.isChecked():
-            path = self.failsafe_path_edit.text().strip()
-            goto = self.fs_step_combo.currentData()
-            conf = self.fs_conf_spin.value()
-            region = self.failsafe_region
-            if path and goto is not None:
-                # Store relative path if in failsafe_images
-                rel_path = os.path.relpath(path, os.path.dirname(os.path.abspath(__file__)))
-                failsafe_dict = {
-                    "template": rel_path,
-                    "goto_step": goto,
-                    "confidence": conf
-                }
-                if region:
-                    failsafe_dict["region"] = list(region)
-                data["failsafe"] = failsafe_dict
         return data
-
-    def select_failsafe_region(self):
-        dialog = ScreenCaptureDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            rect = dialog.get_capture_rect()
-            if rect and rect.isValid():
-                self.failsafe_region = (rect.x(), rect.y(), rect.width(), rect.height())
-                self.fs_region_label.setText(f"Region: ({rect.x()}, {rect.y()}, {rect.width()}x{rect.height()})")
-            else:
-                self.failsafe_region = None
-                self.fs_region_label.setText("Region: Full Screen")
-
-    def toggle_failsafe_ui(self, enabled):
-        # Enable/disable all failsafe config widgets except the enable checkbox
-        for widget in [self.failsafe_path_edit, self.failsafe_preview, self.fs_capture_btn, self.fs_select_btn,
-                      self.fs_step_combo, self.fs_conf_spin, self.fs_region_btn, self.fs_region_label]:
-            widget.setEnabled(enabled)
 
 class TemplateTester(QWidget):
     """Widget for testing template matching with live preview."""
@@ -1874,6 +1845,142 @@ class TemplateTester(QWidget):
         super().closeEvent(event)
 
 
+class FailsafeSequenceEditor(QWidget):
+    """Widget to edit the failsafe sequence."""
+    def __init__(self, failsafe_data: dict = None, templates: List[str] = None, parent=None):
+        super().__init__(parent)
+        self.failsafe_data = failsafe_data or {"steps": []}
+        self.templates = templates or []
+        self.step_widgets = []
+        self.init_ui()
+    
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
+        
+        # Header with add step button
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel("Failsafe Sequence Steps"))
+        header_layout.addStretch()
+        
+        add_step_btn = QPushButton("Add Step")
+        add_step_btn.clicked.connect(self.add_step)
+        header_layout.addWidget(add_step_btn)
+        
+        main_layout.addLayout(header_layout)
+        
+        # Scroll area for steps
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        
+        self.steps_container = QWidget()
+        self.steps_layout = QVBoxLayout(self.steps_container)
+        self.steps_layout.setSpacing(10)
+        self.steps_layout.setContentsMargins(5, 5, 5, 5)
+        self.steps_layout.addStretch()
+        
+        self.scroll_area.setWidget(self.steps_container)
+        main_layout.addWidget(self.scroll_area)
+        
+        # Load existing steps
+        for step_data in self.failsafe_data.get("steps", []):
+            self.add_step_from_data(step_data)
+    
+    def add_step(self):
+        """Add a new step to the failsafe sequence."""
+        step_data = {
+            "find": "",
+            "required": True,
+            "timeout": 10,
+            "actions": [{"type": "click"}]
+        }
+        self.add_step_from_data(step_data)
+    
+    def add_step_from_data(self, step_data: dict):
+        """Add a step from existing data."""
+        step_widget = StepEditor(step_data, self.templates, self)
+        step_widget.setParent(self.steps_container)
+
+        # Explicitly wire the delete button to the parent remover with this instance
+        if hasattr(step_widget, 'remove_btn'):
+            try:
+                step_widget.remove_btn.clicked.disconnect()
+            except Exception:
+                pass
+            step_widget.remove_btn.clicked.connect(lambda checked=False, sw=step_widget: self.remove_step(sw))
+        
+        # Insert before the stretch
+        self.steps_layout.insertWidget(self.steps_layout.count() - 1, step_widget)
+        self.step_widgets.append(step_widget)
+
+        # Update numbering and layout
+        self.update_step_numbers()
+        self.steps_container.adjustSize()
+        self.steps_container.update()
+        self.scroll_area.update()
+
+    def remove_step(self, step_editor):
+        """Remove a step from the failsafe sequence.
+        
+        Args:
+            step_editor: The StepEditor widget to remove
+        """
+        if step_editor in self.step_widgets:
+            try:
+                idx = self.step_widgets.index(step_editor)
+                logger.info(f"FailsafeSequenceEditor: removing step at index {idx}")
+            except Exception:
+                logger.info("FailsafeSequenceEditor: removing step (index unknown)")
+            # Remove from layout
+            self.steps_layout.removeWidget(step_editor)
+            
+            # Remove from our list
+            self.step_widgets.remove(step_editor)
+            
+            # Delete the widget
+            step_editor.setParent(None)
+            step_editor.deleteLater()
+            
+            # Update step numbers
+            self.update_step_numbers()
+            
+            # Update the container size
+            self.steps_container.adjustSize()
+            self.steps_container.update()
+            self.scroll_area.update()
+        else:
+            # Fallback: if the widget isn't tracked, remove it anyway
+            logger.info("FailsafeSequenceEditor: step not tracked; removing widget directly")
+            try:
+                self.steps_layout.removeWidget(step_editor)
+            except Exception:
+                pass
+            try:
+                step_editor.setParent(None)
+                step_editor.deleteLater()
+            except Exception:
+                pass
+            self.update_step_numbers()
+            self.steps_container.adjustSize()
+            self.steps_container.update()
+            self.scroll_area.update()
+
+    def update_step_numbers(self):
+        """Update the step numbers in the failsafe UI."""
+        for i, step in enumerate(self.step_widgets, 1):
+            if hasattr(step, 'step_label'):
+                step.step_label.setText(f"Step {i}")
+    
+    def get_failsafe_data(self) -> dict:
+        """Get the current failsafe sequence data."""
+        steps = []
+        for step_widget in self.step_widgets:
+            steps.append(step_widget.get_step_data())
+        return {"steps": steps}
+
+
 class MainWindow(QMainWindow):
     """Main application window."""
     def __init__(self):
@@ -1975,6 +2082,7 @@ class MainWindow(QMainWindow):
         
         # Create tabs
         self.sequences_tab = QWidget()
+        self.failsafe_tab = QWidget()
         self.templates_tab = QWidget()
         
         # Set up sequences tab
@@ -2016,20 +2124,36 @@ class MainWindow(QMainWindow):
         sequence_btns_layout.addWidget(self.rename_sequence_btn)
         sequence_btns_layout.addWidget(self.remove_sequence_btn)
         
-        # Loop controls
-        loop_control_layout = QHBoxLayout()
+        # Execution control
+        exec_control = QVBoxLayout()
+        
+        # Non-required steps behavior
+        self.non_required_wait_checkbox = QCheckBox("Wait full timeout for non-required steps")
+        self.non_required_wait_checkbox.setToolTip(
+            "When enabled, non-required steps will wait the full timeout period.\n"
+            "When disabled, non-required steps will skip immediately if template is not found."
+        )
+        self.non_required_wait_checkbox.setChecked(False)  # Default to skip immediately
+        
+        # Loop control
+        loop_control = QHBoxLayout()
         self.loop_checkbox = QCheckBox("Loop")
-        self.loop_checkbox.toggled.connect(self.on_loop_toggled)
         self.loop_count_spin = QSpinBox()
         self.loop_count_spin.setMinimum(1)
         self.loop_count_spin.setMaximum(999999)  # Increased from 9999 to 999999
         self.loop_count_spin.setValue(1)
         self.loop_count_spin.setEnabled(False)
-        # Set a fixed width to accommodate larger numbers
-        self.loop_count_spin.setFixedWidth(100)
+        self.loop_checkbox.stateChanged.connect(
+            lambda state: self.loop_count_spin.setEnabled(state == Qt.CheckState.Checked.value)
+        )
+        loop_control.addWidget(self.loop_checkbox)
+        loop_control.addWidget(QLabel("Iterations:"))
+        loop_control.addWidget(self.loop_count_spin)
+        loop_control.addStretch()
         
-        loop_control_layout.addWidget(self.loop_checkbox)
-        loop_control_layout.addWidget(self.loop_count_spin)
+        # Add widgets to layout
+        exec_control.addWidget(self.non_required_wait_checkbox)
+        exec_control.addLayout(loop_control)
         
         # Run button
         run_sequence_btn = QPushButton("Run")
@@ -2038,7 +2162,7 @@ class MainWindow(QMainWindow):
         # Add widgets to sequences layout
         sequences_layout.addWidget(self.sequences_list)
         sequences_layout.addLayout(sequence_btns_layout)
-        sequences_layout.addLayout(loop_control_layout)
+        sequences_layout.addLayout(exec_control)  # Changed from loop_control_layout to exec_control
         sequences_layout.addWidget(run_sequence_btn)
         sequences_group.setLayout(sequences_layout)
         
@@ -2051,6 +2175,109 @@ class MainWindow(QMainWindow):
         # Add sequence editor stack to sequences tab
         self.sequence_stack = QStackedWidget()
         sequences_tab_layout.addWidget(self.sequence_stack)
+        
+        # Set up failsafe tab
+        failsafe_tab_layout = QHBoxLayout(self.failsafe_tab)
+        
+        # Left sidebar for failsafe configuration
+        failsafe_sidebar = QWidget()
+        failsafe_sidebar.setFixedWidth(250)
+        failsafe_sidebar_layout = QVBoxLayout(failsafe_sidebar)
+        failsafe_sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Failsafe configuration section
+        failsafe_config_group = QGroupBox("Failsafe Configuration")
+        failsafe_config_layout = QVBoxLayout()
+        
+        # Enable failsafe checkbox
+        self.failsafe_enable_checkbox = QCheckBox("Enable Failsafe")
+        self.failsafe_enable_checkbox.setChecked(False)
+        failsafe_config_layout.addWidget(self.failsafe_enable_checkbox)
+        
+        # Failsafe template selection
+        fs_template_layout = QHBoxLayout()
+        fs_template_layout.addWidget(QLabel("Template:"))
+        self.failsafe_template_combo = QComboBox()
+        self.failsafe_template_combo.setEnabled(False)
+        # Update preview when selection changes
+        self.failsafe_template_combo.currentTextChanged.connect(self.update_failsafe_preview)
+        fs_template_layout.addWidget(self.failsafe_template_combo)
+        failsafe_config_layout.addLayout(fs_template_layout)
+
+        # Failsafe template name and image controls
+        name_layout = QHBoxLayout()
+        name_layout.addWidget(QLabel("Name:"))
+        self.failsafe_template_name_edit = QLineEdit()
+        self.failsafe_template_name_edit.setPlaceholderText("Enter template name")
+        self.failsafe_template_name_edit.setEnabled(False)
+        name_layout.addWidget(self.failsafe_template_name_edit)
+        failsafe_config_layout.addLayout(name_layout)
+
+        image_btns_layout = QHBoxLayout()
+        self.fs_capture_btn = QPushButton("Capture")
+        self.fs_capture_btn.setEnabled(False)
+        self.fs_capture_btn.clicked.connect(self.capture_failsafe_image)
+        self.fs_select_btn = QPushButton("Load Image")
+        self.fs_select_btn.setEnabled(False)
+        self.fs_select_btn.clicked.connect(self.select_failsafe_image)
+        image_btns_layout.addWidget(self.fs_capture_btn)
+        image_btns_layout.addWidget(self.fs_select_btn)
+        image_btns_layout.addStretch()
+        failsafe_config_layout.addLayout(image_btns_layout)
+
+        # Preview for selected failsafe template
+        self.failsafe_preview = QLabel("No preview")
+        self.failsafe_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.failsafe_preview.setMinimumHeight(120)
+        self.failsafe_preview.setStyleSheet("border: 1px solid #3a3a3a; border-radius: 3px; padding: 6px;")
+        failsafe_config_layout.addWidget(self.failsafe_preview)
+
+        # Confidence level
+        fs_conf_layout = QHBoxLayout()
+        fs_conf_layout.addWidget(QLabel("Confidence:"))
+        self.failsafe_conf_spin = QDoubleSpinBox()
+        self.failsafe_conf_spin.setRange(0.1, 1.0)
+        self.failsafe_conf_spin.setSingleStep(0.05)
+        self.failsafe_conf_spin.setValue(0.9)
+        self.failsafe_conf_spin.setDecimals(2)
+        self.failsafe_conf_spin.setEnabled(False)
+        fs_conf_layout.addWidget(self.failsafe_conf_spin)
+        fs_conf_layout.addStretch()
+        failsafe_config_layout.addLayout(fs_conf_layout)
+        
+        # Region selection
+        fs_region_layout = QHBoxLayout()
+        self.failsafe_region_btn = QPushButton("Select Region")
+        self.failsafe_region_btn.setEnabled(False)
+        self.failsafe_region_label = QLabel("Region: Full Screen")
+        fs_region_layout.addWidget(self.failsafe_region_btn)
+        fs_region_layout.addWidget(self.failsafe_region_label)
+        fs_region_layout.addStretch()
+        failsafe_config_layout.addLayout(fs_region_layout)
+        
+        failsafe_config_group.setLayout(failsafe_config_layout)
+        failsafe_sidebar_layout.addWidget(failsafe_config_group)
+        
+        # Failsafe sequence control
+        fs_control_group = QGroupBox("Failsafe Sequence Control")
+        fs_control_layout = QVBoxLayout()
+        
+        # Test failsafe button
+        self.test_failsafe_btn = QPushButton("Test Failsafe")
+        self.test_failsafe_btn.setEnabled(False)
+        fs_control_layout.addWidget(self.test_failsafe_btn)
+        
+        fs_control_group.setLayout(fs_control_layout)
+        failsafe_sidebar_layout.addWidget(fs_control_group)
+        
+        failsafe_sidebar_layout.addStretch()
+        
+        # Add sidebar to failsafe tab
+        failsafe_tab_layout.addWidget(failsafe_sidebar)
+        
+        # Add failsafe sequence editor stack
+        self.failsafe_sequence_stack = QStackedWidget()
+        failsafe_tab_layout.addWidget(self.failsafe_sequence_stack)
         
         # Set up templates tab
         templates_tab_layout = QHBoxLayout(self.templates_tab)
@@ -2106,6 +2333,7 @@ class MainWindow(QMainWindow):
         
         # Add tabs to tab widget
         self.tab_widget.addTab(self.sequences_tab, "Sequences")
+        self.tab_widget.addTab(self.failsafe_tab, "Failsafe")
         self.tab_widget.addTab(self.templates_tab, "Templates")
         self.tab_widget.addTab(self.template_tester_tab, "Template Tester")
         
@@ -2130,6 +2358,21 @@ class MainWindow(QMainWindow):
         # Add welcome widget to both stacks initially
         self.sequence_stack.addWidget(welcome_widget)
         self.template_stack.addWidget(QLabel("Select a template to edit"))
+        
+        # Failsafe welcome screen
+        failsafe_welcome_widget = QWidget()
+        failsafe_welcome_layout = QVBoxLayout(failsafe_welcome_widget)
+        failsafe_welcome_label = QLabel("Failsafe Sequence Editor")
+        failsafe_welcome_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        failsafe_welcome_info = QLabel("Enable failsafe and configure template detection to create failsafe sequences")
+        failsafe_welcome_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        failsafe_welcome_info.setStyleSheet("color: gray;")
+        failsafe_welcome_layout.addWidget(failsafe_welcome_label)
+        failsafe_welcome_layout.addWidget(failsafe_welcome_info)
+        failsafe_welcome_layout.addStretch()
+        
+        # Add welcome widget to failsafe stack
+        self.failsafe_sequence_stack.addWidget(failsafe_welcome_widget)
         
         # Set initial content
         self.sequence_stack.setCurrentWidget(welcome_widget)
@@ -2191,6 +2434,15 @@ class MainWindow(QMainWindow):
         # Add global shortcut for F8 to stop sequence
         self.stop_shortcut = QShortcut(QKeySequence("F8"), self)
         self.stop_shortcut.activated.connect(self.stop_sequence)
+        
+        # Connect failsafe enable checkbox to UI toggle
+        self.failsafe_enable_checkbox.toggled.connect(self.toggle_failsafe_ui)
+
+        # Connect failsafe UI elements
+        self.failsafe_region_btn.clicked.connect(self.select_failsafe_region)
+        self.test_failsafe_btn.clicked.connect(self.test_failsafe_sequence)
+        # Initialize failsafe template list from config
+        self.refresh_failsafe_templates()
     
     def new_config(self):
         """Create a new configuration."""
@@ -2430,6 +2682,43 @@ class MainWindow(QMainWindow):
         
         # Update Template Tester's template list
         self.update_template_tester_templates()
+        
+        # Update failsafe configuration
+        failsafe_config = self.config.get('failsafe', {})
+        if failsafe_config:
+            # Enable failsafe
+            self.failsafe_enable_checkbox.setChecked(True)
+            
+            # Set template
+            template_name = failsafe_config.get('template')
+            if template_name:
+                index = self.failsafe_template_combo.findText(template_name)
+                if index >= 0:
+                    self.failsafe_template_combo.setCurrentIndex(index)
+            
+            # Set confidence
+            confidence = failsafe_config.get('confidence', 0.8)
+            self.failsafe_conf_spin.setValue(confidence)
+            
+            # Set region
+            region = failsafe_config.get('region')
+            if region:
+                self.failsafe_region = region
+                self.failsafe_region_label.setText(f"Region: {region[2]}x{region[3]} at ({region[0]}, {region[1]})")
+            
+            # Load failsafe sequence
+            failsafe_sequence = failsafe_config.get('sequence', [])
+            if hasattr(self, 'failsafe_sequence_editor'):
+                self.failsafe_sequence_editor.load_sequence(failsafe_sequence)
+            
+            # Update UI state
+            self.toggle_failsafe_ui(True)
+        else:
+            # Disable failsafe
+            self.failsafe_enable_checkbox.setChecked(False)
+            self.toggle_failsafe_ui(False)
+        # Ensure failsafe template combo reflects current templates
+        self.refresh_failsafe_templates()
     
     def update_config_from_ui(self):
         """Update config from UI elements."""
@@ -2451,6 +2740,13 @@ class MainWindow(QMainWindow):
                 else:
                     # Add new sequence if not found
                     self.config.setdefault('sequences', []).append(sequence_data)
+        
+        # Update failsafe configuration
+        failsafe_config = self.get_failsafe_config()
+        if failsafe_config:
+            self.config['failsafe'] = failsafe_config
+        else:
+            self.config.pop('failsafe', None)  # Remove failsafe config if disabled
     
     def save_current_template(self):
         """Save the currently edited template and load it into the bot."""
@@ -2731,7 +3027,7 @@ class MainWindow(QMainWindow):
         if used_in_sequences:
             seq_list = '\n- ' + '\n- '.join(used_in_sequences)
             QMessageBox.warning(
-                self,
+                self, 
                 'Cannot Delete Template',
                 f'Template "{template_name}" is used in the following sequences and cannot be deleted:\n{seq_list}\n\nPlease remove it from these sequences first.',
                 QMessageBox.StandardButton.Ok
@@ -3307,7 +3603,16 @@ class MainWindow(QMainWindow):
                 self.worker = None
         
         # Create and start worker thread
-        self.worker = BotWorker(self.bot, sequence, should_loop, loop_count)
+        failsafe_config = self.get_failsafe_config()
+        self.worker = BotWorker(
+            bot=self.bot,
+            sequence=sequence,
+            loop=should_loop,
+            loop_count=loop_count,
+            non_required_wait=self.non_required_wait_checkbox.isChecked(),
+            failsafe_config=failsafe_config if failsafe_config else None
+        )
+        logger.info(f"Starting sequence with non_required_wait={self.worker.non_required_wait}")
         self.worker.signals.update.connect(self.on_worker_update)
         self.worker.signals.finished.connect(self.on_worker_finished)
         self.worker.signals.error.connect(self.on_worker_error)
@@ -3388,6 +3693,289 @@ class MainWindow(QMainWindow):
             self.setEnabled(True)
             self.stop_action.setEnabled(False)
             self.statusBar().showMessage("Error stopping sequence")
+            return False
+    
+    def toggle_failsafe_ui(self, enabled: bool):
+        """Enable/disable failsafe UI elements."""
+        self.failsafe_template_combo.setEnabled(enabled)
+        self.failsafe_conf_spin.setEnabled(enabled)
+        self.failsafe_region_btn.setEnabled(enabled)
+        self.test_failsafe_btn.setEnabled(enabled)
+        # Enable/disable new capture/select and name/preview controls
+        if hasattr(self, 'fs_capture_btn'):
+            self.fs_capture_btn.setEnabled(enabled)
+        if hasattr(self, 'fs_select_btn'):
+            self.fs_select_btn.setEnabled(enabled)
+        if hasattr(self, 'failsafe_template_name_edit'):
+            self.failsafe_template_name_edit.setEnabled(enabled)
+        # Refresh templates when enabling
+        if enabled:
+            self.refresh_failsafe_templates()
+
+        if enabled:
+            # Switch to failsafe sequence editor
+            if not hasattr(self, 'current_failsafe_editor'):
+                self.current_failsafe_editor = FailsafeSequenceEditor(
+                    self.config.get("failsafe_sequence", {}), 
+                    list(self.config.get("templates", {}).keys()), 
+                    self
+                )
+                self.failsafe_sequence_stack.addWidget(self.current_failsafe_editor)
+            self.failsafe_sequence_stack.setCurrentWidget(self.current_failsafe_editor)
+        else:
+            # Switch to welcome screen
+            self.failsafe_sequence_stack.setCurrentIndex(0)
+    
+    def select_failsafe_region(self):
+        """Select region for failsafe template detection."""
+        dialog = ScreenCaptureDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            rect = dialog.get_capture_rect()
+            if rect and rect.isValid():
+                self.failsafe_region = (rect.x(), rect.y(), rect.width(), rect.height())
+                self.failsafe_region_label.setText(f"Region: ({rect.x()}, {rect.y()}, {rect.width()}x{rect.height()})")
+            else:
+                self.failsafe_region = None
+                self.failsafe_region_label.setText("Region: Full Screen")
+    
+    def test_failsafe_sequence(self):
+        """Test the failsafe sequence execution."""
+        if not self.failsafe_enable_checkbox.isChecked():
+            QMessageBox.warning(self, "Warning", "Failsafe is not enabled")
+            return
+        
+        # Build current failsafe configuration
+        failsafe_config = self.get_failsafe_config()
+        if not failsafe_config.get('template'):
+            QMessageBox.warning(self, "Warning", "Please select a failsafe template")
+            return
+        # Ensure there is a failsafe sequence to test
+        fs_steps = failsafe_config.get('sequence', [])
+        if not fs_steps:
+            QMessageBox.warning(self, "Warning", "No failsafe sequence configured to test")
+            return
+
+        # Disable UI during execution and show status
+        self.setEnabled(False)
+        self.statusBar().showMessage("Testing failsafe sequence...")
+
+        # Clean up any existing worker
+        if hasattr(self, 'worker') and self.worker is not None:
+            try:
+                if self.worker.isRunning():
+                    self.worker.stop()
+                    if not self.worker.wait(1000):  # Wait up to 1 second
+                        self.worker.terminate()
+                        self.worker.wait()
+                self.worker.deleteLater()
+            except Exception as e:
+                logger.error(f"Error cleaning up worker: {e}")
+            finally:
+                self.worker = None
+
+        # Create and start a worker to run only the failsafe sequence
+        self.worker = BotWorker(
+            bot=self.bot,
+            sequence={"name": "Failsafe Test", "steps": []},
+            loop=False,
+            loop_count=1,
+            non_required_wait=False,
+            failsafe_config=failsafe_config,
+            failsafe_only=True
+        )
+        self.worker.signals.update.connect(self.on_worker_update)
+        self.worker.signals.finished.connect(self.on_worker_finished)
+        self.worker.signals.error.connect(self.on_worker_error)
+
+        if hasattr(self, 'stop_action'):
+            self.stop_action.setEnabled(True)
+
+        self.worker.start()
+    
+    def get_failsafe_config(self) -> dict:
+        """Get the current failsafe configuration."""
+        if not self.failsafe_enable_checkbox.isChecked():
+            return {}
+        
+        config = {
+            "enabled": True,
+            "template": self.failsafe_template_combo.currentText(),
+            "confidence": self.failsafe_conf_spin.value(),
+            "region": getattr(self, 'failsafe_region', None)
+        }
+        
+        # Add failsafe sequence if editor exists
+        if hasattr(self, 'current_failsafe_editor'):
+            seq_data = self.current_failsafe_editor.get_failsafe_data()
+            # Store as a plain list of step dicts for worker consumption
+            config["sequence"] = seq_data.get("steps", []) if isinstance(seq_data, dict) else []
+        
+        return config
+
+    def refresh_failsafe_templates(self):
+        """Populate the failsafe template combo from current config templates."""
+        try:
+            self.failsafe_template_combo.blockSignals(True)
+            self.failsafe_template_combo.clear()
+            for name in sorted(self.config.get('templates', {}).keys()):
+                self.failsafe_template_combo.addItem(name)
+            self.failsafe_template_combo.blockSignals(False)
+            # If a selection exists, update preview
+            self.update_failsafe_preview()
+        except Exception:
+            # Ensure signals unblocked on error
+            self.failsafe_template_combo.blockSignals(False)
+
+    def update_failsafe_preview(self):
+        """Update preview image for the selected failsafe template."""
+        try:
+            name = self.failsafe_template_combo.currentText().strip()
+            if hasattr(self, 'failsafe_template_name_edit') and name:
+                self.failsafe_template_name_edit.setText(name)
+            path = self.config.get('templates', {}).get(name)
+            if not path:
+                self.failsafe_preview.setText("No preview")
+                return
+            # Resolve to absolute path relative to config directory
+            abs_path = path if os.path.isabs(path) else os.path.join(os.path.dirname(self.config_path), path)
+            if os.path.exists(abs_path):
+                pixmap = QPixmap(abs_path)
+                if not pixmap.isNull():
+                    self.failsafe_preview.setPixmap(
+                        pixmap.scaled(self.failsafe_preview.size(),
+                                      Qt.AspectRatioMode.KeepAspectRatio,
+                                      Qt.TransformationMode.SmoothTransformation))
+                    return
+            self.failsafe_preview.setText("No preview")
+        except Exception:
+            self.failsafe_preview.setText("No preview")
+
+    def capture_failsafe_image(self):
+        """Capture a screen region and save as a failsafe template, updating config."""
+        try:
+            name = self.failsafe_template_name_edit.text().strip() if hasattr(self, 'failsafe_template_name_edit') else ''
+            if not name:
+                name = f"failsafe_{int(datetime.now().timestamp())}"
+                if hasattr(self, 'failsafe_template_name_edit'):
+                    self.failsafe_template_name_edit.setText(name)
+
+            capture_dialog = ScreenCaptureDialog(self)
+            if capture_dialog.exec() != QDialog.DialogCode.Accepted:
+                return False
+            rect = capture_dialog.get_capture_rect()
+            if not rect or not rect.isValid():
+                return False
+
+            # Capture region
+            screenshot = ImageGrab.grab(bbox=(
+                rect.x(),
+                rect.y(),
+                rect.x() + rect.width(),
+                rect.y() + rect.height()
+            ))
+
+            # Ensure destination directory
+            os.makedirs(self.failsafe_images_dir, exist_ok=True)
+            dest_path = os.path.join(self.failsafe_images_dir, f"{name}.png")
+            # If exists, confirm overwrite
+            if os.path.exists(dest_path):
+                reply = QMessageBox.question(
+                    self, 'File Exists',
+                    f"An image named '{name}.png' already exists. Overwrite?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return False
+            screenshot.save(dest_path, "PNG")
+
+            # Store relative path in config
+            rel_path = os.path.relpath(dest_path, os.path.dirname(self.config_path))
+            self.config.setdefault('templates', {})[name] = rel_path
+
+            # Load into bot
+            abs_path = os.path.abspath(os.path.join(os.path.dirname(self.config_path), rel_path))
+            if hasattr(self, 'bot') and os.path.exists(abs_path):
+                self.bot.load_template(name, abs_path)
+
+            # Refresh UI lists
+            self.refresh_failsafe_templates()
+            # Select the new template
+            idx = self.failsafe_template_combo.findText(name)
+            if idx >= 0:
+                self.failsafe_template_combo.setCurrentIndex(idx)
+            self.update_template_tester_templates()
+
+            # Save config
+            self.save_config()
+            self.statusBar().showMessage(f"Captured failsafe image '{name}'")
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to capture failsafe image: {str(e)}")
+            return False
+
+    def select_failsafe_image(self):
+        """Select an image file and add as a failsafe template."""
+        try:
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, "Select Failsafe Image", "",
+                "Images (*.png *.jpg *.jpeg *.bmp)"
+            )
+            if not file_path:
+                return False
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            name = self.failsafe_template_name_edit.text().strip() if hasattr(self, 'failsafe_template_name_edit') else ''
+            if not name:
+                name = base_name
+                if hasattr(self, 'failsafe_template_name_edit'):
+                    self.failsafe_template_name_edit.setText(name)
+
+            # Ensure destination directory
+            os.makedirs(self.failsafe_images_dir, exist_ok=True)
+            ext = os.path.splitext(file_path)[1]
+            dest_path = os.path.join(self.failsafe_images_dir, f"{name}{ext}")
+
+            try:
+                if os.path.exists(dest_path):
+                    # Check if same file; if different, ask overwrite
+                    try:
+                        same = os.path.samefile(file_path, dest_path)
+                    except Exception:
+                        same = False
+                    if not same:
+                        reply = QMessageBox.question(
+                            self, 'File Exists',
+                            f"An image named '{name}{ext}' already exists. Overwrite?",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.No
+                        )
+                        if reply != QMessageBox.StandardButton.Yes:
+                            return False
+                shutil.copy2(file_path, dest_path)
+            except shutil.SameFileError:
+                # Use existing file
+                pass
+
+            # Store relative path and load into bot
+            rel_path = os.path.relpath(dest_path, os.path.dirname(self.config_path))
+            self.config.setdefault('templates', {})[name] = rel_path
+            abs_path = os.path.abspath(os.path.join(os.path.dirname(self.config_path), rel_path))
+            if hasattr(self, 'bot') and os.path.exists(abs_path):
+                self.bot.load_template(name, abs_path)
+
+            # Refresh and select
+            self.refresh_failsafe_templates()
+            idx = self.failsafe_template_combo.findText(name)
+            if idx >= 0:
+                self.failsafe_template_combo.setCurrentIndex(idx)
+            self.update_template_tester_templates()
+
+            # Save config
+            self.save_config()
+            self.statusBar().showMessage(f"Loaded failsafe image '{name}'")
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load failsafe image: {str(e)}")
             return False
     def show_about(self):
         """Show about dialog."""
