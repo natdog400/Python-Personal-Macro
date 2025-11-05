@@ -16,6 +16,7 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
 - **Template Tester**: Live preview of template matching with confidence meter and optional search region
 - **Hotkeys & Status**: F8 to stop; status bar updates; mouse position tracker
 - **Config Persistence**: Reads/writes `config.json` and keeps template paths relative when possible
+- **Break Settings**: Set a maximum runtime cap (hours/minutes/seconds); live timer shows `Elapsed / Max`; cap overrides loop settings
 
 ## Requirements
 
@@ -109,6 +110,10 @@ Top-level structure:
         "actions": [{"type": "click"}]
       }
     ]
+  },
+  "break_settings": {
+    "enabled": true,
+    "max_runtime_seconds": 3600
   }
 }
 ```
@@ -136,6 +141,20 @@ Action dictionary fields (as used across sequences and failsafe steps):
 - The worker periodically checks the configured failsafe template (`check_failsafe_trigger`).
 - When detected, the failsafe sequence executes (`execute_failsafe_sequence`).
 - The Failsafe tab’s Test button runs only the failsafe sequence, using the current GUI configuration.
+
+## Break Settings
+
+- Use the Break Settings tab to set a maximum runtime using `hours`, `minutes`, and `seconds`.
+- When enabled, the cap applies to total runtime and overrides any sequence loop count.
+- The status bar shows a live clock: `Elapsed: Hh Mm Ss / Max: Hh Mm Ss`.
+- The bot stops automatically when elapsed ≥ max runtime.
+- These values persist to `config.json`:
+  - `break_settings.enabled`: boolean
+  - `break_settings.max_runtime_seconds`: integer seconds
+- Tips:
+  - Verify with a small cap (e.g., `0h 0m 10s`).
+  - Ensure `Enable Max Runtime` is checked; a cap of `0` disables enforcement.
+  - Check `bot_debug.log` for entries like `Max runtime reached (...)`.
 
 ## Logging & Debugging
 

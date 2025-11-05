@@ -44,7 +44,7 @@ import signal
 
 class BotWorker(QThread):
     """Worker thread for running bot operations."""
-    def __init__(self, bot, sequence, loop=False, loop_count=1, non_required_wait=False, failsafe_config=None, failsafe_only=False):
+    def __init__(self, bot, sequence, loop=False, loop_count=1, non_required_wait=False, failsafe_config=None, failsafe_only=False, max_runtime_seconds=None):
         super().__init__()
         self.bot = bot
         self.sequence = sequence
@@ -53,6 +53,7 @@ class BotWorker(QThread):
         self.non_required_wait = non_required_wait  # Whether to wait for non-required steps
         self.failsafe_config = failsafe_config  # New failsafe configuration
         self.failsafe_only = failsafe_only  # If True, run only the failsafe sequence and exit
+        self.max_runtime_seconds = max_runtime_seconds  # Max runtime cutoff
         self.signals = WorkerSignals()
         self._is_running = True
         self._should_stop = False  # Flag to indicate if we should stop
@@ -62,13 +63,16 @@ class BotWorker(QThread):
         self._process_pid = None  # Store the process ID for forceful termination
         self._executing_failsafe = False  # Flag to track if we're in failsafe execution
         logger.info("BotWorker initialized with loop=%s, loop_count=%s, non_required_wait=%s, failsafe_config=%s", 
-                   loop, loop_count, non_required_wait, bool(failsafe_config))
+                    loop, loop_count, non_required_wait, bool(failsafe_config))
     
     def run(self):
         """Run the sequence of steps with optional looping."""
         # Store the process ID for forceful termination if needed
         self._process_pid = os.getpid()
         logger.info(f"BotWorker started with PID: {self._process_pid}")
+        # Track start time for max runtime cutoff
+        import time
+        self._start_time = time.time()
         
         # Failsafe configuration is now handled by self.failsafe_config
         # If we're in failsafe-only mode (e.g., Test Failsafe button), execute and exit
@@ -92,6 +96,17 @@ class BotWorker(QThread):
         
         try:
             while self._is_running and not self._should_stop and (not self.loop or self.current_iteration < self.loop_count):
+                # Check max runtime before starting iteration
+                if self.max_runtime_seconds is not None:
+                    elapsed = time.time() - getattr(self, '_start_time', time.time())
+                    if elapsed >= self.max_runtime_seconds:
+                        logger.info("Max runtime reached (%.2fs >= %.2fs)", elapsed, self.max_runtime_seconds)
+                        self.signals.update.emit({
+                            "status": "Max runtime reached. Stopping...",
+                            "progress": int(100)
+                        })
+                        self._should_stop = True
+                        break
                 self.current_iteration += 1
                 logger.info("Starting iteration %d/%d", self.current_iteration, self.loop_count if self.loop else 1)
                 
@@ -121,6 +136,18 @@ class BotWorker(QThread):
                         if not self._is_running:
                             should_continue = False
                             break
+                        # Check max runtime inside steps loop
+                        if self.max_runtime_seconds is not None:
+                            elapsed = time.time() - getattr(self, '_start_time', time.time())
+                            if elapsed >= self.max_runtime_seconds:
+                                logger.info("Max runtime reached during steps (%.2fs >= %.2fs)", elapsed, self.max_runtime_seconds)
+                                self.signals.update.emit({
+                                    "status": "Max runtime reached during steps. Stopping...",
+                                    "progress": int(100)
+                                })
+                                self._should_stop = True
+                                should_continue = False
+                                break
                         
                         self.current_step = i
                         template_name = step.get('find', '')
@@ -2330,12 +2357,60 @@ class MainWindow(QMainWindow):
         tester_layout.addWidget(self.template_tester)
         # Ensure the template list is populated
         self.update_template_tester_templates()
-        
+
+        # Create break settings tab
+        self.break_tab = QWidget()
+        break_layout = QVBoxLayout(self.break_tab)
+        break_group = QGroupBox("Break Settings")
+        break_group_layout = QVBoxLayout()
+
+        # Enable checkbox
+        self.break_enabled_checkbox = QCheckBox("Enable Max Runtime")
+        self.break_enabled_checkbox.setChecked(False)
+        break_group_layout.addWidget(self.break_enabled_checkbox)
+
+        # Hours/minutes inputs
+        time_layout = QHBoxLayout()
+        time_layout.addWidget(QLabel("Max runtime:"))
+        self.break_hours_spin = QSpinBox()
+        self.break_hours_spin.setRange(0, 999)
+        self.break_hours_spin.setValue(0)
+        time_layout.addWidget(self.break_hours_spin)
+        time_layout.addWidget(QLabel("hours"))
+        self.break_minutes_spin = QSpinBox()
+        self.break_minutes_spin.setRange(0, 59)
+        self.break_minutes_spin.setValue(0)
+        time_layout.addWidget(self.break_minutes_spin)
+        time_layout.addWidget(QLabel("minutes"))
+        # Seconds input
+        self.break_seconds_spin = QSpinBox()
+        self.break_seconds_spin.setRange(0, 59)
+        self.break_seconds_spin.setValue(0)
+        time_layout.addWidget(self.break_seconds_spin)
+        time_layout.addWidget(QLabel("seconds"))
+        time_layout.addStretch()
+        break_group_layout.addLayout(time_layout)
+
+        break_group.setLayout(break_group_layout)
+        break_layout.addWidget(break_group)
+        break_layout.addStretch()
+
+        # Toggle enabling of inputs based on checkbox
+        def _set_break_inputs_enabled(enabled: bool):
+            self.break_hours_spin.setEnabled(enabled)
+            self.break_minutes_spin.setEnabled(enabled)
+            self.break_seconds_spin.setEnabled(enabled)
+        _set_break_inputs_enabled(False)
+        self.break_enabled_checkbox.stateChanged.connect(
+            lambda state: _set_break_inputs_enabled(state == Qt.CheckState.Checked.value)
+        )
+
         # Add tabs to tab widget
         self.tab_widget.addTab(self.sequences_tab, "Sequences")
         self.tab_widget.addTab(self.failsafe_tab, "Failsafe")
         self.tab_widget.addTab(self.templates_tab, "Templates")
         self.tab_widget.addTab(self.template_tester_tab, "Template Tester")
+        self.tab_widget.addTab(self.break_tab, "Break Settings")
         
         # Welcome screen
         welcome_widget = QWidget()
@@ -2457,7 +2532,8 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self.config = {
                 "templates": {},
-                "sequences": []
+                "sequences": [],
+                "break_settings": {"enabled": False, "max_runtime_seconds": 0}
             }
             self.update_ui_from_config()
             self.statusBar().showMessage("Created new configuration")
@@ -2562,70 +2638,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load configuration: {str(e)}")
     
-    def save_config(self):
-        """Save configuration to file."""
-        try:
-            # Update config from UI before saving
-            self.update_config_from_ui()
-            
-            # Include search region in config if it exists and is valid
-            if (hasattr(self, 'search_region') and 
-                self.search_region is not None and 
-                isinstance(self.search_region, (list, tuple)) and 
-                len(self.search_region) == 4):
-                self.config['search_region'] = list(self.search_region)  # Ensure it's a list for JSON serialization
-            else:
-                self.config.pop('search_region', None)
-            
-            # Ensure templates directory exists
-            os.makedirs(self.images_dir, exist_ok=True)
-            
-            # Process template paths to use relative paths where possible
-            if 'templates' in self.config:
-                updated_templates = {}
-                for name, path in self.config['templates'].items():
-                    if not path:  # Skip empty paths
-                        continue
-                        
-                    # Make sure path is absolute for checking
-                    abs_path = path if os.path.isabs(path) else os.path.join(os.path.dirname(self.config_path), path)
-                    abs_path = os.path.normpath(abs_path)
-                    
-                    # If the file exists, use relative path if it's within the script directory
-                    if os.path.exists(abs_path):
-                        # Try to make path relative to config file
-                        try:
-                            rel_path = os.path.relpath(abs_path, os.path.dirname(self.config_path))
-                            # Use relative path if it's not going up too many directories
-                            if not rel_path.startswith('..' + os.sep) or rel_path.startswith('.' + os.sep):
-                                updated_templates[name] = rel_path
-                            else:
-                                updated_templates[name] = abs_path
-                        except ValueError:
-                            # If we can't make it relative (e.g., on different drives on Windows), use absolute path
-                            updated_templates[name] = abs_path
-                    else:
-                        # If file doesn't exist, keep the path as is but warn the user
-                        logger.warning(f"Template file not found: {abs_path}")
-                        updated_templates[name] = path
-                
-                self.config['templates'] = updated_templates
-            
-            # Ensure the config directory exists
-            config_dir = os.path.dirname(self.config_path)
-            if config_dir and not os.path.exists(config_dir):
-                os.makedirs(config_dir)
-            
-            # Save to file with pretty printing
-            with open(self.config_path, 'w') as f:
-                json.dump(self.config, f, indent=4, ensure_ascii=False)
-            
-            self.statusBar().showMessage(f"Configuration saved to {os.path.basename(self.config_path)}")
-            return True
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save configuration: {str(e)}")
-            return False
+    # Duplicate save_config removed; using the unified version defined later in the class.
     
     def toggle_region_selection(self, checked):
         """Toggle region selection mode."""
@@ -2682,6 +2695,29 @@ class MainWindow(QMainWindow):
         
         # Update Template Tester's template list
         self.update_template_tester_templates()
+
+        # Update break settings UI
+        br = self.config.get('break_settings', {"enabled": False, "max_runtime_seconds": 0})
+        if hasattr(self, 'break_enabled_checkbox'):
+            self.break_enabled_checkbox.setChecked(bool(br.get('enabled', False)))
+        # Convert seconds to hours/minutes
+        secs_total = int(br.get('max_runtime_seconds', 0) or 0)
+        hrs = max(secs_total // 3600, 0)
+        mins = max((secs_total % 3600) // 60, 0)
+        secs = max(secs_total % 60, 0)
+        if hasattr(self, 'break_hours_spin'):
+            self.break_hours_spin.setValue(hrs)
+        if hasattr(self, 'break_minutes_spin'):
+            self.break_minutes_spin.setValue(mins)
+        if hasattr(self, 'break_seconds_spin'):
+            self.break_seconds_spin.setValue(secs)
+        # Enable/disable inputs based on enabled flag
+        if hasattr(self, 'break_enabled_checkbox'):
+            enabled = bool(br.get('enabled', False))
+            self.break_hours_spin.setEnabled(enabled)
+            self.break_minutes_spin.setEnabled(enabled)
+            if hasattr(self, 'break_seconds_spin'):
+                self.break_seconds_spin.setEnabled(enabled)
         
         # Update failsafe configuration
         failsafe_config = self.config.get('failsafe', {})
@@ -2722,24 +2758,44 @@ class MainWindow(QMainWindow):
     
     def update_config_from_ui(self):
         """Update config from UI elements."""
-        # Update templates
-        if hasattr(self, 'template_editor'):
-            template_data = self.template_editor.get_data()
-            if template_data['name']:
-                self.config['templates'][template_data['name']] = template_data['path']
+        # Update templates (only if an editor widget with get_data is active)
+        try:
+            template_data = None
+            if hasattr(self, 'template_editor') and hasattr(self.template_editor, 'get_data'):
+                template_data = self.template_editor.get_data()
+            elif hasattr(self, 'template_stack'):
+                current_widget = self.template_stack.currentWidget()
+                if current_widget is not None and hasattr(current_widget, 'get_data'):
+                    template_data = current_widget.get_data()
+            if template_data and template_data.get('name'):
+                self.config.setdefault('templates', {})[template_data['name']] = template_data.get('path', '')
+        except Exception as e:
+            logger.debug(f"Skipping template update from UI: {e}")
         
-        # Update sequences
+        # Update sequences and preserve loop fields
         if hasattr(self, 'sequence_editor_widget'):
             sequence_data = self.sequence_editor_widget.get_sequence_data()
-            if sequence_data['name']:
+            if sequence_data.get('name'):
+                # Preserve loop settings from UI
+                ui_loop = self.loop_checkbox.isChecked() if hasattr(self, 'loop_checkbox') else None
+                ui_loop_count = self.loop_count_spin.value() if hasattr(self, 'loop_count_spin') else None
                 # Find and update the sequence in the config
+                found = False
                 for i, seq in enumerate(self.config.get('sequences', [])):
                     if seq.get('name') == sequence_data['name']:
-                        self.config['sequences'][i] = sequence_data
+                        merged = sequence_data.copy()
+                        # Carry over existing loop fields if UI not available
+                        merged['loop'] = ui_loop if ui_loop is not None else seq.get('loop', False)
+                        merged['loop_count'] = ui_loop_count if ui_loop_count is not None else seq.get('loop_count', 1)
+                        self.config['sequences'][i] = merged
+                        found = True
                         break
-                else:
+                if not found:
                     # Add new sequence if not found
-                    self.config.setdefault('sequences', []).append(sequence_data)
+                    merged = sequence_data.copy()
+                    merged['loop'] = ui_loop if ui_loop is not None else False
+                    merged['loop_count'] = ui_loop_count if ui_loop_count is not None else 1
+                    self.config.setdefault('sequences', []).append(merged)
         
         # Update failsafe configuration
         failsafe_config = self.get_failsafe_config()
@@ -2747,6 +2803,18 @@ class MainWindow(QMainWindow):
             self.config['failsafe'] = failsafe_config
         else:
             self.config.pop('failsafe', None)  # Remove failsafe config if disabled
+
+        # Update break settings
+        if hasattr(self, 'break_enabled_checkbox'):
+            enabled = self.break_enabled_checkbox.isChecked()
+            hrs = self.break_hours_spin.value() if hasattr(self, 'break_hours_spin') else 0
+            mins = self.break_minutes_spin.value() if hasattr(self, 'break_minutes_spin') else 0
+            secs_extra = self.break_seconds_spin.value() if hasattr(self, 'break_seconds_spin') else 0
+            secs = int(hrs) * 3600 + int(mins) * 60 + int(secs_extra)
+            self.config['break_settings'] = {
+                'enabled': bool(enabled),
+                'max_runtime_seconds': int(secs)
+            }
     
     def save_current_template(self):
         """Save the currently edited template and load it into the bot."""
@@ -3398,10 +3466,55 @@ class MainWindow(QMainWindow):
             self.loop_count_spin.setEnabled(checked)
     
     def save_config(self):
-        """Save the current configuration to a file."""
+        """Save configuration to file (unified and robust)."""
         try:
+            # Update config from UI before saving
+            self.update_config_from_ui()
+
+            # Include search region in config if valid
+            if (hasattr(self, 'search_region') and 
+                self.search_region is not None and 
+                isinstance(self.search_region, (list, tuple)) and 
+                len(self.search_region) == 4):
+                self.config['search_region'] = list(self.search_region)
+            else:
+                self.config.pop('search_region', None)
+
+            # Ensure templates directory exists
+            os.makedirs(getattr(self, 'images_dir', 'images'), exist_ok=True)
+
+            # Normalize template paths to relative where possible
+            if 'templates' in self.config:
+                updated_templates = {}
+                for name, path in self.config['templates'].items():
+                    if not path:
+                        continue
+                    abs_path = path if os.path.isabs(path) else os.path.join(os.path.dirname(self.config_path), path)
+                    abs_path = os.path.normpath(abs_path)
+                    if os.path.exists(abs_path):
+                        try:
+                            rel_path = os.path.relpath(abs_path, os.path.dirname(self.config_path))
+                            if not rel_path.startswith('..' + os.sep) or rel_path.startswith('.' + os.sep):
+                                updated_templates[name] = rel_path
+                            else:
+                                updated_templates[name] = abs_path
+                        except ValueError:
+                            updated_templates[name] = abs_path
+                    else:
+                        logger.warning(f"Template file not found: {abs_path}")
+                        updated_templates[name] = path
+                self.config['templates'] = updated_templates
+
+            # Ensure the config directory exists
+            config_dir = os.path.dirname(self.config_path)
+            if config_dir and not os.path.exists(config_dir):
+                os.makedirs(config_dir)
+
+            # Save pretty JSON
             with open(self.config_path, 'w') as f:
-                json.dump(self.config, f, indent=4)
+                json.dump(self.config, f, indent=4, ensure_ascii=False)
+
+            self.statusBar().showMessage(f"Configuration saved to {os.path.basename(self.config_path)}")
             return True
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save configuration: {str(e)}")
@@ -3571,10 +3684,24 @@ class MainWindow(QMainWindow):
             if not self.sequence_editor_widget.failsafe_enable_checkbox.isChecked() and 'failsafe' in sequence:
                 sequence.pop('failsafe', None)
         
-        # Get loop settings
-        should_loop = sequence.get('loop', False)
-        loop_count = sequence.get('loop_count', 1)
+        # Get loop settings from UI controls to avoid config overwrites
+        should_loop = self.loop_checkbox.isChecked() if hasattr(self, 'loop_checkbox') else sequence.get('loop', False)
+        loop_count = self.loop_count_spin.value() if hasattr(self, 'loop_count_spin') else sequence.get('loop_count', 1)
         
+        # Compute max runtime from Break Settings UI for status and worker
+        max_secs = None
+        hrs = mins = secs_part = 0
+        try:
+            if hasattr(self, 'break_enabled_checkbox') and self.break_enabled_checkbox.isChecked():
+                hrs = self.break_hours_spin.value() if hasattr(self, 'break_hours_spin') else 0
+                mins = self.break_minutes_spin.value() if hasattr(self, 'break_minutes_spin') else 0
+                secs_part = self.break_seconds_spin.value() if hasattr(self, 'break_seconds_spin') else 0
+                max_secs = int(hrs) * 3600 + int(mins) * 60 + int(secs_part)
+                if max_secs <= 0:
+                    max_secs = None
+        except Exception:
+            max_secs = None
+
         # Disable UI during execution
         self.setEnabled(False)
         status_text = f"Running sequence: {sequence_name}"
@@ -3583,7 +3710,25 @@ class MainWindow(QMainWindow):
                 status_text += f" (Looping {loop_count} times)"
             else:
                 status_text += " (Looping)"
+        # Do not include elapsed here; timer will update it live
+        if max_secs is not None:
+            status_text += f" — Max runtime: {hrs}h {mins}m {secs_part}s"
         self.statusBar().showMessage(status_text)
+        # Seed the live status prefix and start the timer
+        self.run_status_prefix = status_text
+        try:
+            # Initialize timing attributes and a 1s UI timer
+            import time
+            self.run_start_time = time.time()
+            self.run_max_secs = max_secs
+            if hasattr(self, 'run_timer') and self.run_timer:
+                self.run_timer.stop()
+            self.run_timer = QTimer(self)
+            self.run_timer.setInterval(1000)
+            self.run_timer.timeout.connect(self.update_run_status_text)
+            self.run_timer.start()
+        except Exception:
+            pass
         
         # Update bot with search region
         self.bot.search_region = self.search_region
@@ -3610,7 +3755,8 @@ class MainWindow(QMainWindow):
             loop=should_loop,
             loop_count=loop_count,
             non_required_wait=self.non_required_wait_checkbox.isChecked(),
-            failsafe_config=failsafe_config if failsafe_config else None
+            failsafe_config=failsafe_config if failsafe_config else None,
+            max_runtime_seconds=max_secs
         )
         logger.info(f"Starting sequence with non_required_wait={self.worker.non_required_wait}")
         self.worker.signals.update.connect(self.on_worker_update)
@@ -3626,7 +3772,9 @@ class MainWindow(QMainWindow):
     def on_worker_update(self, data: dict):
         """Handle worker progress updates."""
         if 'status' in data:
-            self.statusBar().showMessage(data['status'])
+            # Update the live status prefix and refresh the timer-driven text
+            self.run_status_prefix = data['status']
+            self.update_run_status_text()
         if 'progress' in data:
             # Update progress bar if you have one
             pass
@@ -3635,11 +3783,29 @@ class MainWindow(QMainWindow):
         """Handle worker completion."""
         self.setEnabled(True)
         self.stop_action.setEnabled(False)
+        # Stop the live timer and clear timing state
+        try:
+            if hasattr(self, 'run_timer') and self.run_timer:
+                self.run_timer.stop()
+            self.run_start_time = None
+            self.run_max_secs = None
+            self.run_status_prefix = ""
+        except Exception:
+            pass
         self.statusBar().showMessage("Sequence completed successfully")
         
     def on_worker_error(self, error: str):
         """Handle worker errors."""
         self.setEnabled(True)
+        # Stop the live timer and clear timing state
+        try:
+            if hasattr(self, 'run_timer') and self.run_timer:
+                self.run_timer.stop()
+            self.run_start_time = None
+            self.run_max_secs = None
+            self.run_status_prefix = ""
+        except Exception:
+            pass
         QMessageBox.critical(self, "Error", error)
         self.statusBar().showMessage(f"Error: {error}")
         
@@ -3664,6 +3830,15 @@ class MainWindow(QMainWindow):
             self.stop_action.setEnabled(False)
             self.statusBar().showMessage("Stopping sequence...")
             self.setEnabled(True)
+            # Stop the live timer and clear timing state
+            try:
+                if hasattr(self, 'run_timer') and self.run_timer:
+                    self.run_timer.stop()
+                self.run_start_time = None
+                self.run_max_secs = None
+                self.run_status_prefix = ""
+            except Exception:
+                pass
             
             # Force stop if not responding
             def check_worker():
@@ -3694,6 +3869,27 @@ class MainWindow(QMainWindow):
             self.stop_action.setEnabled(False)
             self.statusBar().showMessage("Error stopping sequence")
             return False
+
+    def update_run_status_text(self):
+        """Update the status bar with live elapsed and max runtime."""
+        try:
+            if not hasattr(self, 'run_start_time') or self.run_start_time is None:
+                return
+            import time
+            elapsed = int(time.time() - self.run_start_time)
+            def fmt(secs: int) -> str:
+                h = max(secs // 3600, 0)
+                m = max((secs % 3600) // 60, 0)
+                s = max(secs % 60, 0)
+                return f"{h}h {m}m {s}s"
+            prefix = getattr(self, 'run_status_prefix', '') or 'Running'
+            if hasattr(self, 'run_max_secs') and self.run_max_secs is not None:
+                msg = f"{prefix} — Elapsed: {fmt(elapsed)} / Max: {fmt(int(self.run_max_secs))}"
+            else:
+                msg = f"{prefix} — Elapsed: {fmt(elapsed)}"
+            self.statusBar().showMessage(msg)
+        except Exception:
+            pass
     
     def toggle_failsafe_ui(self, enabled: bool):
         """Enable/disable failsafe UI elements."""
