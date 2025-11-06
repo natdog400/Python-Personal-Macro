@@ -11,6 +11,12 @@ import logging
 from enum import Enum
 from dataclasses import dataclass, asdict
 import random
+from PIL import ImageGrab
+try:
+    from PyQt6.QtGui import QGuiApplication, QImage
+except Exception:
+    QGuiApplication = None
+    QImage = None
 
 # Configure logging
 logging.basicConfig(
@@ -61,6 +67,15 @@ class ImageDetectionBot:
         """
         self.confidence = confidence
         self.templates: Dict[str, np.ndarray] = {}
+        # Cache for feature-based matching (scale/rotation robust)
+        self.template_features: Dict[str, Dict[str, Any]] = {}
+        # ORB detector and BF matcher for fast feature matching
+        try:
+            self.orb = cv2.ORB_create(nfeatures=1500)
+            self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        except Exception:
+            self.orb = None
+            self.bf = None
         self.current_position: Optional[Tuple[int, int]] = None
         
     def load_template(self, name: str, image_path: str) -> bool:
@@ -105,6 +120,19 @@ class ImageDetectionBot:
                 
             # Store the template
             self.templates[name] = template
+            # Precompute feature descriptors for scale/rotation robust matching, if ORB available
+            try:
+                if self.orb is not None:
+                    gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+                    kps, des = self.orb.detectAndCompute(gray, None)
+                    self.template_features[name] = {
+                        'keypoints': kps,
+                        'descriptors': des,
+                        'shape': gray.shape[::-1]  # (w, h)
+                    }
+                    logger.info(f"Computed ORB features for template '{name}': {len(kps)} keypoints")
+            except Exception as e:
+                logger.warning(f"Feature extraction failed for template '{name}': {e}")
             logger.info(f"Successfully loaded template '{name}' from {image_path}, dimensions: {template.shape[1]}x{template.shape[0]}")
             return True
             
@@ -204,7 +232,11 @@ class ImageDetectionBot:
     
     def find_image(self, template_name: str, region: Optional[Tuple[int, int, int, int]] = None, 
                    timeout: float = 10.0, check_interval: float = 0.5, 
-                   confidence: Optional[float] = None) -> Optional[Tuple[int, int]]:
+                   confidence: Optional[float] = None,
+                   strategy: Optional[str] = None,
+                   min_inliers: int = 12,
+                   ratio_thresh: float = 0.75,
+                   ransac_thresh: float = 4.0) -> Optional[Tuple[int, int]]:
         """
         Find a template image on the screen within a specified region.
         
@@ -226,29 +258,143 @@ class ImageDetectionBot:
         conf_threshold = confidence if confidence is not None else self.confidence
         start_time = time.time()
         template = self.templates[template_name]
+        use_feature = (strategy == 'feature') and (self.orb is not None) and (template_name in self.template_features)
         
         while (time.time() - start_time) < timeout:
             try:
-                # Take a screenshot of the specified region or full screen
-                screenshot = pyautogui.screenshot(region=region) if region else pyautogui.screenshot()
-                screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
-                
-                # Perform template matching
-                result = cv2.matchTemplate(screenshot, template, cv2.TM_CCOEFF_NORMED)
+                # Take a screenshot of the specified region or full screen, handling multi-monitor coords
+                def _capture_region_bgr(x: int, y: int, w: int, h: int) -> Optional[np.ndarray]:
+                    # Prefer QScreen if available for robust multi-monitor capture
+                    if QGuiApplication is not None:
+                        try:
+                            screens = QGuiApplication.screens()
+                            # Select screen with largest intersection
+                            best = None; best_area = -1
+                            for sc in screens:
+                                g = sc.geometry()
+                                gx1, gy1, gx2, gy2 = g.x(), g.y(), g.x() + g.width(), g.y() + g.height()
+                                ix1, iy1 = max(x, gx1), max(y, gy1)
+                                ix2, iy2 = min(x + w, gx2), min(y + h, gy2)
+                                if ix2 > ix1 and iy2 > iy1:
+                                    area = (ix2 - ix1) * (iy2 - iy1)
+                                    if area > best_area:
+                                        best_area = area; best = sc
+                            target = best if best is not None else (screens[0] if screens else None)
+                            if target is not None:
+                                g = target.geometry()
+                                local_x = max(0, x - g.x()); local_y = max(0, y - g.y())
+                                grab_w = max(1, min(w, g.width() - local_x)); grab_h = max(1, min(h, g.height() - local_y))
+                                dpr = target.devicePixelRatio()
+                                pm = target.grabWindow(0, int(local_x * dpr), int(local_y * dpr), int(grab_w * dpr), int(grab_h * dpr))
+                                if pm.isNull():
+                                    return None
+                                qi = pm.toImage().convertToFormat(QImage.Format.Format_BGR888)
+                                height = qi.height(); width = qi.width(); bpl = qi.bytesPerLine()
+                                size_bytes = qi.sizeInBytes() if hasattr(qi, 'sizeInBytes') else (bpl * height)
+                                bits = qi.bits(); bits.setsize(size_bytes)
+                                buf = np.frombuffer(bits, dtype=np.uint8)
+                                img_row = buf.reshape((height, bpl))
+                                img_row = img_row[:, :width * 3]
+                                arr = img_row.reshape((height, width, 3))
+                                return arr.copy()
+                        except Exception:
+                            pass
+                    # Fallback: PIL/pyautogui based on coords
+                    try:
+                        img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
+                        return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                    except Exception:
+                        return cv2.cvtColor(np.array(pyautogui.screenshot(region=(x, y, w, h))), cv2.COLOR_RGB2BGR)
+
+                def _capture_full_desktop_bgr() -> np.ndarray:
+                    if QGuiApplication is not None:
+                        try:
+                            screens = QGuiApplication.screens()
+                            if screens:
+                                x0 = min(sc.geometry().x() for sc in screens)
+                                y0 = min(sc.geometry().y() for sc in screens)
+                                x1 = max(sc.geometry().x() + sc.geometry().width() for sc in screens)
+                                y1 = max(sc.geometry().y() + sc.geometry().height() for sc in screens)
+                                total_w, total_h = x1 - x0, y1 - y0
+                                canvas = np.zeros((total_h, total_w, 3), dtype=np.uint8)
+                                for sc in screens:
+                                    g = sc.geometry()
+                                    pm = sc.grabWindow(0)
+                                    if pm.isNull():
+                                        continue
+                                    qi = pm.toImage().convertToFormat(QImage.Format.Format_BGR888)
+                                    h = qi.height(); w = qi.width(); bpl = qi.bytesPerLine()
+                                    size_bytes = qi.sizeInBytes() if hasattr(qi, 'sizeInBytes') else (bpl * h)
+                                    bits = qi.bits(); bits.setsize(size_bytes)
+                                    buf = np.frombuffer(bits, dtype=np.uint8)
+                                    img_row = buf.reshape((h, bpl))
+                                    img_row = img_row[:, :w * 3]
+                                    arr = img_row.reshape((h, w, 3))
+                                    off_x = g.x() - x0; off_y = g.y() - y0
+                                    y_end = min(off_y + h, total_h); x_end = min(off_x + w, total_w)
+                                    canvas[off_y:y_end, off_x:x_end] = arr[:y_end - off_y, :x_end - off_x]
+                                return canvas
+                        except Exception:
+                            pass
+                    # Fallback to pyautogui
+                    return cv2.cvtColor(np.array(pyautogui.screenshot()), cv2.COLOR_RGB2BGR)
+
+                if region:
+                    rx, ry, rw, rh = region
+                    screenshot_bgr = _capture_region_bgr(rx, ry, rw, rh)
+                else:
+                    screenshot_bgr = _capture_full_desktop_bgr()
+                if screenshot_bgr is None or screenshot_bgr.size == 0:
+                    time.sleep(check_interval)
+                    continue
+
+                if use_feature:
+                    # Feature-based matching for scale/rotation robustness
+                    try:
+                        gray_frame = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
+                        kps2, des2 = self.orb.detectAndCompute(gray_frame, None)
+                        tpl_feats = self.template_features.get(template_name, {})
+                        des1 = tpl_feats.get('descriptors')
+                        kps1 = tpl_feats.get('keypoints')
+                        if des1 is None or des2 is None or len(des2) == 0:
+                            raise ValueError("No descriptors available for feature matching")
+                        matches = self.bf.knnMatch(des1, des2, k=2)
+                        good = []
+                        for m, n in matches:
+                            if m.distance < ratio_thresh * n.distance:
+                                good.append(m)
+                        if len(good) >= min_inliers:
+                            src_pts = np.float32([kps1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+                            dst_pts = np.float32([kps2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+                            H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, ransac_thresh)
+                            matchesMask = mask.ravel().tolist() if mask is not None else []
+                            inliers = int(np.sum(matchesMask)) if matchesMask else 0
+                            if H is not None and inliers >= min_inliers:
+                                w_tpl, h_tpl = tpl_feats.get('shape', (template.shape[1], template.shape[0]))
+                                pts = np.float32([[0, 0], [w_tpl, 0], [w_tpl, h_tpl], [0, h_tpl]]).reshape(-1, 1, 2)
+                                dst = cv2.perspectiveTransform(pts, H)
+                                # Compute center of the detected polygon
+                                center = np.mean(dst.reshape(-1, 2), axis=0)
+                                x, y = int(center[0]), int(center[1])
+                                if region:
+                                    x += region[0]
+                                    y += region[1]
+                                logger.info(f"Feature match '{template_name}' at ({x}, {y}) with {inliers} inliers / {len(good)} good matches")
+                                return (x, y)
+                        # If feature matching failed, fall back to template match below
+                    except Exception as e:
+                        logger.debug(f"Feature matching error: {e}")
+
+                # Fallback to classic template matching
+                result = cv2.matchTemplate(screenshot_bgr, template, cv2.TM_CCOEFF_NORMED)
                 min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-                
-                # Check if the match is above the confidence threshold
                 if max_val >= conf_threshold:
-                    # Calculate the center of the matched region
                     h, w = template.shape[:2]
                     x = max_loc[0] + w // 2
                     y = max_loc[1] + h // 2
-                    
-                    # Adjust coordinates if searching in a region
                     if region:
                         x += region[0]
                         y += region[1]
-                        
                     logger.info(f"Found '{template_name}' at ({x}, {y}) with confidence {max_val:.2f}")
                     return (x, y)
                 

@@ -10,7 +10,7 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
 - **Action Types**: `click`, `right_click`, `double_click`, `move`, `move_to`, `type`, `key_press`, `wait`, `scroll`, `click_and_hold`
 - **Regions & Randomization**:
   - Step-level `search_region` for finding templates
-  - Click actions can target a random point in a selected region(REMOVED not needed)
+  - Click actions can target a random point in a selected region
   - Move-To actions can use a selected region with optional random movement
 - **Failsafe System**: Enable a template-based trigger, define a separate sequence, and test it with a button
 - **Template Tester**: Live preview of template matching with confidence meter and optional search region
@@ -51,7 +51,7 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
   - Add a sequence, then add steps
   - For each step: set `find` template, `required`, `timeout`, optional `confidence`
   - Add actions like Click, Move, Move-To, Type, Key Press, Wait, Scroll
-  - For Click: (optionally select a region to click randomly inside)REMOVED not needed)
+  - For Click: optionally select a region to click randomly inside
   - For Move-To: optionally enable random and select a region to move within
   - Run the selected sequence; press F8 to stop
 - Template Tester tab:
@@ -131,10 +131,29 @@ Action dictionary fields (as used across sequences and failsafe steps):
 ## How Matching and Actions Work
 
 - Template matching uses OpenCV (`cv2.matchTemplate`). Confidence threshold is adjustable per step.
+- Feature matching uses ORB descriptors and BF matcher with Lowe's ratio filtering.
+  - Homography via RANSAC estimates rotation/scale; center of the matched polygon is used.
+  - Provide `strategy: "feature"` and optional `min_inliers`, `ratio_thresh`, `ransac_thresh` per step.
 - If a step has no `find` template, its actions run directly.
 - `move_to` can target the detected position or a random point inside a selected region.
 - `click` defaults to current mouse location unless `force_move` is used internally for region clicks.
 - `click_and_hold` acts at the bot’s current position—usually set by a prior `move`/`move_to`.
+
+## Multi-Monitor & Regions
+
+- Toolbar Monitor Selector:
+  - Choose All Monitors or a specific screen; status bar shows the active region.
+  - Capture dialogs (Templates tab) respect the selection.
+- Per-Step Monitor Override:
+  - In the Step Editor, set the step's Monitor; this constrains detection to that screen when no `search_region` is set.
+  - `monitor` persists in `config.json` as `null`, `"ALL"`, or `[x, y, w, h]`.
+- Region Selection:
+  - Select Search Region opens an overlay; if a monitor is chosen, overlay is restricted to that screen.
+  - Regions and monitors can be combined; region takes precedence over monitor.
+- Runtime Capture:
+  - Uses per-monitor `QScreen.grabWindow(...)` with `devicePixelRatio()` for DPI-aware capture.
+  - For full desktop, frames are stitched from each monitor according to virtual desktop coordinates.
+  - Fallbacks: `PIL.ImageGrab.grab(bbox=...)` or `pyautogui.screenshot(region=...)` when needed.
 
 ## Failsafe Behavior
 
@@ -162,16 +181,35 @@ Action dictionary fields (as used across sequences and failsafe steps):
 - On failed matches, screenshots and templates may be saved under a `debug/` folder next to the script
 - Press F8 to stop sequences; the status bar shows progress and messages
 
+### Template Tester (Preview)
+
+- Strategy Dropdown: Default (template) or Feature (scale/rotation).
+- Parameters: Min Inliers, Ratio, RANSAC thresholds.
+- Debug Panel shows:
+  - Target screen index, geometry, local capture rect
+  - Frame size and bytes-per-line, DPI ratio, pixmap state
+  - Fallback path used (QScreen, PIL bbox, pyautogui region, stitched full desktop)
+- Metrics: Inliers, Matches, Confidence, RANSAC reprojection error.
+
+### Monitor Info
+
+- Toolbar button opens a dialog listing monitors: index, geometry, and DPI ratio.
+- Capture All stitches a preview from all monitors to validate layout.
+
 ## Tips for Reliable Matching
 
 - Use small, high-contrast templates of the exact UI you want to detect
 - Avoid scale/rotation changes; match works best for identical sizes
 - Consider using `search_region` to narrow detection for speed and accuracy
+- For multi-monitor setups, prefer per-step monitor selection or regions on the target screen.
+- Use Feature strategy for rotated/scaled UI elements; increase `min_inliers` or adjust `ratio_thresh` when noisy.
 - For random click/move regions, ensure coordinates are on-screen and correct
 
 ## Known Limitations
 
 - Template matching is sensitive to scaling and rotation
+- Feature matching adds overhead; tune thresholds for your scene.
+- Some capture backends may behave differently under extreme DPI or exotic layouts; robust fallbacks are implemented.
 - Some GUI interactions are evolving; if you hit issues (e.g., editing failsafe steps), check logs and report
 - Not all advanced scenarios are fully implemented; contributions are welcome
 

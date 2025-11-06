@@ -44,7 +44,7 @@ import signal
 
 class BotWorker(QThread):
     """Worker thread for running bot operations."""
-    def __init__(self, bot, sequence, loop=False, loop_count=1, non_required_wait=False, failsafe_config=None, failsafe_only=False, max_runtime_seconds=None):
+    def __init__(self, bot, sequence, loop=False, loop_count=1, non_required_wait=False, failsafe_config=None, failsafe_only=False, max_runtime_seconds=None, groups=None):
         super().__init__()
         self.bot = bot
         self.sequence = sequence
@@ -54,6 +54,7 @@ class BotWorker(QThread):
         self.failsafe_config = failsafe_config  # New failsafe configuration
         self.failsafe_only = failsafe_only  # If True, run only the failsafe sequence and exit
         self.max_runtime_seconds = max_runtime_seconds  # Max runtime cutoff
+        self.groups = groups or {}
         self.signals = WorkerSignals()
         self._is_running = True
         self._should_stop = False  # Flag to indicate if we should stop
@@ -114,7 +115,27 @@ class BotWorker(QThread):
                 if self._should_stop:
                     logger.info("Stop requested before starting iteration")
                     break
-                self.total_steps = len(self.sequence.get('steps', []))
+                # Expand groups inline for this iteration
+                base_steps = self.sequence.get('steps', [])
+                expanded_steps = []
+                for st in base_steps:
+                    try:
+                        if isinstance(st, dict) and 'call_group' in st:
+                            grp_name = st.get('call_group')
+                            grp_steps = []
+                            if grp_name and grp_name in self.groups:
+                                grp_steps = self.groups.get(grp_name) or []
+                            else:
+                                logger.warning(f"Group '{grp_name}' not found; skipping call.")
+                            for gs in grp_steps:
+                                expanded_steps.append(gs)
+                        else:
+                            expanded_steps.append(st)
+                    except Exception as e:
+                        logger.error(f"Error expanding group step: {e}")
+                        expanded_steps.append(st)
+
+                self.total_steps = len(expanded_steps)
                 if self.total_steps == 0:
                     self.signals.error.emit("No steps in sequence")
                     return
@@ -132,7 +153,7 @@ class BotWorker(QThread):
                 should_continue = True
                 
                 try:
-                    for i, step in enumerate(self.sequence.get('steps', [])):
+                    for i, step in enumerate(expanded_steps):
                         if not self._is_running:
                             should_continue = False
                             break
@@ -155,6 +176,10 @@ class BotWorker(QThread):
                         timeout = step.get('timeout', 10.0)
                         confidence = step.get('confidence', 0.9)
                         search_region = step.get('search_region')
+                        # If no explicit region, use per-step monitor override if provided
+                        mon = step.get('monitor')
+                        if not search_region and mon and ((isinstance(mon, tuple) and len(mon) == 4) or (isinstance(mon, list) and len(mon) == 4)):
+                            search_region = tuple(mon)
                         step_loop_count = step.get('loop_count', 1)
                         
                         # Check for stop request before each step
@@ -214,11 +239,19 @@ class BotWorker(QThread):
                                         # For non-required steps, use 0.5s timeout if waiting is disabled
                                         current_timeout = timeout if (required or self.non_required_wait) else 0.5
                                         logger.info(f"Looking for template '{template_name}' with timeout={current_timeout}s (required={required}, non_required_wait={self.non_required_wait})")
+                                        strategy = step.get('strategy')  # e.g., 'feature' or None
+                                        min_inliers = step.get('min_inliers', 12)
+                                        ratio_thresh = step.get('ratio_thresh', 0.75)
+                                        ransac_thresh = step.get('ransac_thresh', 4.0)
                                         position = self.bot.find_image(
                                             template_name=template_name,
                                             region=search_region,
                                             timeout=current_timeout,
-                                            confidence=confidence
+                                            confidence=confidence,
+                                            strategy=strategy,
+                                            min_inliers=min_inliers,
+                                            ratio_thresh=ratio_thresh,
+                                            ransac_thresh=ransac_thresh
                                         )
                                     else:
                                         start_time = datetime.now()
@@ -226,10 +259,18 @@ class BotWorker(QThread):
                                         # For non-required steps, use 0.5s timeout if waiting is disabled
                                         current_timeout = timeout if (required or self.non_required_wait) else 0.5
                                         logger.info(f"Looking for template '{template_name}' with timeout={current_timeout}s (required={required}, non_required_wait={self.non_required_wait})")
+                                        strategy = step.get('strategy')
+                                        min_inliers = step.get('min_inliers', 12)
+                                        ratio_thresh = step.get('ratio_thresh', 0.75)
+                                        ransac_thresh = step.get('ransac_thresh', 4.0)
                                         while not self._should_stop and (datetime.now() - start_time).total_seconds() < current_timeout:
                                             position = self.bot.find_image(
                                                 template_name=template_name,
-                                                confidence=confidence
+                                                confidence=confidence,
+                                                strategy=strategy,
+                                                min_inliers=min_inliers,
+                                                ratio_thresh=ratio_thresh,
+                                                ransac_thresh=ransac_thresh
                                             )
                                             if position is not None:
                                                 break
@@ -384,38 +425,44 @@ class BotWorker(QThread):
                 # Execute the failsafe step
                 template_name = step.get('find', '')
                 actions = step.get('actions', [])
-                
+
                 if template_name and str(template_name).lower() != 'none':
                     # Find template first
+                    strategy = step.get('strategy')
+                    region = step.get('search_region')
+                    mon = step.get('monitor')
+                    if not region and mon and ((isinstance(mon, tuple) and len(mon) == 4) or (isinstance(mon, list) and len(mon) == 4)):
+                        region = tuple(mon)
                     position = self.bot.find_image(
                         template_name=template_name,
-                        region=step.get('search_region'),
+                        region=region,
                         timeout=step.get('timeout', 5.0),
-                        confidence=step.get('confidence', 0.9)
+                        confidence=step.get('confidence', 0.9),
+                        strategy=strategy,
+                        min_inliers=step.get('min_inliers', 12),
+                        ratio_thresh=step.get('ratio_thresh', 0.75),
+                        ransac_thresh=step.get('ransac_thresh', 4.0)
                     )
-                    
+
                     if position is None and step.get('required', True):
                         logger.warning(f"Required template '{template_name}' not found in failsafe sequence")
                         continue
-                        
+
                     # Execute actions at found position
                     for action_data in actions:
                         if not self._is_running or self._should_stop:
                             break
-                            
                         try:
                             action = parse_action(action_data)
                             if position is not None and action.type in [ActionType.CLICK, ActionType.MOVE_TO]:
                                 success = self.bot.execute_action_at_position(action, position)
                             else:
                                 success = self.bot.execute_action(action)
-                                
                             if not success:
                                 logger.warning(f"Failed to execute {action.type.value} in failsafe sequence")
-                                
                         except Exception as e:
                             logger.error(f"Error executing failsafe action: {str(e)}")
-                            
+
                 else:
                     # Execute actions without template
                     for action_data in actions:
@@ -502,8 +549,10 @@ class BotWorker(QThread):
         logger.info("Worker stop completed")
 
 class ScreenCaptureDialog(QDialog):
-    """Dialog for capturing a region of the screen."""
-    def __init__(self, parent=None):
+    """Dialog for capturing a region of the screen.
+    Optionally restricts to a specific monitor geometry if provided.
+    """
+    def __init__(self, parent=None, target_geometry: QRect | None = None):
         super().__init__(parent)
         self.setWindowTitle("Capture Screen Region")
         self.setWindowFlags(
@@ -521,15 +570,20 @@ class ScreenCaptureDialog(QDialog):
         self.screens = QGuiApplication.screens()
         self.current_screen = QGuiApplication.primaryScreen()
         self.screen_geometry = self.current_screen.availableGeometry()
+        self.target_geometry = target_geometry
         
         # Calculate combined geometry of all screens
         self.combined_geometry = QRect()
         for screen in self.screens:
             self.combined_geometry = self.combined_geometry.united(screen.geometry())
         
-        # Set dialog to cover all screens
-        self.setGeometry(self.combined_geometry)
-        self.move(self.combined_geometry.topLeft())
+        # Set dialog to cover target monitor or all screens
+        if isinstance(self.target_geometry, QRect) and self.target_geometry.isValid():
+            self.setGeometry(self.target_geometry)
+            self.move(self.target_geometry.topLeft())
+        else:
+            self.setGeometry(self.combined_geometry)
+            self.move(self.combined_geometry.topLeft())
         
         # Selection rectangle in screen coordinates
         self.start_pos = None
@@ -545,10 +599,8 @@ class ScreenCaptureDialog(QDialog):
             painter.setBrush(QColor(0, 0, 0, 100))  # Semi-transparent black
             painter.setPen(Qt.PenStyle.NoPen)
             
-            # Draw overlay for all screens
-            for screen in QGuiApplication.screens():
-                screen_geom = screen.geometry()
-                painter.drawRect(screen_geom)
+            # Fill overlay over the entire dialog window region
+            painter.drawRect(self.rect())
             
             # Draw the selection rectangle if we have valid points
             if (self.start_pos and self.end_pos and 
@@ -559,11 +611,9 @@ class ScreenCaptureDialog(QDialog):
                 painter.setPen(QPen(Qt.GlobalColor.red, 2, Qt.PenStyle.SolidLine))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 
-                # Convert to local coordinates if needed
-                local_rect = QRect(
-                    self.selection_rect.topLeft() - self.combined_geometry.topLeft(),
-                    self.selection_rect.size()
-                )
+                # Convert to local coordinates relative to this dialog window
+                local_origin = self.geometry().topLeft()
+                local_rect = QRect(self.selection_rect.topLeft() - local_origin, self.selection_rect.size())
                 painter.drawRect(local_rect)
                 
                 # Draw size info
@@ -634,14 +684,90 @@ class ScreenCaptureDialog(QDialog):
     def get_capture_rect(self) -> QRect:
         """Get the captured rectangle in screen coordinates."""
         if self.selection_rect and self.selection_rect.isValid():
-            # Ensure the rectangle is within screen bounds
-            screen_geom = self.current_screen.geometry()
-            rect = self.selection_rect.intersected(screen_geom)
+            # Ensure the rectangle is within all screens' combined bounds
+            bounds = self.target_geometry if (isinstance(self.target_geometry, QRect) and self.target_geometry.isValid()) else self.combined_geometry
+            rect = self.selection_rect.intersected(bounds)
             
             # Convert to screen coordinates if needed
             if rect.isValid() and rect.width() > 5 and rect.height() > 5:  # Minimum size
                 return rect
         return None
+
+class MonitorInfoDialog(QDialog):
+    """Dialog to display monitor geometries and DPI, with quick capture preview per monitor."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Monitor Info")
+        self.setMinimumSize(500, 300)
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Index", "X", "Y", "Size", "DPI Ratio"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+        btns = QHBoxLayout()
+        self.capture_btn = QPushButton("Capture All")
+        self.capture_btn.clicked.connect(self.capture_all)
+        btns.addWidget(self.capture_btn)
+        btns.addStretch()
+        layout.addLayout(btns)
+        self.preview_label = QLabel()
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumHeight(150)
+        layout.addWidget(self.preview_label)
+        self.populate()
+
+    def populate(self):
+        screens = QGuiApplication.screens()
+        self.table.setRowCount(len(screens))
+        for idx, sc in enumerate(screens):
+            g = sc.geometry()
+            dpr = sc.devicePixelRatio()
+            self.table.setItem(idx, 0, QTableWidgetItem(str(idx + 1)))
+            self.table.setItem(idx, 1, QTableWidgetItem(str(g.x())))
+            self.table.setItem(idx, 2, QTableWidgetItem(str(g.y())))
+            self.table.setItem(idx, 3, QTableWidgetItem(f"{g.width()}x{g.height()}"))
+            self.table.setItem(idx, 4, QTableWidgetItem(f"{dpr:.2f}"))
+
+    def capture_all(self):
+        try:
+            screens = QGuiApplication.screens()
+            if not screens:
+                return
+            x0 = min(sc.geometry().x() for sc in screens)
+            y0 = min(sc.geometry().y() for sc in screens)
+            x1 = max(sc.geometry().x() + sc.geometry().width() for sc in screens)
+            y1 = max(sc.geometry().y() + sc.geometry().height() for sc in screens)
+            total_w, total_h = x1 - x0, y1 - y0
+            canvas = np.zeros((total_h, total_w, 3), dtype=np.uint8)
+            for sc in screens:
+                g = sc.geometry()
+                pm = sc.grabWindow(0)
+                if pm.isNull():
+                    continue
+                qi = pm.toImage().convertToFormat(QImage.Format.Format_BGR888)
+                h = qi.height(); w = qi.width(); bpl = qi.bytesPerLine()
+                size_bytes = getattr(qi, 'sizeInBytes', None)
+                size_bytes = size_bytes() if callable(size_bytes) else (bpl * h)
+                bits = qi.bits(); bits.setsize(size_bytes)
+                buf = np.frombuffer(bits, dtype=np.uint8)
+                img_row = buf.reshape((h, bpl))
+                img_row = img_row[:, :w * 3]
+                arr = img_row.reshape((h, w, 3))
+                off_x = g.x() - x0
+                off_y = g.y() - y0
+                y_end = min(off_y + h, total_h)
+                x_end = min(off_x + w, total_w)
+                canvas[off_y:y_end, off_x:x_end] = arr[:y_end - off_y, :x_end - off_x]
+            # Show preview
+            height, width, channel = canvas.shape
+            q_img = QImage(canvas.data, width, height, width * 3, QImage.Format.Format_BGR888)
+            self.preview_label.setPixmap(QPixmap.fromImage(q_img).scaled(
+                self.preview_label.width(), self.preview_label.height(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+        except Exception as e:
+            QMessageBox.warning(self, "Capture", f"Failed to capture monitors: {e}")
 
 
 class TemplatePreview(QWidget):
@@ -712,7 +838,20 @@ class TemplatePreview(QWidget):
         """Capture a region of the screen."""
         try:
             # First, capture the screen region
-            capture_dialog = ScreenCaptureDialog(self)
+            # Restrict overlay to selected monitor if applicable
+            target_geometry = None
+            try:
+                # MainWindow is the parent of the QDialog that owns this preview
+                main_window = self.parent().parent() if self.parent() else None
+                if hasattr(main_window, 'monitor_combo'):
+                    data = main_window.monitor_combo.currentData()
+                    if isinstance(data, tuple) and len(data) == 4:
+                        x, y, w, h = data
+                        target_geometry = QRect(x, y, w, h)
+                    # 'ALL' or None → full desktop
+            except Exception:
+                pass
+            capture_dialog = ScreenCaptureDialog(self, target_geometry=target_geometry)
             if capture_dialog.exec() != QDialog.DialogCode.Accepted:
                 return False
                 
@@ -721,13 +860,29 @@ class TemplatePreview(QWidget):
                 return False
                 
             try:
-                # Capture the screen region
-                screenshot = ImageGrab.grab(bbox=(
-                    rect.x(), 
-                    rect.y(), 
-                    rect.x() + rect.width(), 
-                    rect.y() + rect.height()
-                ))
+                # Capture the screen region using QScreen.grabWindow with robust monitor selection
+                screens = QGuiApplication.screens()
+                # Choose screen with largest intersection area with rect
+                best = None
+                best_area = -1
+                for sc in screens:
+                    g = sc.geometry()
+                    gx1, gy1, gx2, gy2 = g.x(), g.y(), g.x() + g.width(), g.y() + g.height()
+                    ix1, iy1 = max(rect.x(), gx1), max(rect.y(), gy1)
+                    ix2, iy2 = min(rect.x() + rect.width(), gx2), min(rect.y() + rect.height(), gy2)
+                    if ix2 > ix1 and iy2 > iy1:
+                        area = (ix2 - ix1) * (iy2 - iy1)
+                        if area > best_area:
+                            best_area = area
+                            best = sc
+                target = best if best is not None else QGuiApplication.primaryScreen()
+                geom = target.geometry()
+                local_x = max(0, rect.x() - geom.x())
+                local_y = max(0, rect.y() - geom.y())
+                grab_w = max(1, min(rect.width(), geom.width() - local_x))
+                grab_h = max(1, min(rect.height(), geom.height() - local_y))
+                dpr = target.devicePixelRatio()
+                pm = target.grabWindow(0, int(local_x * dpr), int(local_y * dpr), int(grab_w * dpr), int(grab_h * dpr))
                 
                 # Create a temporary file for the screenshot
                 temp_dir = os.path.join(self.images_dir, "temp")
@@ -735,8 +890,15 @@ class TemplatePreview(QWidget):
                 temp_filename = f"temp_{int(datetime.now().timestamp())}.png"
                 temp_path = os.path.join(temp_dir, temp_filename)
                 
-                # Save the screenshot
-                screenshot.save(temp_path, "PNG")
+                # Save the screenshot pixmap directly to PNG (fallback to PIL/pyautogui if null)
+                if pm and not pm.isNull():
+                    pm.save(temp_path, "PNG")
+                else:
+                    try:
+                        screenshot = ImageGrab.grab(bbox=(rect.x(), rect.y(), rect.x() + rect.width(), rect.y() + rect.height()))
+                    except Exception:
+                        screenshot = pyautogui.screenshot(region=(rect.x(), rect.y(), rect.width(), rect.height()))
+                    screenshot.save(temp_path, "PNG")
                 
                 # Update the UI
                 if os.path.exists(temp_path):
@@ -1171,6 +1333,30 @@ class StepEditor(QGroupBox):
         
         self.template_combo = QComboBox()
         self.template_combo.addItems([""] + self.templates)
+        # Per-step monitor selection
+        self.monitor_combo = QComboBox()
+        self.monitor_combo.setToolTip("Optional monitor override for this step")
+        self.monitor_combo.addItem("Use Global", None)
+        self.monitor_combo.addItem("All Monitors", "ALL")
+        try:
+            screens = QGuiApplication.screens()
+            for idx, screen in enumerate(screens, start=1):
+                geom = screen.geometry()
+                label = f"Screen {idx} ({geom.x()},{geom.y()},{geom.width()}x{geom.height()})"
+                self.monitor_combo.addItem(label, (geom.x(), geom.y(), geom.width(), geom.height()))
+        except Exception:
+            pass
+        # Preselect from step_data if present
+        if "monitor" in self.step_data:
+            data = self.step_data.get("monitor")
+            # Normalize list to tuple for comparison when loaded from JSON
+            if isinstance(data, list) and len(data) == 4:
+                data = tuple(data)
+            # Find matching data
+            for i in range(self.monitor_combo.count()):
+                if self.monitor_combo.itemData(i) == data:
+                    self.monitor_combo.setCurrentIndex(i)
+                    break
         
         # Add region selection button
         self.select_region_btn = QPushButton("Select Search Region")
@@ -1178,6 +1364,8 @@ class StepEditor(QGroupBox):
         
         template_select_layout.addWidget(QLabel("Find:"))
         template_select_layout.addWidget(self.template_combo, 1)  # Allow combo box to expand
+        template_select_layout.addWidget(QLabel("Monitor:"))
+        template_select_layout.addWidget(self.monitor_combo)
         template_select_layout.addWidget(self.select_region_btn)
         
         # Region status label
@@ -1232,6 +1420,53 @@ class StepEditor(QGroupBox):
         
         options_layout.addStretch()
         template_layout.addLayout(options_layout)
+
+        # Detection strategy and advanced thresholds
+        strategy_layout = QHBoxLayout()
+        strategy_layout.addWidget(QLabel("Detection Strategy:"))
+        self.strategy_combo = QComboBox()
+        # Display labels with underlying data values
+        self.strategy_combo.addItem("Default (template)", None)
+        self.strategy_combo.addItem("Feature (scale/rotation)", "feature")
+        # Preselect from step_data
+        try:
+            strategy_val = self.step_data.get("strategy")
+            idx = self.strategy_combo.findData(strategy_val)
+            if idx >= 0:
+                self.strategy_combo.setCurrentIndex(idx)
+        except Exception:
+            pass
+        strategy_layout.addWidget(self.strategy_combo)
+        # Advanced params
+        self.min_inliers_spin = QSpinBox()
+        self.min_inliers_spin.setRange(4, 1000)
+        self.min_inliers_spin.setValue(int(self.step_data.get("min_inliers", 12)))
+        strategy_layout.addWidget(QLabel("Min Inliers:"))
+        strategy_layout.addWidget(self.min_inliers_spin)
+        self.ratio_spin = QDoubleSpinBox()
+        self.ratio_spin.setRange(0.1, 0.99)
+        self.ratio_spin.setSingleStep(0.05)
+        self.ratio_spin.setDecimals(2)
+        self.ratio_spin.setValue(float(self.step_data.get("ratio_thresh", 0.75)))
+        strategy_layout.addWidget(QLabel("Ratio:"))
+        strategy_layout.addWidget(self.ratio_spin)
+        self.ransac_spin = QDoubleSpinBox()
+        self.ransac_spin.setRange(0.5, 20.0)
+        self.ransac_spin.setSingleStep(0.5)
+        self.ransac_spin.setDecimals(1)
+        self.ransac_spin.setValue(float(self.step_data.get("ransac_thresh", 4.0)))
+        strategy_layout.addWidget(QLabel("RANSAC:"))
+        strategy_layout.addWidget(self.ransac_spin)
+        strategy_layout.addStretch()
+        template_layout.addLayout(strategy_layout)
+
+        def toggle_advanced_by_strategy():
+            use_feature = (self.strategy_combo.currentData() == "feature")
+            self.min_inliers_spin.setEnabled(use_feature)
+            self.ratio_spin.setEnabled(use_feature)
+            self.ransac_spin.setEnabled(use_feature)
+        self.strategy_combo.currentIndexChanged.connect(toggle_advanced_by_strategy)
+        toggle_advanced_by_strategy()
         
         # Actions group with scrollable area
         actions_group = QGroupBox("Actions")
@@ -1430,7 +1665,16 @@ class StepEditor(QGroupBox):
     
     def select_search_region(self):
         """Open a dialog to select a search region for this step."""
-        dialog = ScreenCaptureDialog(self)
+        # Restrict overlay to chosen monitor if set
+        target_geometry = None
+        try:
+            data = self.monitor_combo.currentData() if hasattr(self, 'monitor_combo') else None
+            if isinstance(data, tuple) and len(data) == 4:
+                x, y, w, h = data
+                target_geometry = QRect(x, y, w, h)
+        except Exception:
+            pass
+        dialog = ScreenCaptureDialog(self, target_geometry=target_geometry)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             rect = dialog.get_capture_rect()
             if rect and rect.width() > 0 and rect.height() > 0:
@@ -1454,16 +1698,77 @@ class StepEditor(QGroupBox):
             "actions": [w.get_action_data() for w in self.action_widgets],
             "loop_count": self.step_loop_spin.value()
         }
+        # Include per-step monitor override
+        try:
+            if hasattr(self, 'monitor_combo'):
+                step_data["monitor"] = self.monitor_combo.currentData()
+        except Exception:
+            pass
+        # Include strategy and thresholds when feature strategy is selected
+        try:
+            strategy_val = self.strategy_combo.currentData() if hasattr(self, 'strategy_combo') else None
+            if strategy_val:
+                step_data["strategy"] = strategy_val
+                step_data["min_inliers"] = int(self.min_inliers_spin.value()) if hasattr(self, 'min_inliers_spin') else 12
+                step_data["ratio_thresh"] = float(self.ratio_spin.value()) if hasattr(self, 'ratio_spin') else 0.75
+                step_data["ransac_thresh"] = float(self.ransac_spin.value()) if hasattr(self, 'ransac_spin') else 4.0
+        except Exception:
+            pass
         if self.search_region:
             step_data["search_region"] = self.search_region
         return step_data
 
+class GroupCallStepEditor(QGroupBox):
+    """Lightweight editor for a group call step."""
+    def __init__(self, step_data: Optional[dict] = None, groups: Optional[list] = None, parent=None):
+        super().__init__(parent)
+        self.step_data = step_data or {"call_group": ""}
+        self.groups = groups or []
+        self.init_ui()
+
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        header_layout = QHBoxLayout()
+        self.step_label = QLabel("Group Call")
+        self.remove_btn = QPushButton("×")
+        self.remove_btn.setFixedSize(24, 24)
+        self.remove_btn.clicked.connect(self.remove_self)
+        header_layout.addWidget(self.step_label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.remove_btn)
+
+        group_layout = QHBoxLayout()
+        group_layout.addWidget(QLabel("Group:"))
+        self.group_combo = QComboBox()
+        self.group_combo.addItems([""] + list(self.groups))
+        if "call_group" in self.step_data:
+            idx = self.group_combo.findText(self.step_data["call_group"])
+            if idx >= 0:
+                self.group_combo.setCurrentIndex(idx)
+        group_layout.addWidget(self.group_combo, 1)
+
+        main_layout.addLayout(header_layout)
+        main_layout.addLayout(group_layout)
+
+    def remove_self(self):
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, 'remove_step'):
+                parent.remove_step(self)
+                break
+            parent = parent.parent()
+
+    def get_step_data(self) -> dict:
+        return {"call_group": self.group_combo.currentText().strip()}
+
 class SequenceEditor(QGroupBox):
     """Widget to edit a sequence of steps."""
-    def __init__(self, sequence_data: Optional[dict] = None, templates: List[str] = None, parent=None):
+    def __init__(self, sequence_data: Optional[dict] = None, templates: List[str] = None, parent=None, groups: Optional[list] = None):
         super().__init__(parent)
         self.sequence_data = sequence_data or {"name": "New Sequence", "steps": []}
         self.templates = templates or []
+        self.groups = groups or []
         self.step_widgets = []
         self._ui_initialized = False
         self.init_ui()
@@ -1504,7 +1809,7 @@ class SequenceEditor(QGroupBox):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
         
-        # Sequence header with name and add button
+        # Sequence header with name and add buttons
         header_layout = QHBoxLayout()
         
         # Sequence name
@@ -1513,13 +1818,16 @@ class SequenceEditor(QGroupBox):
         self.name_edit = QLineEdit(self.sequence_data.get("name", "New Sequence"))
         name_layout.addWidget(self.name_edit, 1)  # Allow name field to expand
         
-        # Add step button
+        # Add step buttons
         self.add_step_btn = QPushButton("Add Step")
         self.add_step_btn.clicked.connect(self.add_step)
+        self.add_group_call_btn = QPushButton("Add Group Call")
+        self.add_group_call_btn.clicked.connect(lambda: self.add_step({"call_group": ""}))
         
         # Add to header
         header_layout.addLayout(name_layout)
         header_layout.addWidget(self.add_step_btn, 0, Qt.AlignmentFlag.AlignRight)
+        header_layout.addWidget(self.add_group_call_btn, 0, Qt.AlignmentFlag.AlignRight)
         
         # Scroll area for steps
         self.scroll_area = QScrollArea()
@@ -1588,10 +1896,13 @@ class SequenceEditor(QGroupBox):
                     "timeout": 10,
                     "actions": [{"type": "click"}]
                 }
-            elif not step_data.get('actions') or not isinstance(step_data['actions'], list):
-                step_data['actions'] = [{"type": "click"}]
-                
-            step_editor = StepEditor(step_data, self.templates, self)
+            # If this is a group call, use the GroupCallStepEditor
+            if isinstance(step_data, dict) and 'call_group' in step_data:
+                step_editor = GroupCallStepEditor(step_data, self.groups, self)
+            else:
+                if not step_data.get('actions') or not isinstance(step_data['actions'], list):
+                    step_data['actions'] = [{"type": "click"}]
+                step_editor = StepEditor(step_data, self.templates, self)
         except Exception as e:
             print(f"Error creating step: {str(e)}")
             # Fallback to default step data
@@ -1716,6 +2027,24 @@ class TemplateTester(QWidget):
         self.confidence_bar = QProgressBar()
         self.confidence_bar.setRange(0, 100)
         self.confidence_bar.setFormat("Confidence: %p%")
+
+        # Strategy selection and params
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItem("Template (classic)", "template")
+        self.strategy_combo.addItem("Feature (scale/rotation)", "feature")
+        self.min_inliers_spin = QSpinBox()
+        self.min_inliers_spin.setRange(4, 1000)
+        self.min_inliers_spin.setValue(12)
+        self.ratio_spin = QDoubleSpinBox()
+        self.ratio_spin.setRange(0.1, 0.99)
+        self.ratio_spin.setDecimals(2)
+        self.ratio_spin.setSingleStep(0.05)
+        self.ratio_spin.setValue(0.75)
+        self.ransac_spin = QDoubleSpinBox()
+        self.ransac_spin.setRange(0.5, 20.0)
+        self.ransac_spin.setDecimals(1)
+        self.ransac_spin.setSingleStep(0.5)
+        self.ransac_spin.setValue(4.0)
         
         # Preview area
         self.preview_label = QLabel()
@@ -1748,6 +2077,47 @@ class TemplateTester(QWidget):
         form_layout = QFormLayout()
         form_layout.addRow("Template:", self.template_combo)
         form_layout.addRow("Confidence:", self.confidence_bar)
+        form_layout.addRow("Strategy:", self.strategy_combo)
+        params_layout = QHBoxLayout()
+        params_layout.addWidget(QLabel("Min Inliers"))
+        params_layout.addWidget(self.min_inliers_spin)
+        params_layout.addWidget(QLabel("Ratio"))
+        params_layout.addWidget(self.ratio_spin)
+        params_layout.addWidget(QLabel("RANSAC"))
+        params_layout.addWidget(self.ransac_spin)
+        form_layout.addRow("Params:", params_layout)
+
+        # Metrics display (move overlay metrics into GUI)
+        metrics_layout = QHBoxLayout()
+        self.metric_inliers = QLabel("Inliers: -")
+        self.metric_matches = QLabel("Matches: -")
+        self.metric_conf = QLabel("Confidence: -")
+        self.metric_reproj = QLabel("Reproj: -")
+        for w in (self.metric_inliers, self.metric_matches, self.metric_conf, self.metric_reproj):
+            w.setStyleSheet("color: #cfcfcf;")
+        metrics_layout.addWidget(self.metric_inliers)
+        metrics_layout.addWidget(self.metric_matches)
+        metrics_layout.addWidget(self.metric_conf)
+        metrics_layout.addWidget(self.metric_reproj)
+        metrics_layout.addStretch()
+        form_layout.addRow("Metrics:", metrics_layout)
+
+        # Debug info panel
+        debug_group = QGroupBox("Debug")
+        debug_layout = QGridLayout()
+        self.debug_target = QLabel("Target: -")
+        self.debug_geom = QLabel("Geom: -")
+        self.debug_local = QLabel("Local: -")
+        self.debug_size = QLabel("Size: -")
+        self.debug_dpr = QLabel("DPR: -")
+        self.debug_pm = QLabel("Pixmap: -")
+        self.debug_fallback = QLabel("Fallback: -")
+        for i, w in enumerate([self.debug_target, self.debug_geom, self.debug_local, self.debug_size, self.debug_dpr, self.debug_pm, self.debug_fallback]):
+            w.setStyleSheet("color: #cfcfcf;")
+            row = i // 2; col = (i % 2) * 1
+            debug_layout.addWidget(w, row, col)
+        debug_group.setLayout(debug_layout)
+        form_layout.addRow(debug_group)
         
         template_layout.addLayout(form_layout)
         template_layout.addWidget(self.preview_label)
@@ -1801,11 +2171,112 @@ class TemplateTester(QWidget):
             return
         
         try:
-            # Capture screen using pyautogui with the selected region
-            screenshot = np.array(pyautogui.screenshot(region=self.search_region) if self.search_region else pyautogui.screenshot())
-            screenshot = cv2.cvtColor(screenshot, cv2.COLOR_RGB2BGR)
-            if screenshot is None:
+            # Log the current tester state
+            logger.info(f"TemplateTester: start preview, region={self.search_region}, strategy={self.strategy_combo.currentData()}")
+            # Capture screen with multi-monitor support
+            def capture_region_bgr(x: int, y: int, w: int, h: int) -> np.ndarray:
+                screens = QGuiApplication.screens()
+                # Choose screen with the largest intersection area with the requested rect
+                best = None
+                best_area = -1
+                for sc in screens:
+                    g = sc.geometry()
+                    gx1, gy1, gx2, gy2 = g.x(), g.y(), g.x() + g.width(), g.y() + g.height()
+                    ix1, iy1 = max(x, gx1), max(y, gy1)
+                    ix2, iy2 = min(x + w, gx2), min(y + h, gy2)
+                    if ix2 > ix1 and iy2 > iy1:
+                        area = (ix2 - ix1) * (iy2 - iy1)
+                        if area > best_area:
+                            best_area = area
+                            best = sc
+                target = best if best is not None else QGuiApplication.primaryScreen()
+                geom = target.geometry()
+                local_x = max(0, x - geom.x())
+                local_y = max(0, y - geom.y())
+                grab_w = max(1, min(w, geom.width() - local_x))
+                grab_h = max(1, min(h, geom.height() - local_y))
+                dpr = target.devicePixelRatio()
+                pm = target.grabWindow(0, int(local_x * dpr), int(local_y * dpr), int(grab_w * dpr), int(grab_h * dpr))
+                qi = pm.toImage().convertToFormat(QImage.Format.Format_BGR888)
+                height = qi.height(); width = qi.width(); bpl = qi.bytesPerLine()
+                # PyQt6: use sizeInBytes() instead of byteCount()
+                size_bytes = qi.sizeInBytes() if hasattr(qi, 'sizeInBytes') else (bpl * height)
+                bits = qi.bits(); bits.setsize(size_bytes)
+                buf = np.frombuffer(bits, dtype=np.uint8)
+                img_row = buf.reshape((height, bpl))
+                img_row = img_row[:, :width * 3]
+                arr = img_row.reshape((height, width, 3))
+                # Return a copy to avoid referencing QImage memory after this scope
+                arr_copy = arr.copy()
+                # Update debug info
+                try:
+                    target_idx = next((i for i, sc in enumerate(QGuiApplication.screens(), start=1) if sc is target), None)
+                except Exception:
+                    target_idx = None
+                self.debug_target.setText(f"Target: Screen {target_idx if target_idx else '-'}")
+                self.debug_geom.setText(f"Geom: ({geom.x()},{geom.y()},{geom.width()}x{geom.height()})")
+                self.debug_local.setText(f"Local: ({local_x},{local_y},{grab_w}x{grab_h})")
+                self.debug_size.setText(f"Size: {width}x{height}, bpl={bpl}")
+                self.debug_dpr.setText(f"DPR: {dpr:.2f}")
+                self.debug_pm.setText(f"Pixmap: {'null' if pm.isNull() else 'ok'}")
+                self.debug_fallback.setText("Fallback: QScreen")
+                logger.info(f"TemplateTester: target_screen={target_idx}, geom=({geom.x()},{geom.y()},{geom.width()}x{geom.height()}), local=({local_x},{local_y},{grab_w}x{grab_h}), size={width}x{height}, dpr={dpr}, pm_null={pm.isNull()}")
+                return arr_copy
+
+            if self.search_region:
+                rx, ry, rw, rh = self.search_region
+                screenshot = capture_region_bgr(rx, ry, rw, rh)
+                if screenshot is None:
+                    # Fallback capture for region using PIL/pyautogui
+                    try:
+                        img = ImageGrab.grab(bbox=(rx, ry, rx + rw, ry + rh))
+                        self.debug_fallback.setText("Fallback: PIL bbox")
+                        logger.info("TemplateTester: region fallback via PIL bbox")
+                    except Exception:
+                        img = pyautogui.screenshot(region=(rx, ry, rw, rh))
+                        self.debug_fallback.setText("Fallback: pyautogui region")
+                        logger.info("TemplateTester: region fallback via pyautogui region")
+                    screenshot = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            else:
+                # Full virtual desktop snapshot (all monitors) via stitched screens
+                screens = QGuiApplication.screens()
+                if screens:
+                    x0 = min(sc.geometry().x() for sc in screens)
+                    y0 = min(sc.geometry().y() for sc in screens)
+                    x1 = max(sc.geometry().x() + sc.geometry().width() for sc in screens)
+                    y1 = max(sc.geometry().y() + sc.geometry().height() for sc in screens)
+                    total_w, total_h = x1 - x0, y1 - y0
+                    canvas = np.zeros((total_h, total_w, 3), dtype=np.uint8)
+                    for sc in screens:
+                        g = sc.geometry()
+                        pm = sc.grabWindow(0)
+                        if pm.isNull():
+                            continue
+                        qi = pm.toImage().convertToFormat(QImage.Format.Format_BGR888)
+                        h = qi.height(); w = qi.width(); bpl = qi.bytesPerLine()
+                        size_bytes = getattr(qi, 'sizeInBytes', None)
+                        size_bytes = size_bytes() if callable(size_bytes) else (bpl * h)
+                        bits = qi.bits(); bits.setsize(size_bytes)
+                        buf = np.frombuffer(bits, dtype=np.uint8)
+                        img_row = buf.reshape((h, bpl))
+                        img_row = img_row[:, :w * 3]
+                        arr = img_row.reshape((h, w, 3))
+                        off_x = g.x() - x0
+                        off_y = g.y() - y0
+                        y_end = min(off_y + h, total_h)
+                        x_end = min(off_x + w, total_w)
+                        canvas[off_y:y_end, off_x:x_end] = arr[:y_end - off_y, :x_end - off_x]
+                    screenshot = canvas
+                    self.debug_fallback.setText("Fallback: stitched full desktop")
+                    logger.info("TemplateTester: full desktop via stitched QScreen captures")
+                else:
+                    img = pyautogui.screenshot()
+                    screenshot = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                    self.debug_fallback.setText("Fallback: pyautogui full")
+                    logger.info("TemplateTester: full desktop via pyautogui screenshot")
+            if screenshot is None or screenshot.size == 0:
                 self.status_label.setText("Failed to capture screen")
+                logger.warning("TemplateTester: empty screenshot frame")
                 return
                 
             # Load template
@@ -1813,43 +2284,109 @@ class TemplateTester(QWidget):
             if template is None:
                 raise ValueError("Failed to load template image")
             
-            # Convert to grayscale for template matching
-            gray_screen = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
-            gray_template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-            
-            # Perform template matching
-            result = cv2.matchTemplate(gray_screen, gray_template, cv2.TM_CCOEFF_NORMED)
-            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-            
-            # Update confidence
-            confidence = max_val * 100  # Convert to percentage
-            self.confidence_bar.setValue(int(confidence))
-            
-            # Draw rectangle around the match
-            h, w = template.shape[:2]
-            top_left = max_loc
-            bottom_right = (top_left[0] + w, top_left[1] + h)
-            
-            # Create a copy of the screenshot to draw on
             display_img = screenshot.copy()
+            strategy = self.strategy_combo.currentData()
+            if strategy == "feature":
+                # Feature-based preview: draw inlier matches and polygon
+                try:
+                    orb = cv2.ORB_create(nfeatures=1500)
+                    gray_screen = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+                    gray_template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+                    kps1, des1 = orb.detectAndCompute(gray_template, None)
+                    kps2, des2 = orb.detectAndCompute(gray_screen, None)
+                    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+                    matches = bf.knnMatch(des1, des2, k=2) if des1 is not None and des2 is not None else []
+                    good = []
+                    ratio_thresh = float(self.ratio_spin.value())
+                    for m_n in matches:
+                        if len(m_n) == 2:
+                            m, n = m_n
+                            if m.distance < ratio_thresh * n.distance:
+                                good.append(m)
+                    inliers = 0
+                    polygon = None
+                    mean_err = None
+                    median_err = None
+                    if len(good) >= int(self.min_inliers_spin.value()):
+                        src_pts = np.float32([kps1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+                        dst_pts = np.float32([kps2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+                        H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, float(self.ransac_spin.value()))
+                        if H is not None and mask is not None:
+                            inliers = int(np.sum(mask))
+                            h_tpl, w_tpl = gray_template.shape[:2]
+                            pts = np.float32([[0, 0], [w_tpl, 0], [w_tpl, h_tpl], [0, h_tpl]]).reshape(-1, 1, 2)
+                            dst = cv2.perspectiveTransform(pts, H)
+                            polygon = dst.reshape(-1, 2).astype(int)
+                            # Draw polygon
+                            for i in range(4):
+                                pt1 = tuple(polygon[i])
+                                pt2 = tuple(polygon[(i + 1) % 4])
+                                cv2.line(display_img, pt1, pt2, (0, 255, 0), 2)
+                            # Draw inlier points
+                            for j, m in enumerate(good):
+                                if mask[j]:
+                                    p = tuple(np.int32(kps2[m.trainIdx].pt))
+                                    cv2.circle(display_img, p, 3, (0, 0, 255), -1)
+                            # Compute reprojection error on inliers
+                            try:
+                                inlier_mask = mask.ravel().astype(bool)
+                                src_in = src_pts[inlier_mask]
+                                dst_in = dst_pts[inlier_mask]
+                                proj_in = cv2.perspectiveTransform(src_in, H)
+                                diffs = proj_in - dst_in
+                                dists = np.linalg.norm(diffs, axis=2)  # (N,1)
+                                if dists.size > 0:
+                                    mean_err = float(np.mean(dists))
+                                    median_err = float(np.median(dists))
+                            except Exception:
+                                pass
+                    # Confidence as inliers/good
+                    conf_pct = 0
+                    if len(good) > 0:
+                        conf_pct = int((inliers / len(good)) * 100)
+                    self.confidence_bar.setValue(conf_pct)
+                    # Update GUI metrics (so they remain visible even in small regions)
+                    self.metric_inliers.setText(f"Inliers: {inliers}")
+                    self.metric_matches.setText(f"Matches: {len(good)}")
+                    self.metric_conf.setText(f"Confidence: {conf_pct}%")
+                    self.metric_reproj.setText(f"Reproj: {median_err:.2f}px" if median_err is not None else "Reproj: N/A")
+                    self.status_label.setText("Feature preview active")
+                except Exception as e:
+                    self.status_label.setText(f"Feature preview error: {e}")
+                    self.confidence_bar.setValue(0)
+                    self.metric_inliers.setText("Inliers: -")
+                    self.metric_matches.setText("Matches: -")
+                    self.metric_conf.setText("Confidence: -")
+                    self.metric_reproj.setText("Reproj: -")
+            else:
+                # Classic template matching preview
+                gray_screen = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
+                gray_template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+                result = cv2.matchTemplate(gray_screen, gray_template, cv2.TM_CCOEFF_NORMED)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                confidence = max_val * 100
+                self.confidence_bar.setValue(int(confidence))
+                h, w = template.shape[:2]
+                top_left = max_loc
+                bottom_right = (top_left[0] + w, top_left[1] + h)
+                cv2.rectangle(display_img, top_left, bottom_right, (0, 255, 0), 2)
+                text = f"{confidence:.1f}%"
+                cv2.putText(display_img, text, (top_left[0], top_left[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                # Update GUI metrics for classic strategy
+                self.metric_inliers.setText("Inliers: N/A")
+                self.metric_matches.setText("Matches: N/A")
+                self.metric_conf.setText(f"Confidence: {int(confidence)}%")
+                self.metric_reproj.setText("Reproj: N/A")
+                self.status_label.setText("Classic preview active")
             
-            # Draw search region border if a region is selected
+            # Draw search region border if a region is selected (display_img is already cropped to region)
             if self.search_region:
-                cv2.rectangle(display_img, 
-                            (0, 0),  # Top-left corner of region
-                            (display_img.shape[1]-1, display_img.shape[0]-1),  # Bottom-right corner of region
-                            (255, 0, 0),  # Blue border
-                            1,  # Thickness
-                            cv2.LINE_AA)
+                cv2.rectangle(display_img,
+                              (0, 0),
+                              (display_img.shape[1]-1, display_img.shape[0]-1),
+                              (255, 0, 0), 1, cv2.LINE_AA)
             
-            # Draw match rectangle
-            cv2.rectangle(display_img, top_left, bottom_right, (0, 255, 0), 2)
-            
-            # Add confidence text
-            text = f"{confidence:.1f}%"
-            cv2.putText(display_img, text, 
-                       (top_left[0], top_left[1] - 10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # For classic strategy, rectangle and text are drawn inside the classic branch above.
             
             # Convert to QImage and display
             height, width, channel = display_img.shape
@@ -2013,8 +2550,22 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.config = {}
-        # Store the script's directory for relative paths
-        self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Store the script/executable directory for relative paths (works for PyInstaller onedir)
+        try:
+            if getattr(sys, 'frozen', False):
+                # Running from a bundled executable
+                self.script_dir = os.path.dirname(sys.executable)
+                # Ensure process working directory is the executable folder for consistent relative paths
+                try:
+                    os.chdir(self.script_dir)
+                except Exception:
+                    pass
+            else:
+                # Running from source
+                self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        except Exception:
+            # Fallback to current working directory
+            self.script_dir = os.getcwd()
         # Default config path relative to script directory
         self.config_path = os.path.join(self.script_dir, "config.json")
         self.bot = ImageDetectionBot()
@@ -2064,6 +2615,32 @@ class MainWindow(QMainWindow):
         
         # Add separator
         toolbar.addSeparator()
+        # Monitor selection
+        monitor_label = QLabel("Monitor:")
+        toolbar.addWidget(monitor_label)
+        self.monitor_combo = QComboBox()
+        # Track monitor regions for "All Monitors" bounds display
+        self.monitor_regions = []
+        # Options: All Monitors, None (full screen), then individual screens
+        self.monitor_combo.addItem("All Monitors", "ALL")
+        self.monitor_combo.addItem("None (Full Screen)", None)
+        try:
+            screens = QGuiApplication.screens()
+            for idx, screen in enumerate(screens, start=1):
+                geom = screen.geometry()
+                item_label = f"Screen {idx} ({geom.x()},{geom.y()},{geom.width()}x{geom.height()})"
+                region_tuple = (geom.x(), geom.y(), geom.width(), geom.height())
+                self.monitor_combo.addItem(item_label, region_tuple)
+                self.monitor_regions.append(region_tuple)
+        except Exception as e:
+            logger.debug(f"Failed to list screens: {e}")
+        self.monitor_combo.currentIndexChanged.connect(self.on_monitor_selected)
+        toolbar.addWidget(self.monitor_combo)
+
+        # Monitor info action
+        self.monitor_info_action = QAction("Monitor Info", self)
+        self.monitor_info_action.triggered.connect(self.show_monitor_info)
+        toolbar.addAction(self.monitor_info_action)
         
         # Stop action
         self.stop_action = QAction("Stop", self)
@@ -2109,6 +2686,7 @@ class MainWindow(QMainWindow):
         
         # Create tabs
         self.sequences_tab = QWidget()
+        self.groups_tab = QWidget()
         self.failsafe_tab = QWidget()
         self.templates_tab = QWidget()
         
@@ -2202,6 +2780,51 @@ class MainWindow(QMainWindow):
         # Add sequence editor stack to sequences tab
         self.sequence_stack = QStackedWidget()
         sequences_tab_layout.addWidget(self.sequence_stack)
+
+        # Set up groups tab
+        groups_tab_layout = QHBoxLayout(self.groups_tab)
+
+        # Left sidebar for groups
+        groups_sidebar = QWidget()
+        groups_sidebar.setFixedWidth(250)
+        groups_sidebar_layout = QVBoxLayout(groups_sidebar)
+        groups_sidebar_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Groups section
+        groups_group = QGroupBox("Groups")
+        groups_layout = QVBoxLayout()
+
+        self.groups_list = QListWidget()
+        self.groups_list.currentItemChanged.connect(self.on_group_selected)
+
+        # Button layout for group operations
+        groups_btns_layout = QHBoxLayout()
+
+        self.add_group_btn = QPushButton("Add")
+        self.add_group_btn.clicked.connect(self.add_group)
+
+        self.rename_group_btn = QPushButton("Rename")
+        self.rename_group_btn.setEnabled(False)
+        self.rename_group_btn.clicked.connect(self.rename_group)
+
+        self.remove_group_btn = QPushButton("Del")
+        self.remove_group_btn.setEnabled(False)
+        self.remove_group_btn.clicked.connect(self.remove_group)
+
+        groups_btns_layout.addWidget(self.add_group_btn)
+        groups_btns_layout.addWidget(self.rename_group_btn)
+        groups_btns_layout.addWidget(self.remove_group_btn)
+
+        groups_layout.addWidget(self.groups_list)
+        groups_layout.addLayout(groups_btns_layout)
+        groups_group.setLayout(groups_layout)
+
+        groups_sidebar_layout.addWidget(groups_group)
+        groups_tab_layout.addWidget(groups_sidebar)
+
+        # Add group editor stack to groups tab
+        self.group_stack = QStackedWidget()
+        groups_tab_layout.addWidget(self.group_stack)
         
         # Set up failsafe tab
         failsafe_tab_layout = QHBoxLayout(self.failsafe_tab)
@@ -2352,7 +2975,7 @@ class MainWindow(QMainWindow):
         
         # Create template tester tab
         self.template_tester_tab = QWidget()
-        self.template_tester = TemplateTester(self.bot, self.config.get('templates', {}).copy())
+        self.template_tester = TemplateTester(self.bot, self.config.get('templates', {}).copy(), parent=self)
         tester_layout = QVBoxLayout(self.template_tester_tab)
         tester_layout.addWidget(self.template_tester)
         # Ensure the template list is populated
@@ -2407,6 +3030,7 @@ class MainWindow(QMainWindow):
 
         # Add tabs to tab widget
         self.tab_widget.addTab(self.sequences_tab, "Sequences")
+        self.tab_widget.addTab(self.groups_tab, "Groups")
         self.tab_widget.addTab(self.failsafe_tab, "Failsafe")
         self.tab_widget.addTab(self.templates_tab, "Templates")
         self.tab_widget.addTab(self.template_tester_tab, "Template Tester")
@@ -2533,6 +3157,7 @@ class MainWindow(QMainWindow):
             self.config = {
                 "templates": {},
                 "sequences": [],
+                "groups": {},
                 "break_settings": {"enabled": False, "max_runtime_seconds": 0}
             }
             self.update_ui_from_config()
@@ -2655,6 +3280,52 @@ class MainWindow(QMainWindow):
         else:
             if hasattr(self, 'region_selection'):
                 self.region_selection.reject()
+
+    def on_monitor_selected(self):
+        """Set search_region to the selected monitor geometry or all monitors."""
+        if not hasattr(self, 'monitor_combo'):
+            return
+        data = self.monitor_combo.currentData()
+        if data == "ALL":
+            # Use full-screen behavior for capture; update status with overall bounds
+            self.search_region = None
+            if getattr(self, 'monitor_regions', None):
+                x0 = min(r[0] for r in self.monitor_regions)
+                y0 = min(r[1] for r in self.monitor_regions)
+                x1 = max(r[0] + r[2] for r in self.monitor_regions)
+                y1 = max(r[1] + r[3] for r in self.monitor_regions)
+                self.region_status.setText(f"Region: ALL ({x0}, {y0})..({x1}, {y1})")
+            else:
+                self.region_status.setText("Region: ALL")
+            # Propagate to Template Tester
+            if hasattr(self, 'template_tester'):
+                self.template_tester.search_region = None
+                if hasattr(self.template_tester, 'region_status'):
+                    self.template_tester.region_status.setText("Region: Full Screen")
+        elif isinstance(data, tuple) and len(data) == 4:
+            self.search_region = data
+            x, y, w, h = data
+            self.region_status.setText(f"Region: ({x}, {y}, {w}, {h})")
+            # Propagate to Template Tester
+            if hasattr(self, 'template_tester'):
+                self.template_tester.search_region = (x, y, w, h)
+                if hasattr(self.template_tester, 'region_status'):
+                    self.template_tester.region_status.setText(f"Region: X={x}, Y={y}, W={w}, H={h}")
+        else:
+            self.search_region = None
+            self.region_status.setText("Region: Full Screen")
+            # Propagate to Template Tester
+            if hasattr(self, 'template_tester'):
+                self.template_tester.search_region = None
+                if hasattr(self.template_tester, 'region_status'):
+                    self.template_tester.region_status.setText("Region: Full Screen")
+
+    def show_monitor_info(self):
+        try:
+            dlg = MonitorInfoDialog(self)
+            dlg.exec()
+        except Exception as e:
+            QMessageBox.warning(self, "Monitor Info", f"Failed to open monitor info: {e}")
     
     def update_ui_from_config(self):
         """Update UI elements from current config."""
@@ -2692,9 +3363,34 @@ class MainWindow(QMainWindow):
         self.sequences_list.clear()
         for seq in self.config.get('sequences', []):
             self.sequences_list.addItem(seq.get('name', 'Unnamed Sequence'))
+
+        # Update groups list
+        if hasattr(self, 'groups_list'):
+            self.groups_list.clear()
+            for name in sorted(self.config.get('groups', {}).keys()):
+                self.groups_list.addItem(name)
         
         # Update Template Tester's template list
         self.update_template_tester_templates()
+
+        # Refresh templates in active editors so new templates appear in dropdowns
+        try:
+            # Sequence editor refresh
+            if hasattr(self, 'sequence_editor_widget') and self.sequence_editor_widget:
+                self.sequence_editor_widget.templates = list(self.config.get('templates', {}).keys())
+                if hasattr(self, 'sequences_list'):
+                    current_seq_item = self.sequences_list.currentItem()
+                    if current_seq_item:
+                        self.on_sequence_selected(current_seq_item, None)
+            # Group editor refresh
+            if hasattr(self, 'group_editor_widget') and self.group_editor_widget:
+                self.group_editor_widget.templates = list(self.config.get('templates', {}).keys())
+                if hasattr(self, 'groups_list'):
+                    current_group_item = self.groups_list.currentItem()
+                    if current_group_item:
+                        self.on_group_selected(current_group_item, None)
+        except Exception as e:
+            logger.debug(f"Editor template refresh skipped: {e}")
 
         # Update break settings UI
         br = self.config.get('break_settings', {"enabled": False, "max_runtime_seconds": 0})
@@ -2815,6 +3511,137 @@ class MainWindow(QMainWindow):
                 'enabled': bool(enabled),
                 'max_runtime_seconds': int(secs)
             }
+
+        # Update groups if an editor is open
+        try:
+            if hasattr(self, 'group_editor_widget') and self.group_editor_widget:
+                data = self.group_editor_widget.get_sequence_data()
+                name = data.get('name')
+                steps = data.get('steps', [])
+                if name:
+                    self.config.setdefault('groups', {})[name] = steps
+        except Exception as e:
+            logger.debug(f"Skipping group update from UI: {e}")
+
+    def add_group(self):
+        """Add a new group."""
+        try:
+            # Prompt for name
+            default_name = f"Group_{len(self.config.get('groups', {}) ) + 1}"
+            name, ok = QInputDialog.getText(self, "Add Group", "Enter group name:", QLineEdit.EchoMode.Normal, default_name)
+            if not ok:
+                return
+            name = name.strip()
+            if not name:
+                QMessageBox.warning(self, "Error", "Group name cannot be empty")
+                return
+            if name in self.config.get('groups', {}):
+                QMessageBox.warning(self, "Error", f"Group '{name}' already exists")
+                return
+            # Create empty group
+            self.config.setdefault('groups', {})[name] = []
+            # Update list
+            self.groups_list.addItem(name)
+            # Select and open for editing
+            items = self.groups_list.findItems(name, Qt.MatchFlag.MatchExactly)
+            if items:
+                self.groups_list.setCurrentItem(items[0])
+            self.save_config()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to add group: {e}")
+
+    def remove_group(self):
+        """Remove selected group."""
+        current_item = self.groups_list.currentItem() if hasattr(self, 'groups_list') else None
+        if not current_item:
+            return
+        name = current_item.text()
+        reply = QMessageBox.question(self, 'Remove Group', f"Delete group '{name}'?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            # Remove from config
+            if name in self.config.get('groups', {}):
+                del self.config['groups'][name]
+            # Update sequences referencing this group
+            for seq in self.config.get('sequences', []):
+                for step in seq.get('steps', []):
+                    if isinstance(step, dict) and step.get('call_group') == name:
+                        step['call_group'] = ''
+            # Update UI
+            row = self.groups_list.row(current_item)
+            self.groups_list.takeItem(row)
+            # Clear editor
+            if hasattr(self, 'group_stack'):
+                self.group_stack.setCurrentIndex(0) if self.group_stack.count() > 0 else None
+            self.save_config()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to remove group: {e}")
+
+    def rename_group(self):
+        """Rename selected group and update references."""
+        current_item = self.groups_list.currentItem() if hasattr(self, 'groups_list') else None
+        if not current_item:
+            return
+        old_name = current_item.text()
+        new_name, ok = QInputDialog.getText(self, "Rename Group", "Enter new group name:", QLineEdit.EchoMode.Normal, old_name)
+        if not ok:
+            return
+        new_name = new_name.strip()
+        if not new_name or new_name == old_name:
+            return
+        if new_name in self.config.get('groups', {}):
+            QMessageBox.warning(self, "Error", f"Group '{new_name}' already exists")
+            return
+        try:
+            # Move group steps to new name
+            steps = self.config.get('groups', {}).pop(old_name, [])
+            self.config.setdefault('groups', {})[new_name] = steps
+            # Update references in sequences
+            for seq in self.config.get('sequences', []):
+                for step in seq.get('steps', []):
+                    if isinstance(step, dict) and step.get('call_group') == old_name:
+                        step['call_group'] = new_name
+            # Update UI selection
+            current_item.setText(new_name)
+            # Refresh editor name field if open
+            if hasattr(self, 'group_editor_widget') and self.group_editor_widget and hasattr(self.group_editor_widget, 'name_edit'):
+                self.group_editor_widget.name_edit.setText(new_name)
+            self.save_config()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to rename group: {e}")
+
+    def on_group_selected(self, current, previous):
+        """Open the selected group in the editor."""
+        has_selection = bool(current)
+        if hasattr(self, 'rename_group_btn'):
+            self.rename_group_btn.setEnabled(has_selection)
+        if hasattr(self, 'remove_group_btn'):
+            self.remove_group_btn.setEnabled(has_selection)
+        if not current:
+            return
+        name = current.text()
+        steps = self.config.get('groups', {}).get(name, [])
+        # Build sequence_data so we can reuse SequenceEditor for groups
+        sequence_data = {"name": name, "steps": steps}
+        try:
+            # Create editor if needed
+            self.group_editor_widget = SequenceEditor(sequence_data, list(self.config.get('templates', {}).keys()), self, groups=list(self.config.get('groups', {}).keys()))
+            if hasattr(self, 'group_stack'):
+                # Clear existing editors to avoid duplicates
+                while self.group_stack.count() > 0:
+                    w = self.group_stack.widget(0)
+                    self.group_stack.removeWidget(w)
+                    w.deleteLater()
+                self.group_stack.addWidget(self.group_editor_widget)
+                self.group_stack.setCurrentWidget(self.group_editor_widget)
+            # Switch to Groups tab to edit
+            if hasattr(self, 'tab_widget'):
+                idx = self.tab_widget.indexOf(self.groups_tab)
+                if idx != -1:
+                    self.tab_widget.setCurrentIndex(idx)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open group: {e}")
     
     def save_current_template(self):
         """Save the currently edited template and load it into the bot."""
@@ -3055,6 +3882,13 @@ class MainWindow(QMainWindow):
                     # Force refresh the current step editor if it exists
                     if hasattr(self, 'current_sequence_widget'):
                         self.on_sequence_selected(self.sequences_list.currentItem(), None)
+                # Update groups editor's template list if it exists
+                if hasattr(self, 'group_editor_widget') and self.group_editor_widget:
+                    self.group_editor_widget.templates = list(self.config.get('templates', {}).keys())
+                    if hasattr(self, 'groups_list'):
+                        current_group_item = self.groups_list.currentItem()
+                        if current_group_item:
+                            self.on_group_selected(current_group_item, None)
                 
                 # Save config
                 if not self.save_config():
@@ -3148,7 +3982,19 @@ class MainWindow(QMainWindow):
                 # Update sequence editor's template list if it exists
                 if hasattr(self, 'sequence_editor_widget'):
                     self.sequence_editor_widget.templates = list(self.config.get('templates', {}).keys())
-                
+                    # Re-open current sequence to rebuild editors
+                    if hasattr(self, 'sequences_list'):
+                        current_seq_item = self.sequences_list.currentItem()
+                        if current_seq_item:
+                            self.on_sequence_selected(current_seq_item, None)
+                # Update groups editor's template list if it exists
+                if hasattr(self, 'group_editor_widget') and self.group_editor_widget:
+                    self.group_editor_widget.templates = list(self.config.get('templates', {}).keys())
+                    if hasattr(self, 'groups_list'):
+                        current_group_item = self.groups_list.currentItem()
+                        if current_group_item:
+                            self.on_group_selected(current_group_item, None)
+
                 # Save changes
                 self.save_config()
                 self.statusBar().showMessage(f"Template '{template_name}' deleted")
@@ -3437,9 +4283,10 @@ class MainWindow(QMainWindow):
             if not hasattr(self, 'sequence_editor_widget'):
                 # Create new sequence editor widget if it doesn't exist
                 self.sequence_editor_widget = SequenceEditor(
-                    sequence, 
-                    list(self.config.get('templates', {}).keys()), 
-                    self
+                    sequence,
+                    list(self.config.get('templates', {}).keys()),
+                    self,
+                    groups=list(self.config.get('groups', {}).keys())
                 )
                 # Add to stack if not already there
                 if hasattr(self, 'sequence_stack') and self.sequence_stack.indexOf(self.sequence_editor_widget) == -1:
@@ -3592,9 +4439,10 @@ class MainWindow(QMainWindow):
             if not hasattr(self, 'sequence_editor_widget'):
                 # Create new sequence editor widget if it doesn't exist
                 self.sequence_editor_widget = SequenceEditor(
-                    sequence, 
-                    list(self.config.get('templates', {}).keys()), 
-                    self
+                    sequence,
+                    list(self.config.get('templates', {}).keys()),
+                    self,
+                    groups=list(self.config.get('groups', {}).keys())
                 )
                 # Add to stack if not already there
                 if self.sequence_stack.indexOf(self.sequence_editor_widget) == -1:
@@ -3756,7 +4604,8 @@ class MainWindow(QMainWindow):
             loop_count=loop_count,
             non_required_wait=self.non_required_wait_checkbox.isChecked(),
             failsafe_config=failsafe_config if failsafe_config else None,
-            max_runtime_seconds=max_secs
+            max_runtime_seconds=max_secs,
+            groups=self.config.get('groups', {})
         )
         logger.info(f"Starting sequence with non_required_wait={self.worker.non_required_wait}")
         self.worker.signals.update.connect(self.on_worker_update)
