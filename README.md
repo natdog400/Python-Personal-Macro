@@ -131,8 +131,10 @@ Action dictionary fields (as used across sequences and failsafe steps):
 ## How Matching and Actions Work
 
 - Template matching uses OpenCV (`cv2.matchTemplate`). Confidence threshold is adjustable per step.
-- Feature matching uses ORB descriptors and BF matcher with Lowe's ratio filtering.
-  - Homography via RANSAC estimates rotation/scale; center of the matched polygon is used.
+- Feature matching supports multiple detectors and safe fallbacks:
+  - Detectors: `ORB` (fast), `AKAZE` (scale-robust), `SIFT` (strong features; requires `opencv-contrib-python`).
+  - Pipeline: KNN + Lowe’s ratio → RANSAC homography → sanity check (area ratio) → center of detected polygon.
+  - Fallbacks: If detector fails, automatically tries `AKAZE`, then `SIFT`. If all fail, a multi‑scale template match runs.
   - Provide `strategy: "feature"` and optional `min_inliers`, `ratio_thresh`, `ransac_thresh` per step.
 - If a step has no `find` template, its actions run directly.
 - `move_to` can target the detected position or a random point inside a selected region.
@@ -185,6 +187,9 @@ Action dictionary fields (as used across sequences and failsafe steps):
 
 - Strategy Dropdown: Default (template) or Feature (scale/rotation).
 - Parameters: Min Inliers, Ratio, RANSAC thresholds.
+- Visualizer controls:
+  - Detector: choose `ORB`, `AKAZE`, or `SIFT` for the feature preview.
+  - Show Keypoints: toggle overlay of scene keypoints for visual debugging (off by default for performance).
 - Debug Panel shows:
   - Target screen index, geometry, local capture rect
   - Frame size and bytes-per-line, DPI ratio, pixmap state

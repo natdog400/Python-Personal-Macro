@@ -76,6 +76,20 @@ class ImageDetectionBot:
         except Exception:
             self.orb = None
             self.bf = None
+        # AKAZE detector and matcher for additional scale robustness
+        try:
+            self.akaze = cv2.AKAZE_create()
+            self.bf_akaze = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        except Exception:
+            self.akaze = None
+            self.bf_akaze = None
+        # SIFT detector (requires opencv-contrib) and L2 matcher for strong feature fallback
+        try:
+            self.sift = cv2.SIFT_create()
+            self.bf_sift = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
+        except Exception:
+            self.sift = None
+            self.bf_sift = None
         self.current_position: Optional[Tuple[int, int]] = None
         
     def load_template(self, name: str, image_path: str) -> bool:
@@ -131,6 +145,25 @@ class ImageDetectionBot:
                         'shape': gray.shape[::-1]  # (w, h)
                     }
                     logger.info(f"Computed ORB features for template '{name}': {len(kps)} keypoints")
+                # Also compute AKAZE descriptors as a fallback
+                if self.akaze is not None:
+                    gray_a = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+                    kps_a, des_a = self.akaze.detectAndCompute(gray_a, None)
+                    # Merge into template_features structure
+                    tf = self.template_features.setdefault(name, {})
+                    tf['akaze_keypoints'] = kps_a
+                    tf['akaze_descriptors'] = des_a
+                    tf['shape'] = tf.get('shape', gray_a.shape[::-1])
+                    logger.info(f"Computed AKAZE features for template '{name}': {len(kps_a)} keypoints")
+                # Compute SIFT descriptors for robust matching
+                if self.sift is not None:
+                    gray_s = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+                    kps_s, des_s = self.sift.detectAndCompute(gray_s, None)
+                    tf = self.template_features.setdefault(name, {})
+                    tf['sift_keypoints'] = kps_s
+                    tf['sift_descriptors'] = des_s
+                    tf['shape'] = tf.get('shape', gray_s.shape[::-1])
+                    logger.info(f"Computed SIFT features for template '{name}': {0 if kps_s is None else len(kps_s)} keypoints")
             except Exception as e:
                 logger.warning(f"Feature extraction failed for template '{name}': {e}")
             logger.info(f"Successfully loaded template '{name}' from {image_path}, dimensions: {template.shape[1]}x{template.shape[0]}")
@@ -352,38 +385,168 @@ class ImageDetectionBot:
                     # Feature-based matching for scale/rotation robustness
                     try:
                         gray_frame = cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2GRAY)
-                        kps2, des2 = self.orb.detectAndCompute(gray_frame, None)
                         tpl_feats = self.template_features.get(template_name, {})
-                        des1 = tpl_feats.get('descriptors')
-                        kps1 = tpl_feats.get('keypoints')
-                        if des1 is None or des2 is None or len(des2) == 0:
-                            raise ValueError("No descriptors available for feature matching")
-                        matches = self.bf.knnMatch(des1, des2, k=2)
-                        good = []
-                        for m, n in matches:
-                            if m.distance < ratio_thresh * n.distance:
-                                good.append(m)
-                        if len(good) >= min_inliers:
-                            src_pts = np.float32([kps1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-                            dst_pts = np.float32([kps2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-                            H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, ransac_thresh)
-                            matchesMask = mask.ravel().tolist() if mask is not None else []
-                            inliers = int(np.sum(matchesMask)) if matchesMask else 0
-                            if H is not None and inliers >= min_inliers:
-                                w_tpl, h_tpl = tpl_feats.get('shape', (template.shape[1], template.shape[0]))
-                                pts = np.float32([[0, 0], [w_tpl, 0], [w_tpl, h_tpl], [0, h_tpl]]).reshape(-1, 1, 2)
-                                dst = cv2.perspectiveTransform(pts, H)
-                                # Compute center of the detected polygon
-                                center = np.mean(dst.reshape(-1, 2), axis=0)
-                                x, y = int(center[0]), int(center[1])
-                                if region:
-                                    x += region[0]
-                                    y += region[1]
-                                logger.info(f"Feature match '{template_name}' at ({x}, {y}) with {inliers} inliers / {len(good)} good matches")
-                                return (x, y)
-                        # If feature matching failed, fall back to template match below
+                        # ORB attempt
+                        orb_ok = False
+                        try:
+                            if self.orb is not None:
+                                kps2, des2 = self.orb.detectAndCompute(gray_frame, None)
+                                des1 = tpl_feats.get('descriptors')
+                                kps1 = tpl_feats.get('keypoints')
+                                logger.debug(f"ORB scene kps={0 if kps2 is None else len(kps2)}, tpl kps={0 if kps1 is None else len(kps1)}")
+                                good = []
+                                if des1 is not None and des2 is not None and len(des2) > 0:
+                                    matches = self.bf.knnMatch(des1, des2, k=2)
+                                    for m, n in matches:
+                                        if m.distance < ratio_thresh * n.distance:
+                                            good.append(m)
+                                    logger.debug(f"ORB good matches={len(good)} (min_inliers={min_inliers})")
+                                    if len(good) >= min_inliers:
+                                        src_pts = np.float32([kps1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+                                        dst_pts = np.float32([kps2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+                                        H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, ransac_thresh)
+                                        matchesMask = mask.ravel().tolist() if mask is not None else []
+                                        inliers = int(np.sum(matchesMask)) if matchesMask else 0
+                                        if H is not None and inliers >= min_inliers:
+                                            w_tpl, h_tpl = tpl_feats.get('shape', (template.shape[1], template.shape[0]))
+                                            pts = np.float32([[0, 0], [w_tpl, 0], [w_tpl, h_tpl], [0, h_tpl]]).reshape(-1, 1, 2)
+                                            dst = cv2.perspectiveTransform(pts, H)
+                                            area = cv2.contourArea(dst.astype(np.float32))
+                                            tpl_area = float(w_tpl * h_tpl)
+                                            area_ratio = area / tpl_area if tpl_area > 0 else 0.0
+                                            logger.debug(f"ORB homography area_ratio={area_ratio:.2f}, inliers={inliers}")
+                                            if 0.2 <= area_ratio <= 5.0:
+                                                center = np.mean(dst.reshape(-1, 2), axis=0)
+                                                x, y = int(center[0]), int(center[1])
+                                                if region:
+                                                    x += region[0]
+                                                    y += region[1]
+                                                logger.info(f"Feature match (ORB) '{template_name}' at ({x}, {y}) with {inliers} inliers / {len(good)} good matches")
+                                                return (x, y)
+                                            else:
+                                                logger.debug("ORB homography rejected due to implausible scale")
+                                        orb_ok = True
+                        except Exception as e:
+                            logger.debug(f"ORB feature matching error: {e}")
+
+                        # AKAZE fallback if ORB failed or insufficient
+                        try:
+                            if not orb_ok and self.akaze is not None:
+                                kps2_a, des2_a = self.akaze.detectAndCompute(gray_frame, None)
+                                des1_a = tpl_feats.get('akaze_descriptors')
+                                kps1_a = tpl_feats.get('akaze_keypoints')
+                                logger.debug(f"AKAZE scene kps={0 if kps2_a is None else len(kps2_a)}, tpl kps={0 if kps1_a is None else len(kps1_a)}")
+                                good_a = []
+                                if des1_a is not None and des2_a is not None and len(des2_a) > 0:
+                                    matches_a = self.bf_akaze.knnMatch(des1_a, des2_a, k=2)
+                                    for m, n in matches_a:
+                                        if m.distance < ratio_thresh * n.distance:
+                                            good_a.append(m)
+                                    logger.debug(f"AKAZE good matches={len(good_a)} (min_inliers={min_inliers})")
+                                    if len(good_a) >= min_inliers:
+                                        src_pts_a = np.float32([kps1_a[m.queryIdx].pt for m in good_a]).reshape(-1, 1, 2)
+                                        dst_pts_a = np.float32([kps2_a[m.trainIdx].pt for m in good_a]).reshape(-1, 1, 2)
+                                        H_a, mask_a = cv2.findHomography(src_pts_a, dst_pts_a, cv2.RANSAC, ransac_thresh)
+                                        matchesMask_a = mask_a.ravel().tolist() if mask_a is not None else []
+                                        inliers_a = int(np.sum(matchesMask_a)) if matchesMask_a else 0
+                                        if H_a is not None and inliers_a >= min_inliers:
+                                            w_tpl, h_tpl = tpl_feats.get('shape', (template.shape[1], template.shape[0]))
+                                            pts = np.float32([[0, 0], [w_tpl, 0], [w_tpl, h_tpl], [0, h_tpl]]).reshape(-1, 1, 2)
+                                            dst_a = cv2.perspectiveTransform(pts, H_a)
+                                            area_a = cv2.contourArea(dst_a.astype(np.float32))
+                                            tpl_area = float(w_tpl * h_tpl)
+                                            area_ratio_a = area_a / tpl_area if tpl_area > 0 else 0.0
+                                            logger.debug(f"AKAZE homography area_ratio={area_ratio_a:.2f}, inliers={inliers_a}")
+                                            if 0.2 <= area_ratio_a <= 5.0:
+                                                center_a = np.mean(dst_a.reshape(-1, 2), axis=0)
+                                                x, y = int(center_a[0]), int(center_a[1])
+                                                if region:
+                                                    x += region[0]
+                                                    y += region[1]
+                                                logger.info(f"Feature match (AKAZE) '{template_name}' at ({x}, {y}) with {inliers_a} inliers / {len(good_a)} good matches")
+                                                return (x, y)
+                                            else:
+                                                logger.debug("AKAZE homography rejected due to implausible scale")
+                        except Exception as e:
+                            logger.debug(f"AKAZE feature matching error: {e}")
+                        # SIFT fallback
+                        try:
+                            if self.sift is not None:
+                                kps2_s, des2_s = self.sift.detectAndCompute(gray_frame, None)
+                                des1_s = tpl_feats.get('sift_descriptors')
+                                kps1_s = tpl_feats.get('sift_keypoints')
+                                logger.debug(f"SIFT scene kps={0 if kps2_s is None else len(kps2_s)}, tpl kps={0 if kps1_s is None else len(kps1_s)}")
+                                good_s = []
+                                if des1_s is not None and des2_s is not None and len(des2_s) > 0:
+                                    matches_s = self.bf_sift.knnMatch(des1_s, des2_s, k=2)
+                                    for m, n in matches_s:
+                                        if m.distance < ratio_thresh * n.distance:
+                                            good_s.append(m)
+                                    logger.debug(f"SIFT good matches={len(good_s)} (min_inliers={min_inliers})")
+                                    if len(good_s) >= min_inliers:
+                                        src_pts_s = np.float32([kps1_s[m.queryIdx].pt for m in good_s]).reshape(-1, 1, 2)
+                                        dst_pts_s = np.float32([kps2_s[m.trainIdx].pt for m in good_s]).reshape(-1, 1, 2)
+                                        H_s, mask_s = cv2.findHomography(src_pts_s, dst_pts_s, cv2.RANSAC, ransac_thresh)
+                                        matchesMask_s = mask_s.ravel().tolist() if mask_s is not None else []
+                                        inliers_s = int(np.sum(matchesMask_s)) if matchesMask_s else 0
+                                        if H_s is not None and inliers_s >= min_inliers:
+                                            w_tpl, h_tpl = tpl_feats.get('shape', (template.shape[1], template.shape[0]))
+                                            pts = np.float32([[0, 0], [w_tpl, 0], [w_tpl, h_tpl], [0, h_tpl]]).reshape(-1, 1, 2)
+                                            dst_s = cv2.perspectiveTransform(pts, H_s)
+                                            area_s = cv2.contourArea(dst_s.astype(np.float32))
+                                            tpl_area = float(w_tpl * h_tpl)
+                                            area_ratio_s = area_s / tpl_area if tpl_area > 0 else 0.0
+                                            logger.debug(f"SIFT homography area_ratio={area_ratio_s:.2f}, inliers={inliers_s}")
+                                            if 0.2 <= area_ratio_s <= 5.0:
+                                                center_s = np.mean(dst_s.reshape(-1, 2), axis=0)
+                                                x, y = int(center_s[0]), int(center_s[1])
+                                                if region:
+                                                    x += region[0]
+                                                    y += region[1]
+                                                logger.info(f"Feature match (SIFT) '{template_name}' at ({x}, {y}) with {inliers_s} inliers / {len(good_s)} good matches")
+                                                return (x, y)
+                                            else:
+                                                logger.debug("SIFT homography rejected due to implausible scale")
+                        except Exception as e:
+                            logger.debug(f"SIFT feature matching error: {e}")
+                        # If both fail, fall back to template match below
                     except Exception as e:
                         logger.debug(f"Feature matching error: {e}")
+                    # Multi-scale fallback: try resized template matching when feature matching fails
+                    try:
+                        scales = [0.6, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5]
+                        best_ms_conf = 0.0
+                        best_ms_loc = None
+                        best_ms_size = None
+                        h_tpl, w_tpl = template.shape[:2]
+                        for s in scales:
+                            tw = max(5, int(w_tpl * s))
+                            th = max(5, int(h_tpl * s))
+                            interp = cv2.INTER_AREA if s < 1.0 else cv2.INTER_CUBIC
+                            scaled_tpl = cv2.resize(template, (tw, th), interpolation=interp)
+                            if scaled_tpl is None or scaled_tpl.size == 0:
+                                continue
+                            if screenshot_bgr.shape[0] < th or screenshot_bgr.shape[1] < tw:
+                                continue
+                            res = cv2.matchTemplate(screenshot_bgr, scaled_tpl, cv2.TM_CCOEFF_NORMED)
+                            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                            if max_val > best_ms_conf:
+                                best_ms_conf = max_val
+                                best_ms_loc = max_loc
+                                best_ms_size = (tw, th)
+                        if best_ms_conf >= conf_threshold and best_ms_loc and best_ms_size:
+                            tw, th = best_ms_size
+                            x = best_ms_loc[0] + tw // 2
+                            y = best_ms_loc[1] + th // 2
+                            if region:
+                                x += region[0]
+                                y += region[1]
+                            logger.info(f"Multi-scale match '{template_name}' at ({x}, {y}) with confidence {best_ms_conf:.2f}")
+                            return (x, y)
+                        else:
+                            logger.debug(f"Multi-scale fallback did not reach threshold (best={best_ms_conf:.2f}, thr={conf_threshold:.2f})")
+                    except Exception as e:
+                        logger.debug(f"Multi-scale fallback error: {e}")
 
                 # Fallback to classic template matching
                 result = cv2.matchTemplate(screenshot_bgr, template, cv2.TM_CCOEFF_NORMED)

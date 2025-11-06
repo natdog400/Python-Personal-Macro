@@ -52,6 +52,18 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
+:: Ensure opencv-contrib-python is available for SIFT support (feature strategy)
+python -c "import cv2, sys; sys.exit(0 if hasattr(cv2, 'SIFT_create') else 1)" >nul 2>nul
+if %ERRORLEVEL% NEQ 0 (
+    echo Installing opencv-contrib-python for SIFT support...
+    python -m pip install --upgrade opencv-contrib-python
+    python -c "import cv2, sys; sys.exit(0 if hasattr(cv2, 'SIFT_create') else 1)" >nul 2>nul
+    if %ERRORLEVEL% NEQ 0 (
+        echo SIFT not available. Some feature detection fallbacks may be disabled.
+        echo You can manually install: python -m pip install opencv-contrib-python
+    )
+)
+
 :: Verify critical Python imports before launching
 echo Verifying Python imports...
 python -c "import cv2, pyautogui, PIL, PyQt6, numpy; print('Imports OK')" >nul 2>nul
@@ -61,6 +73,19 @@ if %ERRORLEVEL% NEQ 0 (
     pause
     exit /b 1
 )
+
+:: Additional environment checks
+:: Ensure images and subfolders are writable
+if not exist images\temp (
+    mkdir images\temp >nul 2>nul
+)
+> images\temp\write_test.tmp echo test >nul 2>nul
+if not exist images\temp\write_test.tmp (
+    echo Cannot write to images\temp. Please check folder permissions.
+    pause
+    exit /b 1
+)
+del /q images\temp\write_test.tmp >nul 2>nul
 
 :: Basic repo checks
 if not exist bot_gui.py (

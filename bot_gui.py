@@ -2087,6 +2087,18 @@ class TemplateTester(QWidget):
         params_layout.addWidget(self.ransac_spin)
         form_layout.addRow("Params:", params_layout)
 
+        # Visualizer controls (performance-friendly toggles)
+        viz_layout = QHBoxLayout()
+        self.keypoints_check = QCheckBox("Show Keypoints")
+        self.keypoints_check.setChecked(False)
+        viz_layout.addWidget(self.keypoints_check)
+        viz_layout.addWidget(QLabel("Detector"))
+        self.detector_combo = QComboBox()
+        self.detector_combo.addItems(["ORB", "AKAZE", "SIFT"])
+        viz_layout.addWidget(self.detector_combo)
+        viz_layout.addStretch()
+        form_layout.addRow("Visualizer:", viz_layout)
+
         # Metrics display (move overlay metrics into GUI)
         metrics_layout = QHBoxLayout()
         self.metric_inliers = QLabel("Inliers: -")
@@ -2289,12 +2301,31 @@ class TemplateTester(QWidget):
             if strategy == "feature":
                 # Feature-based preview: draw inlier matches and polygon
                 try:
-                    orb = cv2.ORB_create(nfeatures=1500)
+                    # Choose detector based on UI (ORB or AKAZE)
+                    use_alg = self.detector_combo.currentText() if hasattr(self, 'detector_combo') else "ORB"
+                    if use_alg == "AKAZE":
+                        detector = cv2.AKAZE_create()
+                        norm = cv2.NORM_HAMMING
+                    elif use_alg == "SIFT":
+                        detector = cv2.SIFT_create()
+                        norm = cv2.NORM_L2
+                    else:
+                        detector = cv2.ORB_create(nfeatures=1500)
+                        norm = cv2.NORM_HAMMING
                     gray_screen = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
                     gray_template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-                    kps1, des1 = orb.detectAndCompute(gray_template, None)
-                    kps2, des2 = orb.detectAndCompute(gray_screen, None)
-                    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+                    kps1, des1 = detector.detectAndCompute(gray_template, None)
+                    kps2, des2 = detector.detectAndCompute(gray_screen, None)
+                    # Draw scene keypoints on the preview for visual debugging (optional)
+                    if getattr(self, 'keypoints_check', None) and self.keypoints_check.isChecked():
+                        try:
+                            keypoint_img = cv2.drawKeypoints(display_img, kps2 if kps2 is not None else [], None,
+                                                             color=(255, 255, 0), flags=cv2.DRAW_MATCHES_FLAGS_DEFAULT)
+                            if keypoint_img is not None:
+                                display_img = keypoint_img
+                        except Exception:
+                            pass
+                    bf = cv2.BFMatcher(norm, crossCheck=False)
                     matches = bf.knnMatch(des1, des2, k=2) if des1 is not None and des2 is not None else []
                     good = []
                     ratio_thresh = float(self.ratio_spin.value())
