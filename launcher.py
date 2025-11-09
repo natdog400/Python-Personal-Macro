@@ -7,6 +7,8 @@ import platform
 import webbrowser
 import urllib.parse
 import shutil
+import pkgutil
+from tkinter import messagebox
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -23,11 +25,11 @@ SERVER_CONFIG_PATH = os.path.join(BASE_DIR, 'server_config.json')
 
 
 DEFAULT_SERVER_CFG = {
-    'bind': '127.0.0.1',
+    'bind': '0.0.0.0',
     'port': 8765,
     'token': 'CHANGE_ME_TOKEN',
     'mjpeg_fps': 6,
-    'backup_retention': 20,
+    'backup_retention': 5,
 }
 
 
@@ -183,9 +185,16 @@ class LauncherApp(tk.Tk):
         def run_all():
             ok_all = True
             try:
-                # Prefer built executables if present; fall back to Python scripts
+                # Preflight: if running from source (not frozen) or bundled EXEs missing, check deps
+                need_web = bool(self.var_launch_web.get())
+                need_gui = bool(self.var_launch_gui.get())
                 exe_web = os.path.join(BASE_DIR, 'WebServer.exe')
                 exe_gui = os.path.join(BASE_DIR, 'ImageDetectionBot.exe')
+                if (need_web and not os.path.exists(exe_web)) or (need_gui and not os.path.exists(exe_gui)):
+                    if not self.check_and_install_deps(need_web=need_web, need_gui=need_gui):
+                        self.lbl_status.configure(text='Launch cancelled (dependencies missing).')
+                        return
+                # Prefer built executables if present; fall back to Python scripts
                 if self.var_launch_web.get():
                     if os.path.exists(exe_web):
                         self.proc_web = start_process([exe_web])
@@ -208,8 +217,59 @@ class LauncherApp(tk.Tk):
                     ok_all = ok_all and (self.proc_gui is not None)
             finally:
                 self.lbl_status.configure(text=('Launched successfully.' if ok_all else 'Launched with errors.'))
-
+        # Run launch flow in a background thread so UI stays responsive
         threading.Thread(target=run_all, daemon=True).start()
+
+    def check_and_install_deps(self, need_web: bool = True, need_gui: bool = True) -> bool:
+        """Check required Python packages and offer to install them automatically.
+        Returns True if deps are satisfied or successfully installed; False otherwise.
+        """
+        # When running bundled EXEs, deps are included; skip checks in that case
+        if self.is_frozen:
+            return True
+        required = set()
+        if need_gui:
+            required.update(['PyQt6', 'pyautogui', 'opencv-python', 'numpy', 'Pillow', 'darkdetect'])
+        if need_web:
+            # mss is optional but recommended for MJPEG capture; pyautogui used by server controls
+            required.update(['mss', 'pyautogui'])
+        missing = []
+        for pkg in sorted(required):
+            try:
+                __import__(pkg if pkg != 'opencv-python' else 'cv2')
+            except Exception:
+                missing.append(pkg)
+        if not missing:
+            return True
+        msg = 'Missing packages:\n- ' + '\n- '.join(missing) + '\n\nInstall them now?'
+        if not messagebox.askyesno('Install Dependencies', msg):
+            return False
+        # Ensure pip exists
+        try:
+            subprocess.run([self.python_exe, '-m', 'pip', '--version'], cwd=BASE_DIR, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except Exception:
+            try:
+                subprocess.run([self.python_exe, '-m', 'ensurepip', '--upgrade'], cwd=BASE_DIR, check=True)
+            except Exception as e:
+                messagebox.showerror('Error', f'pip is not available and ensurepip failed: {e}')
+                return False
+        # Prefer requirements.txt if present
+        req_path = os.path.join(BASE_DIR, 'requirements.txt')
+        try:
+            if os.path.isfile(req_path):
+                proc = subprocess.run([self.python_exe, '-m', 'pip', 'install', '-r', 'requirements.txt'], cwd=BASE_DIR)
+                if proc.returncode != 0:
+                    raise RuntimeError('pip install -r requirements.txt failed')
+            else:
+                # Install missing individually
+                proc = subprocess.run([self.python_exe, '-m', 'pip', 'install'] + missing, cwd=BASE_DIR)
+                if proc.returncode != 0:
+                    raise RuntimeError('pip install missing packages failed')
+        except Exception as e:
+            messagebox.showerror('Error', f'Automatic install failed: {e}')
+            return False
+        messagebox.showinfo('Done', 'Dependencies installed successfully.')
+        return True
 
     def on_open_portal(self):
         # Open the web dashboard in the default browser; prefer localhost for browser access
