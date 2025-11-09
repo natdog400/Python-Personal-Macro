@@ -191,7 +191,7 @@ Suggested filenames (drop your PNGs in that folder):
   - `web_groups.png`: Groups editor (list + steps + nested actions)
   - `web_schedules.png`: Schedules page (rows with Enabled/Sequence/Time)
 
-Capture guidance and the full shot list live in `docs/screenshots/README.md`.
+Screenshots are embedded below; place PNGs in `docs/screenshots/` using the shown filenames.
 
 ### Screenshot Gallery
 
