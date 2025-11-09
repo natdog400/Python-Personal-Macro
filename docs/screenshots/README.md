@@ -47,7 +47,7 @@ This folder is reserved for screenshots used in the main README.
 - Crop to focus on the panel; avoid full desktop unless showing multi-monitor preview.
 - For web pages, include the header with navigation and token area.
 - Name files descriptively:
-  - `GUIBreaksettings.png`
+  - !(GUIBreaksettings.png)
   - `GUIFailSafeTab.png`
   - `GUIGroupsTab.png`
   - `GUIScheduledSequenceTab.png`
