@@ -197,38 +197,38 @@ Screenshots are embedded below; place PNGs in `docs/screenshots/` using the show
 
 - GUI
   - Sequences
-    - ![GUISequenceTab](docs/screenshots/GUISequenceTab.png)
+    - ![GUISequenceTab](./docs/screenshots/GUISequenceTab.png)
   - Failsafe
-    - ![GUIFailSafeTab](docs/screenshots/GUIFailSafeTab.png)
+    - ![GUIFailSafeTab](./docs/screenshots/GUIFailSafeTab.png)
   - Templates
-    - ![GUITemplateTab](docs/screenshots/GUITemplateTab.png)
+    - ![GUITemplateTab](./docs/screenshots/GUITemplateTab.png)
   - Template Tester
-    - ![GUITemplateTesterTab](docs/screenshots/GUITemplateTesterTab.png)
+    - ![GUITemplateTesterTab](./docs/screenshots/GUITemplateTesterTab.png)
   - Groups
-    - ![GUIGroupsTab](docs/screenshots/GUIGroupsTab.png)
+    - ![GUIGroupsTab](./docs/screenshots/GUIGroupsTab.png)
   - Scheduled Sequences
-    - ![GUIScheduledSequenceTab](docs/screenshots/GUIScheduledSequenceTab.png)
+    - ![GUIScheduledSequenceTab](./docs/screenshots/GUIScheduledSequenceTab.png)
   - Break Settings
-    - ![GUIBreaksettings](docs/screenshots/GUIBreaksettings.png)
+    - ![GUIBreaksettings](./docs/screenshots/GUIBreaksettings.png)
 
 - Web
   - Dashboard
-    - ![WEBDashboard](docs/screenshots/WEBDashboard.png)
+    - ![WEBDashboard](./docs/screenshots/WEBDashboard.png)
   - Sequence Editor
-    - ![WEBSequenceEditor](docs/screenshots/WEBSequenceEditor.png)
-    - ![WEBLoadedSequenceinWEB](docs/screenshots/WEBLoadedSequenceinWEB.png)
+    - ![WEBSequenceEditor](./docs/screenshots/WEBSequenceEditor.png)
+    - ![WEBLoadedSequenceinWEB](./docs/screenshots/WEBLoadedSequenceinWEB.png)
   - Groups Editor
-    - ![WEBGroupsEditor](docs/screenshots/WEBGroupsEditor.png)
+    - ![WEBGroupsEditor](./docs/screenshots/WEBGroupsEditor.png)
   - Templates Manager
-    - ![WEBTemplatesManager](docs/screenshots/WEBTemplatesManager.png)
+    - ![WEBTemplatesManager](./docs/screenshots/WEBTemplatesManager.png)
   - Failsafe Settings
-    - ![WEBFailsafeSettings](docs/screenshots/WEBFailsafeSettings.png)
+    - ![WEBFailsafeSettings](./docs/screenshots/WEBFailsafeSettings.png)
   - Run Controls (with Break Settings)
-    - ![WEBRunControlswithBreakSettings](docs/screenshots/WEBRunControlswithBreakSettings.png)
+    - ![WEBRunControlswithBreakSettings](./docs/screenshots/WEBRunControlswithBreakSettings.png)
   - Scheduled
-    - ![WEBScheduled](docs/screenshots/WEBScheduled.png)
+    - ![WEBScheduled](./docs/screenshots/WEBScheduled.png)
   - Select Region (Preview)
-    - ![WebSelectRegion](docs/screenshots/WebSelectRegion.png)
+    - ![WebSelectRegion](./docs/screenshots/WebSelectRegion.png)
 
 ## Web UI (Editors & Controls)
 
