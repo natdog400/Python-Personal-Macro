@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sequences Editor</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #1e1e1e; color: #ddd; margin: 0; }
+    header { padding: 12px 16px; background: #2b2b2b; border-bottom: 1px solid #3a3a3a; display:flex; gap:16px; align-items:center; }
+    main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px; }
+    .panel { background: #252525; border: 1px solid #3a3a3a; border-radius: 6px; padding: 12px; }
+    label { display: block; margin-bottom: 8px; }
+    input[type=text], input[type=number], select, textarea { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #555; background: #1f1f1f; color: #ddd; }
+    textarea { min-height: 120px; }
+    button { padding: 8px 12px; border-radius: 4px; border: 1px solid #555; background: #333; color: #eee; cursor: pointer; }
+    button:hover { background: #3d3d3d; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+    .row label { display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; }
+    .row label select, .row label input { width: auto; }
+    .actions .row { flex-wrap: wrap; }
+    .steps { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; padding-right: 8px; }
+    .step { border: 1px solid #444; border-radius: 4px; padding: 8px; background: #212121; }
+    .actions { display:flex; flex-direction:column; gap:6px; max-height: 40vh; overflow-y:auto; padding-right:6px; }
+    .action { border: 1px dashed #555; border-radius: 4px; padding: 6px; background: #1a1a1a; }
+    small { color: #999; }
+    nav a { color: #9bd; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    .no-drag { user-select: none; -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; -webkit-user-drag: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <div><strong>Sequences Editor</strong></div>
+    <nav style="display:flex; gap:12px">
+      <a href="/">Dashboard</a>
+      <a href="/static/sequences.html">Sequences</a>
+      <a href="/static/groups.html">Groups</a>
+      <a href="/static/control.html">Controls</a>
+      <a href="/static/schedules.html">Schedules</a>
+      <a href="/static/templates.html">Templates</a>
+      <a href="/static/failsafe.html">Failsafe</a>
+    </nav>
+    <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
+      <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
+      <input type="text" id="token" placeholder="Access Token" style="width:260px" />
+    </div>
+  </header>
+  <main>
+    <div class="panel">
+      <label>
+        Sequences
+        <select id="seqList" size="12"></select>
+      </label>
+      <div class="row">
+        <input type="text" id="newSeqName" placeholder="New sequence name" />
+        <button id="btnCreate">Create</button>
+      </div>
+      <div class="row">
+        <button id="btnDelete">Delete Selected</button>
+      </div>
+      <div style="margin-top:8px"><small id="status">Status: idle</small></div>
+    </div>
+    <div class="panel">
+      <div class="row">
+        <label style="flex:1">
+          Name
+          <input type="text" id="seqName" placeholder="Sequence name" />
+        </label>
+        <button id="btnRename">Save Name</button>
+      </div>
+      <div class="row">
+        <label style="flex:1">
+          Loop
+          <select id="seqLoop">
+            <option value="false">false</option>
+            <option value="true">true</option>
+          </select>
+        </label>
+        <label style="width:140px">
+          Loop Count
+          <input type="number" id="seqLoopCount" min="1" value="1" />
+        </label>
+        <button id="btnSaveMeta">Save Loop</button>
+      </div>
+      <h4>Steps</h4>
+      <div id="steps" class="steps"></div>
+      <div class="row">
+        <button id="btnAddStep">Add Step</button>
+        <label style="display:inline-flex; align-items:center; gap:6px">
+          <span>Group</span>
+          <select id="seqGroupSelect" style="min-width:160px"></select>
+        </label>
+        <button id="btnAddGroupCall">Add Group Call</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h4>Live Preview (Select Region)</h4>
+      <div id="previewWrap" style="width:100%">
+        <div class="row" style="margin-bottom:8px">
+          <label>Monitor
+            <select id="seqMonitor"></select>
+          </label>
+          <label style="margin-left:16px">Size
+            <select id="seqPreviewSize"><option>640</option><option>800</option><option selected>1024</option><option>1280</option></select>
+          </label>
+        </div>
+        <div id="seqImagePane" style="position:relative; width:100%">
+          <img id="seqPreview" alt="Preview" draggable="false" class="no-drag" style="width:100%; max-height:60vh; object-fit:contain; background:#111; border:1px solid #3a3a3a; border-radius:6px" />
+          <div id="seqSel" style="position:absolute; border:2px solid #4af; background:rgba(64,160,255,0.2); display:none"></div>
+        </div>
+      </div>
+      <small>Click-drag on the preview to select a region; then use "Use Preview Region" on a step to apply.</small>
+    </div>
+  </main>
+  <script>
+    const apiBase = '';
+    const tokenEl = document.getElementById('token');
+    const rememberEl = document.getElementById('rememberToken');
+    const seqListEl = document.getElementById('seqList');
+    const statusEl = document.getElementById('status');
+    let templates = [];
+    let lastRegion = null;
+
+    const seqNameEl = document.getElementById('seqName');
+    const seqLoopEl = document.getElementById('seqLoop');
+    const seqLoopCountEl = document.getElementById('seqLoopCount');
+    const stepsEl = document.getElementById('steps');
+    const newSeqNameEl = document.getElementById('newSeqName');
+    let groups = [];
+
+    function authHeaders() {
+      const tok = tokenEl.value.trim();
+      return tok ? { 'Authorization': `Bearer ${tok}` } : {};
+    }
+
+    // Token persistence across pages
+    try {
+      const remembered = (localStorage.getItem('rememberToken') === 'true');
+      rememberEl.checked = remembered;
+      const savedTok = localStorage.getItem('apiToken') || '';
+      if (remembered && savedTok && !tokenEl.value) tokenEl.value = savedTok;
+    } catch (e) {}
+    tokenEl.addEventListener('change', () => {
+      try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
+      fetchTemplates().then(fetchSequences); fetchGroups().then(()=>{}); fetchMonitors().then(updatePreviewSrc);
+    });
+    rememberEl.addEventListener('change', () => {
+      try {
+        localStorage.setItem('rememberToken', rememberEl.checked ? 'true' : 'false');
+        if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
+      } catch (e) {}
+    });
+
+    async function fetchSequences() {
+      try {
+        const res = await fetch(`${apiBase}/api/sequences`, { headers: authHeaders() });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        seqListEl.innerHTML = '';
+        for (const name of (data.sequences || [])) {
+          const opt = document.createElement('option');
+          opt.textContent = name; opt.value = name;
+          seqListEl.appendChild(opt);
+        }
+        statusEl.textContent = `Status: loaded ${seqListEl.options.length} sequence(s)`;
+      } catch (e) {
+        statusEl.textContent = `Status: failed to load sequences (${e.message})`;
+      }
+    }
+
+    async function fetchTemplates() {
+      try {
+        const res = await fetch(`${apiBase}/api/templates`, { headers: authHeaders() });
+        const data = await res.json();
+        templates = (data.templates || []).map(t => t.name);
+      } catch (e) { templates = []; }
+    }
+
+    async function fetchGroups() {
+      try {
+        const res = await fetch(`${apiBase}/api/groups`, { headers: authHeaders() });
+        const data = await res.json();
+        groups = data.groups || [];
+        const gsel = document.getElementById('seqGroupSelect'); if (gsel) { gsel.innerHTML=''; for (const g of groups){ const opt=document.createElement('option'); opt.value=g; opt.textContent=g; gsel.appendChild(opt);} }
+        // Default selection for quick group-call adds
+        if (gsel && gsel.options.length > 0 && !gsel.value) gsel.value = gsel.options[0].value;
+      } catch (e) { groups = []; }
+    }
+
+    async function loadSequence(name) {
+      if (!name) { seqNameEl.value = ''; stepsEl.innerHTML = ''; return; }
+      try {
+        // Ensure groups list is loaded before rendering steps with group call dropdowns
+        if (!Array.isArray(groups) || groups.length === 0) {
+          await fetchGroups();
+        }
+        const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}`, { headers: authHeaders() });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const seq = await res.json();
+        seqNameEl.value = seq.name || name;
+        seqLoopEl.value = String(!!seq.loop);
+        seqLoopCountEl.value = Number(seq.loop_count || 1);
+        renderSteps(seq.steps || []);
+        statusEl.textContent = `Status: loaded sequence '${name}'`;
+      } catch (e) {
+        statusEl.textContent = `Status: failed to load '${name}' (${e.message})`;
+      }
+    }
+
+    function renderSteps(steps) {
+      stepsEl.innerHTML = '';
+      steps.forEach((step, idx) => {
+        const div = document.createElement('div');
+        div.className = 'step';
+        div.setAttribute('draggable', 'true');
+        div.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/plain', String(idx)); });
+        div.addEventListener('dragover', (e) => { e.preventDefault(); });
+        div.addEventListener('drop', async (e) => {
+          e.preventDefault();
+          const fromIdx = parseInt(e.dataTransfer.getData('text/plain'), 10);
+          const toIdx = idx;
+          await reorderStep(seqListEl.value, fromIdx, toIdx);
+        });
+        // Render GUI-like controls directly (no raw JSON)
+        const row = document.createElement('div');
+        row.className = 'row';
+        const delBtn = document.createElement('button');
+        delBtn.textContent = `Delete #${idx}`;
+        delBtn.onclick = () => deleteStep(seqListEl.value, idx);
+        const form = document.createElement('div');
+        form.className = 'row';
+        form.style.display = 'flex';
+        // Simple fields
+        // No step-level action selector; actions are listed below
+        const inTemplate = document.createElement('select');
+        const noneOpt = document.createElement('option'); noneOpt.value = ''; noneOpt.textContent = '(none)'; inTemplate.appendChild(noneOpt);
+        templates.forEach(name => { const opt = document.createElement('option'); opt.value = name; opt.textContent = name; inTemplate.appendChild(opt); });
+        inTemplate.value = step.find || '';
+        const selRequired = document.createElement('input'); selRequired.type = 'checkbox'; selRequired.checked = !!step.required;
+        const inTimeout = document.createElement('input'); inTimeout.type = 'number'; inTimeout.placeholder = 'timeout'; inTimeout.value = (step.timeout != null ? step.timeout : '');
+        const inConfidence = document.createElement('input'); inConfidence.type = 'number'; inConfidence.step = '0.01'; inConfidence.min = '0'; inConfidence.max = '1'; inConfidence.placeholder = 'confidence'; inConfidence.value = (step.confidence != null ? step.confidence : '');
+        // Monitor selector
+        const inMonitor = document.createElement('input'); inMonitor.type = 'text'; inMonitor.placeholder = 'monitor (All/0/1/2)'; inMonitor.value = (step.monitor != null ? step.monitor : '');
+        // Region target selector
+        const regionTarget = document.createElement('select');
+        ['region','search_region'].forEach(rt => { const opt = document.createElement('option'); opt.value = rt; opt.textContent = rt; regionTarget.appendChild(opt); });
+        regionTarget.value = 'region';
+        // Labels for clarity
+        // Removed: step-level action selector label
+        const lblTemplate = document.createElement('label'); lblTemplate.textContent = 'Find Template '; lblTemplate.style.minWidth = '140px'; lblTemplate.appendChild(inTemplate);
+        const lblRequired = document.createElement('label'); lblRequired.textContent = 'Required '; lblRequired.style.minWidth = '100px'; lblRequired.appendChild(selRequired);
+        const lblTimeout = document.createElement('label'); lblTimeout.textContent = 'Timeout (s) '; lblTimeout.style.minWidth = '120px'; lblTimeout.appendChild(inTimeout);
+        const lblConfidence = document.createElement('label'); lblConfidence.textContent = 'Confidence '; lblConfidence.style.minWidth = '120px'; lblConfidence.appendChild(inConfidence);
+        const lblMonitor = document.createElement('label'); lblMonitor.textContent = 'Monitor '; lblMonitor.style.minWidth = '120px'; lblMonitor.appendChild(inMonitor);
+        const lblRegionTarget = document.createElement('label'); lblRegionTarget.textContent = 'Apply Region To '; lblRegionTarget.style.minWidth = '140px'; lblRegionTarget.appendChild(regionTarget);
+        // No action-specific sections in header
+        // Removed: step-level action field toggling
+        // Append labeled simple fields to form (compact step header)
+        form.appendChild(lblTemplate);
+        form.appendChild(lblRequired);
+        form.appendChild(lblTimeout);
+        form.appendChild(lblConfidence);
+        form.appendChild(lblMonitor);
+        form.appendChild(lblRegionTarget);
+        // Show current search region
+        const regionInfo = document.createElement('small');
+        const sr = Array.isArray(step.search_region) ? step.search_region : null;
+        regionInfo.textContent = sr ? `Search Region: (${sr[0]}, ${sr[1]}, ${sr[2]}x${sr[3]})` : 'Search Region: (none)';
+        form.appendChild(regionInfo);
+        // Special case: Group Call step
+        if (step.call_group) {
+          const row = document.createElement('div'); row.className='row';
+          const lbl = document.createElement('span'); lbl.textContent = 'Group Call';
+          const selGroup = document.createElement('select');
+          // Build available list of groups, ensuring the current step's group is present
+          const available = Array.isArray(groups) ? [...groups] : [];
+          if (step.call_group && !available.includes(step.call_group)) available.unshift(step.call_group);
+          available.forEach(g => { const opt=document.createElement('option'); opt.value=g; opt.textContent=g; selGroup.appendChild(opt); });
+          selGroup.value = step.call_group || (available[0] || '');
+          const saveGC = document.createElement('button'); saveGC.textContent='Save'; saveGC.onclick = async () => {
+            try {
+              const name = seqListEl.value;
+              const updated = { call_group: selGroup.value };
+              const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/${idx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ step: updated }) });
+              const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+              await loadSequence(name); statusEl.textContent = `Status: saved group call step #${idx}`;
+            } catch (e) { statusEl.textContent = `Status: save failed (${e.message})`; }
+          };
+          const upBtn = document.createElement('button'); upBtn.textContent='Up'; upBtn.onclick=()=>reorderStep(seqListEl.value, idx, Math.max(0,idx-1));
+          const downBtn = document.createElement('button'); downBtn.textContent='Down'; downBtn.onclick=()=>reorderStep(seqListEl.value, idx, Math.min(steps.length-1, idx+1));
+          const delBtn = document.createElement('button'); delBtn.textContent=`Delete #${idx}`; delBtn.onclick=()=>deleteStep(seqListEl.value, idx);
+          row.appendChild(lbl); row.appendChild(selGroup); row.appendChild(saveGC); row.appendChild(upBtn); row.appendChild(downBtn); row.appendChild(delBtn);
+          div.appendChild(row);
+          stepsEl.appendChild(div);
+          return;
+        }
+
+        const useRegionBtn = document.createElement('button'); useRegionBtn.textContent = 'Use Preview Region';
+        useRegionBtn.onclick = async () => {
+          if (!lastRegion) { statusEl.textContent = 'Status: select a region on the preview first'; return; }
+          try {
+            const name = seqListEl.value;
+            const tgt = regionTarget.value;
+            const updated = { ...step };
+            updated[tgt] = lastRegion;
+            const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/${idx}`, {
+              method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ step: updated })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            if (tgt === 'search_region' && regionInfo) {
+              regionInfo.textContent = `Search Region: (${lastRegion[0]}, ${lastRegion[1]}, ${lastRegion[2]}x${lastRegion[3]})`;
+            }
+            await loadSequence(name);
+            statusEl.textContent = `Status: applied ${tgt} to step #${idx}`;
+          } catch (e) { statusEl.textContent = `Status: apply failed (${e.message})`; }
+        };
+        const saveBtn = document.createElement('button'); saveBtn.textContent = 'Save';
+        saveBtn.onclick = async () => {
+          try {
+            const name = seqListEl.value;
+            const updated = { ...step };
+            if (inTemplate.value) updated.find = inTemplate.value;
+            updated.required = !!selRequired.checked;
+            if (inTimeout.value !== '') updated.timeout = parseInt(inTimeout.value, 10);
+            if (inConfidence.value !== '') updated.confidence = parseFloat(inConfidence.value);
+            // Step monitor (Use Global/null or specific index)
+            if (stepMonitor && stepMonitor.value) {
+              if (stepMonitor.value === 'GLOBAL') updated.monitor = null; else updated.monitor = parseInt(stepMonitor.value, 10);
+            }
+            if (inLoops && inLoops.value !== '') updated.step_loops = parseInt(inLoops.value, 10);
+            if (selStrategy && selStrategy.value) updated.detection_strategy = selStrategy.value;
+            if (inInliers && inInliers.value !== '') updated.min_inliers = parseInt(inInliers.value, 10);
+            if (inRatio && inRatio.value !== '') updated.ratio = parseFloat(inRatio.value);
+            if (inRansac && inRansac.value !== '') updated.ransac = parseFloat(inRansac.value);
+            const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/${idx}`, {
+              method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ step: updated })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            await loadSequence(name);
+            statusEl.textContent = `Status: saved step #${idx}`;
+          } catch (e) { statusEl.textContent = `Status: save failed (${e.message})`; }
+        };
+        // Fields already appended above as labeled elements
+        // Step monitor dropdown (Use Global + monitors)
+        const stepMonitor = document.createElement('select');
+        const optG = document.createElement('option'); optG.value = 'GLOBAL'; optG.textContent = 'Use Global'; stepMonitor.appendChild(optG);
+        (monitors||[]).forEach(m => { const opt=document.createElement('option'); opt.value=String(m.index); opt.textContent=(m.index===0?`All (${m.width}x${m.height})`:`Monitor ${m.index} (${m.width}x${m.height})`); stepMonitor.appendChild(opt); });
+        stepMonitor.value = (step.monitor!=null ? String(step.monitor) : 'GLOBAL');
+        const inLoops = document.createElement('input'); inLoops.type='number'; inLoops.placeholder='Step Loops'; inLoops.value=(step.step_loops!=null?step.step_loops:'');
+        const selStrategy = document.createElement('select'); ['default','template','feature'].forEach(s=>{ const opt=document.createElement('option'); opt.value=s; opt.textContent=(s==='default'?'Default (template)':s); selStrategy.appendChild(opt); }); selStrategy.value=(step.detection_strategy||'default');
+        const inInliers = document.createElement('input'); inInliers.type='number'; inInliers.placeholder='Min Inliers'; inInliers.value=(step.min_inliers!=null?step.min_inliers:'');
+        const inRatio = document.createElement('input'); inRatio.type='number'; inRatio.step='0.01'; inRatio.placeholder='Ratio'; inRatio.value=(step.ratio!=null?step.ratio:'');
+        const inRansac = document.createElement('input'); inRansac.type='number'; inRansac.step='0.1'; inRansac.placeholder='RANSAC'; inRansac.value=(step.ransac!=null?step.ransac:'');
+        const selectSearchBtn = document.createElement('button'); selectSearchBtn.textContent='Select Search Region'; selectSearchBtn.onclick = async () => {
+          if (!lastRegion) { statusEl.textContent = 'Status: select a region on the preview first'; return; }
+          try {
+            const name = seqListEl.value;
+            const updated = { ...step, search_region: lastRegion };
+            const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/${idx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ step: updated }) });
+            const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            await loadSequence(name); statusEl.textContent = `Status: applied search_region to step #${idx}`;
+          } catch (e) { statusEl.textContent = `Status: apply failed (${e.message})`; }
+        };
+        form.appendChild(regionTarget);
+        // No action fields appended in step header
+        form.appendChild(stepMonitor);
+        form.appendChild(inLoops);
+        form.appendChild(selStrategy);
+        form.appendChild(inInliers);
+        form.appendChild(inRatio);
+        form.appendChild(inRansac);
+        form.appendChild(saveBtn);
+        form.appendChild(useRegionBtn);
+        form.appendChild(selectSearchBtn);
+        const upBtn = document.createElement('button'); upBtn.textContent = 'Up'; upBtn.onclick = () => reorderStep(seqListEl.value, idx, Math.max(0, idx-1));
+        const downBtn = document.createElement('button'); downBtn.textContent = 'Down'; downBtn.onclick = () => reorderStep(seqListEl.value, idx, Math.min(steps.length-1, idx+1));
+        // Controls always visible; no toggle button
+        row.appendChild(upBtn);
+        row.appendChild(downBtn);
+        row.appendChild(delBtn);
+        div.appendChild(row);
+        div.appendChild(form);
+        // Render actions within this step
+        const actionsWrap = document.createElement('div'); actionsWrap.className = 'actions';
+        const actions = Array.isArray(step.actions) ? step.actions : [];
+        actions.forEach((act, aidx) => {
+          const aDiv = document.createElement('div'); aDiv.className = 'action';
+          const aRow = document.createElement('div'); aRow.className = 'row';
+          const aType = document.createElement('select'); ['click','wait','type','drag','move','move_to','keypress','scroll'].forEach(t=>{ const opt=document.createElement('option'); opt.value=t; opt.textContent=t; aType.appendChild(opt); }); aType.value = act.type || act.action || 'click';
+          const aButton = document.createElement('select'); ['left','right','middle'].forEach(b=>{ const opt=document.createElement('option'); opt.value=b; opt.textContent=b; aButton.appendChild(opt); }); aButton.value = act.button || 'left';
+          const aClicks = document.createElement('input'); aClicks.type='number'; aClicks.placeholder='clicks'; aClicks.value=(act.clicks!=null?act.clicks:'');
+          const aX = document.createElement('input'); aX.type='number'; aX.placeholder='X'; aX.value=(act.x!=null?act.x:'');
+          const aY = document.createElement('input'); aY.type='number'; aY.placeholder='Y'; aY.value=(act.y!=null?act.y:'');
+          const aRandom = document.createElement('input'); aRandom.type='checkbox'; aRandom.checked=!!act.random; aRandom.title='Toggle Random';
+          const aDuration = document.createElement('input'); aDuration.type='number'; aDuration.placeholder='duration'; aDuration.value=(act.duration!=null?act.duration:'');
+          const aUseRegion = document.createElement('button'); aUseRegion.textContent='Select Region';
+          aUseRegion.onclick = async () => {
+            if (!lastRegion) { statusEl.textContent = 'Status: select a region on the preview first'; return; }
+            try {
+              const name = seqListEl.value;
+              const updated = { ...act, region: lastRegion };
+              const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+              const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+              regionReadout.textContent = `Region: (${lastRegion[0]}, ${lastRegion[1]}, ${lastRegion[2]}x${lastRegion[3]})`;
+              await loadSequence(name); statusEl.textContent = `Status: applied action region #${aidx}`;
+            } catch (e) { statusEl.textContent = `Status: apply failed (${e.message})`; }
+          };
+          const aUseRandomRegion = document.createElement('button'); aUseRandomRegion.textContent='Set Random Region';
+          aUseRandomRegion.onclick = async () => {
+            if (!lastRegion) { statusEl.textContent = 'Status: select a region on the preview first'; return; }
+            try {
+              const name = seqListEl.value;
+              const updated = { ...act, random_region: lastRegion };
+              const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+              const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+              randomRegionReadout.textContent = `Random Region: (${lastRegion[0]}, ${lastRegion[1]}, ${lastRegion[2]}x${lastRegion[3]})`;
+              await loadSequence(name); statusEl.textContent = `Status: applied action random_region #${aidx}`;
+            } catch (e) { statusEl.textContent = `Status: apply failed (${e.message})`; }
+          };
+          const regionReadout = document.createElement('small');
+          const rr = Array.isArray(act.region) ? act.region : null;
+          regionReadout.textContent = rr ? `Region: (${rr[0]}, ${rr[1]}, ${rr[2]}x${rr[3]})` : 'Region: (none)';
+          const randomRegionReadout = document.createElement('small');
+          const rrr = Array.isArray(act.random_region) ? act.random_region : null;
+          randomRegionReadout.textContent = rrr ? `Random Region: (${rrr[0]}, ${rrr[1]}, ${rrr[2]}x${rrr[3]})` : 'Random Region: (none)';
+          const aSeconds = document.createElement('input'); aSeconds.type='number'; aSeconds.placeholder='seconds'; aSeconds.value=(act.seconds!=null?act.seconds:'');
+          const aPixels = document.createElement('input'); aPixels.type='number'; aPixels.placeholder='pixels'; aPixels.value=(act.pixels!=null?act.pixels:'');
+          const aKey = document.createElement('input'); aKey.type='text'; aKey.placeholder='key'; aKey.value=act.key||'';
+          const aMods = document.createElement('input'); aMods.type='text'; aMods.placeholder='modifiers (comma)'; aMods.value=(Array.isArray(act.modifiers)?act.modifiers.join(','):(act.modifiers||''));
+          // Show/hide fields based on action type
+          function updateActionFieldsA(){
+            const t = aType.value;
+            aButton.style.display = (t==='click' ? 'inline-block' : 'none');
+            aClicks.style.display = (t==='click' ? 'inline-block' : 'none');
+            aX.style.display = ((t==='move_to'||t==='move'||t==='drag') ? 'inline-block' : 'none');
+            aY.style.display = ((t==='move_to'||t==='move'||t==='drag') ? 'inline-block' : 'none');
+            aRandom.style.display = ((t==='move_to'||t==='move'||t==='drag') ? 'inline-block' : 'none');
+            aUseRegion.style.display = ((t==='move_to'||t==='move'||t==='drag') ? 'inline-block' : 'none');
+            aUseRandomRegion.style.display = ((t==='move_to'||t==='move'||t==='drag') ? 'inline-block' : 'none');
+            aDuration.style.display = ((t==='move'||t==='drag'||t==='move_to') ? 'inline-block' : 'none');
+            aSeconds.style.display = (t==='wait' ? 'inline-block' : 'none');
+            aPixels.style.display = (t==='scroll' ? 'inline-block' : 'none');
+            aKey.style.display = (t==='keypress' ? 'inline-block' : 'none');
+            aMods.style.display = (t==='keypress' ? 'inline-block' : 'none');
+          }
+          updateActionFieldsA();
+          aType.addEventListener('change', updateActionFieldsA);
+          const aSave = document.createElement('button'); aSave.textContent='Save Action';
+          aSave.onclick = async () => {
+            try {
+              const name = seqListEl.value;
+              const updated = { ...act };
+              updated.type = aType.value;
+              if (aButton.value) updated.button = aButton.value;
+              if (aClicks.value !== '') updated.clicks = parseInt(aClicks.value,10);
+              if (aX.value !== '') updated.x = parseInt(aX.value,10);
+              if (aY.value !== '') updated.y = parseInt(aY.value,10);
+              updated.random = !!aRandom.checked;
+              if (aDuration.value !== '') updated.duration = parseFloat(aDuration.value);
+              if (aSeconds.value !== '') updated.seconds = parseFloat(aSeconds.value);
+              if (aPixels.value !== '') updated.pixels = parseInt(aPixels.value,10);
+              if (aKey.value) updated.key = aKey.value;
+              if (aMods.value) updated.modifiers = aMods.value.split(',').map(s=>s.trim()).filter(Boolean);
+              const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, {
+                method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ action: updated })
+              });
+              const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+              await loadSequence(name);
+              statusEl.textContent = `Status: saved action #${aidx} in step #${idx}`;
+            } catch (e) { statusEl.textContent = `Status: action save failed (${e.message})`; }
+          };
+          const aDel = document.createElement('button'); aDel.textContent='Delete Action';
+          aDel.onclick = async () => {
+            try {
+              const name = seqListEl.value;
+              const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, {
+                method: 'DELETE', headers: authHeaders()
+              });
+              const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+              await loadSequence(name);
+              statusEl.textContent = `Status: deleted action #${aidx} in step #${idx}`;
+            } catch (e) { statusEl.textContent = `Status: action delete failed (${e.message})`; }
+          };
+          const aUp = document.createElement('button'); aUp.textContent='Up'; aUp.onclick = async () => { await reorderAction(seqListEl.value, idx, aidx, Math.max(0,aidx-1)); };
+          const aDown = document.createElement('button'); aDown.textContent='Down'; aDown.onclick = async () => { const to = Math.min(actions.length-1,aidx+1); await reorderAction(seqListEl.value, idx, aidx, to); };
+          aRow.appendChild(aType);
+          aRow.appendChild(aButton);
+          aRow.appendChild(aClicks);
+          aRow.appendChild(aX);
+          aRow.appendChild(aY);
+          aRow.appendChild(aRandom);
+          aRow.appendChild(aDuration);
+          aRow.appendChild(aSeconds);
+          aRow.appendChild(aPixels);
+          aRow.appendChild(aKey);
+          aRow.appendChild(aMods);
+          aRow.appendChild(aSave);
+          aRow.appendChild(aUseRegion);
+          aRow.appendChild(aUseRandomRegion);
+          aRow.appendChild(regionReadout);
+          aRow.appendChild(randomRegionReadout);
+          aRow.appendChild(aUp);
+          aRow.appendChild(aDown);
+          aRow.appendChild(aDel);
+          aDiv.appendChild(aRow);
+          actionsWrap.appendChild(aDiv);
+        });
+        const addActionRow = document.createElement('div'); addActionRow.className='row';
+        function addActionOfType(t, preset={}){
+          return async () => {
+            try {
+              const name = seqListEl.value;
+              const payload = { type: t, ...preset };
+              const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/${idx}/actions`, {
+                method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ action: payload })
+              });
+              const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+              await loadSequence(name);
+              statusEl.textContent = `Status: added ${t} to step #${idx}`;
+            } catch (e) { statusEl.textContent = `Status: add action failed (${e.message})`; }
+          };
+        }
+        const palette = [
+          {label:'Add click', t:'click'},
+          {label:'Add right_click', t:'click', preset:{button:'right'}},
+          {label:'Add double_click', t:'click', preset:{clicks:2}},
+          {label:'Add move', t:'move', preset:{duration:1.0}},
+          {label:'Add move_to', t:'move_to', preset:{duration:1.0}},
+          {label:'Add type', t:'type', preset:{text:'', delay:0.0}},
+          {label:'Add wait', t:'wait', preset:{seconds:0.5}},
+          {label:'Add scroll', t:'scroll', preset:{pixels:100}},
+          {label:'Add click_and_hold', t:'click_and_hold', preset:{duration:1.0}}
+        ];
+        palette.forEach(p => { const b=document.createElement('button'); b.textContent=p.label; b.onclick=addActionOfType(p.t, p.preset||{}); addActionRow.appendChild(b); });
+        actionsWrap.appendChild(addActionRow);
+        div.appendChild(actionsWrap);
+        stepsEl.appendChild(div);
+      });
+    }
+
+    async function reorderAction(name, stepIdx, fromIdx, toIdx) {
+      if (fromIdx === toIdx) return;
+      try {
+        const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/${stepIdx}/actions/reorder`, {
+          method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ from_index: fromIdx, to_index: toIdx })
+        });
+        const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await loadSequence(name);
+        statusEl.textContent = `Status: reordered action ${fromIdx} → ${toIdx}`;
+      } catch (e) { statusEl.textContent = `Status: action reorder failed (${e.message})`; }
+    }
+
+    async function reorderStep(name, fromIdx, toIdx) {
+      if (fromIdx === toIdx) return;
+      try {
+        const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/reorder`, {
+          method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ from_index: fromIdx, to_index: toIdx })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await loadSequence(name);
+        statusEl.textContent = `Status: reordered step ${fromIdx} → ${toIdx}`;
+      } catch (e) { statusEl.textContent = `Status: reorder failed (${e.message})`; }
+    }
+
+    async function createSequence() {
+      const name = newSeqNameEl.value.trim();
+      if (!name) { statusEl.textContent = 'Status: enter a name'; return; }
+      try {
+        const res = await fetch(`${apiBase}/api/sequences`, {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, steps: [], loop: false, loop_count: 1 })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await fetchSequences();
+        seqListEl.value = name;
+        await loadSequence(name);
+        statusEl.textContent = `Status: created '${name}'`;
+      } catch (e) {
+        statusEl.textContent = `Status: create failed (${e.message})`;
+      }
+    }
+
+    async function deleteSequence() {
+      const name = seqListEl.value;
+      if (!name) { statusEl.textContent = 'Status: select a sequence'; return; }
+      try {
+        const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}`, {
+          method: 'DELETE', headers: authHeaders()
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await fetchSequences();
+        stepsEl.innerHTML = '';
+        seqNameEl.value = '';
+        statusEl.textContent = `Status: deleted '${name}'`;
+      } catch (e) {
+        statusEl.textContent = `Status: delete failed (${e.message})`;
+      }
+    }
+
+    async function renameSequence() {
+      const oldName = seqListEl.value;
+      const newName = seqNameEl.value.trim();
+      if (!oldName || !newName) { statusEl.textContent = 'Status: select and enter name'; return; }
+      try {
+        const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(oldName)}`, {
+          method: 'PUT',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newName })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await fetchSequences();
+        seqListEl.value = newName;
+        await loadSequence(newName);
+        statusEl.textContent = `Status: renamed '${oldName}' → '${newName}'`;
+      } catch (e) {
+        statusEl.textContent = `Status: rename failed (${e.message})`;
+      }
+    }
+
+    async function saveMeta() {
+      const name = seqListEl.value;
+      if (!name) { statusEl.textContent = 'Status: select a sequence'; return; }
+      try {
+        const loop = (seqLoopEl.value === 'true');
+        const loop_count = parseInt(seqLoopCountEl.value || '1', 10);
+        const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}`, {
+          method: 'PUT',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ loop, loop_count })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await loadSequence(name);
+        statusEl.textContent = `Status: saved loop settings`;
+      } catch (e) {
+        statusEl.textContent = `Status: save failed (${e.message})`;
+      }
+    }
+
+    // Removed addStep() — replaced by per-step action palette
+
+    async function deleteStep(name, index) {
+      try {
+        const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps/${index}`, {
+          method: 'DELETE', headers: authHeaders()
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await loadSequence(name);
+        statusEl.textContent = `Status: deleted step #${index}`;
+      } catch (e) {
+        statusEl.textContent = `Status: delete step failed (${e.message})`;
+      }
+    }
+
+    // Wire up events
+    tokenEl.addEventListener('change', () => { fetchTemplates().then(fetchSequences); fetchGroups().then(()=>{}); fetchMonitors().then(updatePreviewSrc); });
+    seqListEl.addEventListener('change', () => loadSequence(seqListEl.value));
+    document.getElementById('btnCreate').addEventListener('click', createSequence);
+    document.getElementById('btnDelete').addEventListener('click', deleteSequence);
+    document.getElementById('btnRename').addEventListener('click', renameSequence);
+    document.getElementById('btnSaveMeta').addEventListener('click', saveMeta);
+    // Add Step / Group Call listeners
+    async function addStep() {
+      const name = seqListEl.value; if (!name) { statusEl.textContent='Status: select a sequence'; return; }
+      try {
+        const stepObj = { find: '', required: true, timeout: 10, confidence: 0.8, detection_strategy: 'default', step_loops: 1, monitor: null, actions: [] };
+        const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps`, { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ step: stepObj }) });
+        const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await loadSequence(name); statusEl.textContent = `Status: added step #${data.index}`;
+      } catch (e) { statusEl.textContent = `Status: add step failed (${e.message})`; }
+    }
+    async function addGroupCall() {
+      const name = seqListEl.value; if (!name) { statusEl.textContent='Status: select a sequence'; return; }
+      const chosen = (document.getElementById('seqGroupSelect')?.value || '').trim();
+      if (!chosen) { statusEl.textContent='Status: select a group'; return; }
+      try {
+        const stepObj = { call_group: chosen };
+        const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}/steps`, { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ step: stepObj }) });
+        const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await loadSequence(name); statusEl.textContent = `Status: added group call step #${data.index}`;
+      } catch (e) { statusEl.textContent = `Status: add group call failed (${e.message})`; }
+    }
+    document.getElementById('btnAddStep').addEventListener('click', addStep);
+    document.getElementById('btnAddGroupCall').addEventListener('click', addGroupCall);
+
+    // Auto-init with token from URL
+    const urlTok = new URLSearchParams(location.search).get('token');
+    if (urlTok) { tokenEl.value = urlTok; }
+    fetchTemplates().then(fetchSequences).then(fetchGroups).then(fetchMonitors).then(()=>{ updatePreviewSrc(); setSeqPreviewSize(); });
+
+    // Preview setup
+    const seqPreview = document.getElementById('seqPreview');
+    const selBox = document.getElementById('seqSel');
+    const imgPane = document.getElementById('seqImagePane');
+    let monitors = [];
+    let selectedMonitor = 0;
+    // Prevent browser dragging the image so region selection works
+    seqPreview.addEventListener('dragstart', (e) => e.preventDefault());
+    // Preview resizing
+    function setSeqPreviewSize(){
+      const val = parseInt(document.getElementById('seqPreviewSize').value||'1024',10);
+      if (!isNaN(val) && val>0) { seqPreview.style.width = `${val}px`; }
+    }
+    document.getElementById('seqPreviewSize').addEventListener('change', setSeqPreviewSize);
+    async function fetchMonitors() {
+      try {
+        const res = await fetch(`${apiBase}/api/monitors`, { headers: authHeaders() });
+        const data = await res.json();
+        monitors = data.monitors || [];
+        const sel = document.getElementById('seqMonitor');
+        sel.innerHTML = '';
+        for (const m of monitors) {
+          const opt = document.createElement('option');
+          opt.value = String(m.index);
+          opt.textContent = (m.index === 0) ? `All (${m.width}x${m.height})` : `Monitor ${m.index} (${m.width}x${m.height})`;
+          sel.appendChild(opt);
+        }
+        sel.value = String(selectedMonitor);
+      } catch (e) { /* ignore */ }
+    }
+    function updatePreviewSrc() {
+      const tok = tokenEl.value.trim();
+      const monParam = `monitor=${encodeURIComponent(String(selectedMonitor))}`;
+      const q = [monParam];
+      if (tok) q.push(`token=${encodeURIComponent(tok)}`);
+      seqPreview.src = `${apiBase}/stream.mjpeg?${q.join('&')}`;
+    }
+    tokenEl.addEventListener('change', updatePreviewSrc);
+    document.getElementById('seqMonitor').addEventListener('change', (e) => { selectedMonitor = parseInt(e.target.value, 10); updatePreviewSrc(); });
+    updatePreviewSrc();
+    let dragStart = null;
+    // Compute actual drawn image content rect inside the <img> (object-fit: contain)
+    function getImageContentInfo(img){
+      const rect = img.getBoundingClientRect();
+      const nw = img.naturalWidth || rect.width;
+      const nh = img.naturalHeight || rect.height;
+      const elemW = rect.width, elemH = rect.height;
+      let contentW = elemW;
+      let contentH = contentW * (nh / nw);
+      if (contentH > elemH){
+        contentH = elemH;
+        contentW = contentH * (nw / nh);
+      }
+      const offsetX = (elemW - contentW) / 2;
+      const offsetY = (elemH - contentH) / 2;
+      return { rect, nw, nh, contentW, contentH, offsetX, offsetY };
+    }
+    let lastDragPos = null;
+    seqPreview.addEventListener('mousedown', (e) => {
+      const paneRect = imgPane.getBoundingClientRect();
+      const info = getImageContentInfo(seqPreview);
+      const ix = e.clientX - info.rect.left - info.offsetX;
+      const iy = e.clientY - info.rect.top - info.offsetY;
+      if (ix < 0 || iy < 0 || ix > info.contentW || iy > info.contentH) return;
+      const offX = (info.rect.left - paneRect.left) + info.offsetX;
+      const offY = (info.rect.top - paneRect.top) + info.offsetY;
+      dragStart = { x: ix, y: iy, offX, offY };
+      selBox.style.display = 'block';
+      selBox.style.left = `${offX + ix}px`;
+      selBox.style.top = `${offY + iy}px`;
+      selBox.style.width = '0px';
+      selBox.style.height = '0px';
+    });
+    seqPreview.addEventListener('mousemove', (e) => {
+      if (!dragStart) return;
+      const info = getImageContentInfo(seqPreview);
+      let ix = e.clientX - info.rect.left - info.offsetX; let iy = e.clientY - info.rect.top - info.offsetY;
+      ix = Math.max(0, Math.min(info.contentW, ix));
+      iy = Math.max(0, Math.min(info.contentH, iy));
+      lastDragPos = { x: ix, y: iy };
+      const left = Math.min(dragStart.x, ix) + dragStart.offX;
+      const top = Math.min(dragStart.y, iy) + dragStart.offY;
+      const w = Math.abs(ix - dragStart.x);
+      const h = Math.abs(iy - dragStart.y);
+      selBox.style.left = `${left}px`;
+      selBox.style.top = `${top}px`;
+      selBox.style.width = `${w}px`;
+      selBox.style.height = `${h}px`;
+    });
+    window.addEventListener('mouseup', () => {
+      if (!dragStart) return;
+      const info = getImageContentInfo(seqPreview);
+      const ix0 = Math.min(dragStart.x, (lastDragPos ? lastDragPos.x : dragStart.x));
+      const iy0 = Math.min(dragStart.y, (lastDragPos ? lastDragPos.y : dragStart.y));
+      const iw = Math.abs(((lastDragPos ? lastDragPos.x : dragStart.x)) - dragStart.x);
+      const ih = Math.abs(((lastDragPos ? lastDragPos.y : dragStart.y)) - dragStart.y);
+      // Map to natural image pixels
+      const scaleX = info.nw / info.contentW;
+      const scaleY = info.nh / info.contentH;
+      const x0 = Math.round(ix0 * scaleX);
+      const y0 = Math.round(iy0 * scaleY);
+      const rw = Math.round(iw * scaleX);
+      const rh = Math.round(ih * scaleY);
+      lastRegion = [x0, y0, rw, rh];
+      statusEl.textContent = `Status: selected region ${x0},${y0},${rw},${rh}`;
+      dragStart = null;
+      lastDragPos = null;
+    });
+  </script>
+</body>
+</html>

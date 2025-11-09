@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Image Detection Bot - Remote</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #1e1e1e; color: #ddd; margin: 0; }
+    header { padding: 12px 16px; background: #2b2b2b; border-bottom: 1px solid #3a3a3a; }
+    main { display: flex; gap: 16px; padding: 16px; }
+    .panel { background: #252525; border: 1px solid #3a3a3a; border-radius: 6px; padding: 12px; }
+    .col { flex: 1; min-width: 280px; }
+    label { display: block; margin-bottom: 8px; }
+    input[type=text], select { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #555; background: #1f1f1f; color: #ddd; }
+    button { padding: 8px 12px; border-radius: 4px; border: 1px solid #555; background: #333; color: #eee; cursor: pointer; }
+    button:hover { background: #3d3d3d; }
+    #preview { width: 100%; max-height: 70vh; object-fit: contain; background: #111; border: 1px solid #3a3a3a; border-radius: 6px; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    small { color: #999; }
+  </style>
+</head>
+<body>
+  <header>
+    <h3>Image Detection Bot - Remote Control</h3>
+    <div style="margin-top:8px; display:flex; gap:12px">
+      <a href="/static/sequences.html" style="color:#9bd">Open Sequences Editor</a>
+      <a href="/static/groups.html" style="color:#9bd">Open Groups Editor</a>
+      <a href="/static/control.html" style="color:#9bd">Open Remote Controls (Run & Break)</a>
+      <a href="/static/schedules.html" style="color:#9bd">Open Scheduled Sequences</a>
+      <a href="/static/templates.html" style="color:#9bd">Open Templates Manager</a>
+      <a href="/static/failsafe.html" style="color:#9bd">Open Failsafe Settings</a>
+    </div>
+  </header>
+  <main>
+    <div class="panel col">
+      <label style="display:flex; align-items:center; gap:10px">
+        <span>Access Token</span>
+        <input type="text" id="token" placeholder="Enter token (server_config.json)" />
+        <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
+      </label>
+      <div class="row">
+        <label style="flex:1">
+          Sequence
+          <select id="sequence"></select>
+        </label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="btnRun">Run (F5)</button>
+        <button id="btnStop">Stop (F8)</button>
+      </div>
+      <div style="margin-top:12px">
+        <small id="status">Status: idle</small>
+      </div>
+    </div>
+    <div class="panel col" style="flex:2">
+      <div class="row" style="margin-bottom:8px">
+        <label style="flex:0 0 200px">Monitor
+          <select id="dashMonitor"></select>
+        </label>
+      </div>
+      <img id="preview" alt="Preview" />
+      <div style="margin-top:8px"><small>Live preview (PNG frames over multipart stream)</small></div>
+    </div>
+  </main>
+
+  <script>
+    const apiBase = '';
+    const tokenEl = document.getElementById('token');
+    const rememberEl = document.getElementById('rememberToken');
+    const seqEl = document.getElementById('sequence');
+    const statusEl = document.getElementById('status');
+    const previewEl = document.getElementById('preview');
+    const dashMonitorEl = document.getElementById('dashMonitor');
+    let monitors = [];
+    let selectedMonitor = 0;
+    const btnRun = document.getElementById('btnRun');
+    const btnStop = document.getElementById('btnStop');
+
+    async function fetchSequences() {
+      const tok = tokenEl.value.trim();
+      if (!tok) { statusEl.textContent = 'Status: enter token'; return; }
+      try {
+        const res = await fetch(`${apiBase}/api/sequences`, {
+          headers: { 'Authorization': `Bearer ${tok}` }
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        seqEl.innerHTML = '';
+        const list = data.sequences || [];
+        for (const name of list) {
+          const opt = document.createElement('option');
+          opt.value = name; opt.textContent = name;
+          seqEl.appendChild(opt);
+        }
+        statusEl.textContent = `Status: sequences loaded (${list.length})`;
+      } catch (e) {
+        statusEl.textContent = `Status: failed to load sequences (${e.message})`;
+      }
+    }
+
+    async function runSequence() {
+      const tok = tokenEl.value.trim();
+      if (!tok) { statusEl.textContent = 'Status: enter token'; return; }
+      const sequence = seqEl.value || null;
+      try {
+        const res = await fetch(`${apiBase}/api/run`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${tok}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ sequence })
+        });
+        const data = await res.json();
+        if (res.ok) statusEl.textContent = `Status: run requested (${sequence || 'current selection'})`;
+        else statusEl.textContent = `Status: run failed (${data.error})`;
+      } catch (e) { statusEl.textContent = `Status: run error (${e.message})`; }
+    }
+
+    async function stopSequence() {
+      const tok = tokenEl.value.trim();
+      if (!tok) { statusEl.textContent = 'Status: enter token'; return; }
+      try {
+        const res = await fetch(`${apiBase}/api/stop`, {
+          method: 'POST', headers: { 'Authorization': `Bearer ${tok}` }
+        });
+        const data = await res.json();
+        if (res.ok) statusEl.textContent = 'Status: stop requested';
+        else statusEl.textContent = `Status: stop failed (${data.error})`;
+      } catch (e) { statusEl.textContent = `Status: stop error (${e.message})`; }
+    }
+
+    async function fetchMonitors() {
+      const tok = tokenEl.value.trim();
+      if (!tok) return;
+      try {
+        const res = await fetch(`${apiBase}/api/monitors`, { headers: { 'Authorization': `Bearer ${tok}` } });
+        const data = await res.json();
+        monitors = data.monitors || [];
+        dashMonitorEl.innerHTML = '';
+        for (const m of monitors) {
+          const opt = document.createElement('option');
+          opt.value = String(m.index);
+          opt.textContent = (m.index === 0) ? `All (${m.width}x${m.height})` : `Monitor ${m.index} (${m.width}x${m.height})`;
+          dashMonitorEl.appendChild(opt);
+        }
+        dashMonitorEl.value = String(selectedMonitor);
+      } catch {}
+    }
+
+    function startPreview() {
+      const tok = tokenEl.value.trim();
+      if (!tok) { statusEl.textContent = 'Status: enter token'; return; }
+      // Pass token via query param for img src
+      const q = [`monitor=${encodeURIComponent(String(selectedMonitor))}`, `token=${encodeURIComponent(tok)}`];
+      previewEl.src = `/stream.mjpeg?${q.join('&')}`;
+      statusEl.textContent = 'Status: preview connecting...';
+    }
+
+    // Token persistence across pages
+    try {
+      const remembered = (localStorage.getItem('rememberToken') === 'true');
+      rememberEl.checked = remembered;
+      const savedTok = localStorage.getItem('apiToken') || '';
+      if (remembered && savedTok && !tokenEl.value) tokenEl.value = savedTok;
+    } catch (e) {}
+    tokenEl.addEventListener('change', () => {
+      try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
+      fetchSequences(); fetchMonitors().then(startPreview);
+    });
+    rememberEl.addEventListener('change', () => {
+      try {
+        localStorage.setItem('rememberToken', rememberEl.checked ? 'true' : 'false');
+        if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
+      } catch (e) {}
+    });
+    dashMonitorEl.addEventListener('change', (e) => { selectedMonitor = parseInt(e.target.value, 10); startPreview(); });
+    btnRun.addEventListener('click', runSequence);
+    btnStop.addEventListener('click', stopSequence);
+
+    // Auto-init if token present in URL
+    const urlTok = new URLSearchParams(location.search).get('token');
+    if (urlTok) { tokenEl.value = urlTok; }
+    fetchSequences();
+    fetchMonitors().then(startPreview);
+  </script>
+</body>
+</html>

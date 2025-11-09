@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Remote Controls</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #1e1e1e; color: #ddd; margin: 0; }
+    header { padding: 12px 16px; background: #2b2b2b; border-bottom: 1px solid #3a3a3a; display:flex; gap:16px; align-items:center; }
+    main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; }
+    .panel { background: #252525; border: 1px solid #3a3a3a; border-radius: 6px; padding: 12px; }
+    label { display: block; margin-bottom: 8px; }
+    input[type=text], input[type=number], select { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #555; background: #1f1f1f; color: #ddd; }
+    button { padding: 8px 12px; border-radius: 4px; border: 1px solid #555; background: #333; color: #eee; cursor: pointer; }
+    button:hover { background: #3d3d3d; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+    small { color: #999; }
+    nav a { color: #9bd; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <header>
+    <div><strong>Remote Controls</strong></div>
+    <nav style="display:flex; gap:12px">
+      <a href="/">Dashboard</a>
+      <a href="/static/sequences.html">Sequences</a>
+      <a href="/static/groups.html">Groups</a>
+      <a href="/static/control.html">Controls</a>
+      <a href="/static/schedules.html">Schedules</a>
+      <a href="/static/templates.html">Templates</a>
+      <a href="/static/failsafe.html">Failsafe</a>
+    </nav>
+    <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
+      <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
+      <input type="text" id="token" placeholder="Access Token" style="width:260px" />
+    </div>
+  </header>
+  <main>
+    <div class="panel">
+      <h3>Run Control</h3>
+      <label>
+        Sequence
+        <select id="runSequence"></select>
+      </label>
+      <label>
+        Group
+        <select id="runGroup"></select>
+      </label>
+      <div class="row">
+        <button id="btnRun">Run</button>
+        <button id="btnRunGroup">Run Group</button>
+        <button id="btnStop">Stop</button>
+      </div>
+      <div class="row">
+        <label style="flex:1">Loop
+          <select id="runLoop"><option>false</option><option>true</option></select>
+        </label>
+        <label style="width:140px">Loop Count
+          <input type="number" id="runLoopCount" min="1" value="1" />
+        </label>
+        <button id="btnSaveRunMeta">Save</button>
+      </div>
+      <div class="row"><label style="flex:1">Non Required Wait
+        <select id="nonRequiredWait"><option>false</option><option>true</option></select>
+      </label>
+      <button id="btnSaveNRW">Apply</button></div>
+      <small id="statusA">Status: idle</small>
+    </div>
+
+    <div class="panel">
+      <h3>Break Settings</h3>
+      <div class="row">
+        <label style="flex:1">Enabled
+          <select id="breakEnabled"><option>false</option><option>true</option></select>
+        </label>
+      </div>
+      <div class="row">
+        <label>Hours
+          <input type="number" id="breakHours" min="0" value="0" />
+        </label>
+        <label>Minutes
+          <input type="number" id="breakMinutes" min="0" value="0" />
+        </label>
+        <label>Seconds
+          <input type="number" id="breakSeconds" min="0" value="0" />
+        </label>
+      </div>
+      <div class="row">
+        <label style="flex:1">Run Final After Break
+          <select id="breakRunFinal"><option>false</option><option>true</option></select>
+        </label>
+        <label style="flex:1">Final Sequence
+          <select id="breakFinalSeq"></select>
+        </label>
+      </div>
+      <div class="row">
+        <button id="btnSaveBreak">Save Break Settings</button>
+      </div>
+      <small id="statusB">Status: idle</small>
+    </div>
+  </main>
+
+  <script>
+    const apiBase = '';
+    const tokenEl = document.getElementById('token');
+    const rememberEl = document.getElementById('rememberToken');
+    const statusA = document.getElementById('statusA');
+    const statusB = document.getElementById('statusB');
+
+    function authHeaders() {
+      const tok = tokenEl.value.trim();
+      return tok ? { 'Authorization': `Bearer ${tok}` } : {};
+    }
+
+    // Token persistence across pages
+    try {
+      const remembered = (localStorage.getItem('rememberToken') === 'true');
+      rememberEl.checked = remembered;
+      const savedTok = localStorage.getItem('apiToken') || '';
+      if (remembered && savedTok && !tokenEl.value) tokenEl.value = savedTok;
+    } catch (e) {}
+    tokenEl.addEventListener('change', () => {
+      try {
+        if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
+      } catch (e) {}
+    });
+    rememberEl.addEventListener('change', () => {
+      try {
+        localStorage.setItem('rememberToken', rememberEl.checked ? 'true' : 'false');
+        if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
+      } catch (e) {}
+    });
+
+    async function loadSequencesInto(selectEl) {
+      try {
+        const res = await fetch(`${apiBase}/api/sequences`, { headers: authHeaders() });
+        const data = await res.json();
+        selectEl.innerHTML = '';
+        for (const name of (data.sequences || [])) {
+          const opt = document.createElement('option'); opt.value = name; opt.textContent = name; selectEl.appendChild(opt);
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    async function loadGroupsInto(selectEl) {
+      try {
+        const res = await fetch(`${apiBase}/api/groups`, { headers: authHeaders() });
+        const data = await res.json();
+        selectEl.innerHTML = '';
+        for (const name of (data.groups || [])) {
+          const opt = document.createElement('option'); opt.value = name; opt.textContent = name; selectEl.appendChild(opt);
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    async function loadBreakSettings() {
+      try {
+        const res = await fetch(`${apiBase}/api/break-settings`, { headers: authHeaders() });
+        const br = await res.json();
+        document.getElementById('breakEnabled').value = String(!!br.enabled);
+        const secs = Number(br.max_runtime_seconds || 0);
+        document.getElementById('breakHours').value = Math.floor(secs / 3600);
+        document.getElementById('breakMinutes').value = Math.floor((secs % 3600) / 60);
+        document.getElementById('breakSeconds').value = Math.floor(secs % 60);
+        document.getElementById('breakRunFinal').value = String(!!br.run_final_after_break);
+        document.getElementById('breakFinalSeq').value = br.final_sequence_name || '(none)';
+        statusB.textContent = 'Status: break settings loaded';
+      } catch (e) { statusB.textContent = `Status: failed to load break (${e.message})`; }
+    }
+
+    async function saveBreakSettings() {
+      try {
+        const payload = {
+          enabled: (document.getElementById('breakEnabled').value === 'true'),
+          hours: parseInt(document.getElementById('breakHours').value || '0', 10),
+          minutes: parseInt(document.getElementById('breakMinutes').value || '0', 10),
+          seconds: parseInt(document.getElementById('breakSeconds').value || '0', 10),
+          run_final_after_break: (document.getElementById('breakRunFinal').value === 'true'),
+          final_sequence_name: document.getElementById('breakFinalSeq').value || '(none)'
+        };
+        const res = await fetch(`${apiBase}/api/break-settings`, {
+          method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusB.textContent = 'Status: break settings saved';
+      } catch (e) { statusB.textContent = `Status: save failed (${e.message})`; }
+    }
+
+    async function saveRunMeta() {
+      const name = document.getElementById('runSequence').value;
+      if (!name) { statusA.textContent = 'Status: select sequence'; return; }
+      try {
+        const loop = (document.getElementById('runLoop').value === 'true');
+        const loop_count = parseInt(document.getElementById('runLoopCount').value || '1', 10);
+        const res = await fetch(`${apiBase}/api/sequences/${encodeURIComponent(name)}`, {
+          method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ loop, loop_count })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusA.textContent = 'Status: run meta saved';
+      } catch (e) { statusA.textContent = `Status: save failed (${e.message})`; }
+    }
+
+    async function applyNRW() {
+      try {
+        const nrw = (document.getElementById('nonRequiredWait').value === 'true');
+        const res = await fetch(`${apiBase}/api/run-options`, {
+          method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ non_required_wait: nrw })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusA.textContent = 'Status: applied non-required-wait';
+      } catch (e) { statusA.textContent = `Status: apply failed (${e.message})`; }
+    }
+
+    async function runSeq() {
+      try {
+        const name = document.getElementById('runSequence').value;
+        const res = await fetch(`${apiBase}/api/run`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ sequence: name }) });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusA.textContent = `Status: run requested (${name})`;
+      } catch (e) { statusA.textContent = `Status: run failed (${e.message})`; }
+    }
+
+    async function runGroup() {
+      try {
+        const name = document.getElementById('runGroup').value;
+        const res = await fetch(`${apiBase}/api/run-group`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ group: name }) });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusA.textContent = `Status: run group requested (${name})`;
+      } catch (e) { statusA.textContent = `Status: run group failed (${e.message})`; }
+    }
+
+    async function stopSeq() {
+      try {
+        const res = await fetch(`${apiBase}/api/stop`, { method: 'POST', headers: authHeaders() });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusA.textContent = 'Status: stop requested';
+      } catch (e) { statusA.textContent = `Status: stop failed (${e.message})`; }
+    }
+
+    document.getElementById('btnSaveRunMeta').addEventListener('click', saveRunMeta);
+    document.getElementById('btnSaveNRW').addEventListener('click', applyNRW);
+    document.getElementById('btnRun').addEventListener('click', runSeq);
+    document.getElementById('btnRunGroup').addEventListener('click', runGroup);
+    document.getElementById('btnStop').addEventListener('click', stopSeq);
+    document.getElementById('btnSaveBreak').addEventListener('click', saveBreakSettings);
+
+    tokenEl.addEventListener('change', () => { loadSequencesInto(document.getElementById('runSequence')); loadGroupsInto(document.getElementById('runGroup')); loadBreakSettings(); });
+
+    const urlTok = new URLSearchParams(location.search).get('token');
+    if (urlTok) { tokenEl.value = urlTok; }
+    loadSequencesInto(document.getElementById('runSequence'));
+    loadGroupsInto(document.getElementById('runGroup'));
+    loadSequencesInto(document.getElementById('breakFinalSeq'));
+    loadBreakSettings();
+  </script>
+</body>
+</html>

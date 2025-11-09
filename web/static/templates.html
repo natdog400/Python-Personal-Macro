@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Templates Manager</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #1e1e1e; color: #ddd; margin: 0; }
+    header { padding: 12px 16px; background: #2b2b2b; border-bottom: 1px solid #3a3a3a; display:flex; gap:16px; align-items:center; }
+    main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px; }
+    .panel { background: #252525; border: 1px solid #3a3a3a; border-radius: 6px; padding: 12px; }
+    label { display: block; margin-bottom: 8px; }
+    input[type=text], select { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #555; background: #1f1f1f; color: #ddd; }
+    button { padding: 8px 12px; border-radius: 4px; border: 1px solid #555; background: #333; color: #eee; cursor: pointer; }
+    button:hover { background: #3d3d3d; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+    small { color: #999; }
+    nav a { color: #9bd; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    #preview { width: 100%; max-height: 70vh; object-fit: contain; background: #111; border: 1px solid #3a3a3a; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div><strong>Templates Manager</strong></div>
+    <nav style="display:flex; gap:12px">
+      <a href="/">Dashboard</a>
+      <a href="/static/sequences.html">Sequences</a>
+      <a href="/static/control.html">Controls</a>
+      <a href="/static/schedules.html">Schedules</a>
+      <a href="/static/templates.html">Templates</a>
+      <a href="/static/failsafe.html">Failsafe</a>
+    </nav>
+    <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
+      <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
+      <input type="text" id="token" placeholder="Access Token" style="width:260px" />
+    </div>
+  </header>
+  <main>
+    <div class="panel">
+      <label>
+        Templates
+        <select id="tplList" size="14"></select>
+      </label>
+      <div class="row">
+        <input type="text" id="newTplName" placeholder="New template name" />
+        <input type="text" id="newTplPath" placeholder="Relative path (e.g., images/RuneOre.png)" />
+        <button id="btnAdd">Add</button>
+      </div>
+      <div class="row">
+        <button id="btnDelete">Delete Selected</button>
+      </div>
+      <div style="margin-top:8px"><small id="statusA">Status: idle</small></div>
+    </div>
+    <div class="panel">
+      <div class="row">
+        <label style="flex:1">Name
+          <input type="text" id="tplName" disabled />
+        </label>
+      </div>
+      <div class="row">
+        <label style="flex:1">Path
+          <input type="text" id="tplPath" />
+        </label>
+        <button id="btnSave">Save Path</button>
+      </div>
+      <img id="preview" alt="Preview" />
+      <div style="margin-top:8px"><small id="statusB">Status: idle</small></div>
+    </div>
+  </main>
+
+  <script>
+    const apiBase = '';
+    const tokenEl = document.getElementById('token');
+    const rememberEl = document.getElementById('rememberToken');
+    const tplListEl = document.getElementById('tplList');
+    const previewEl = document.getElementById('preview');
+    const statusA = document.getElementById('statusA');
+    const statusB = document.getElementById('statusB');
+
+    function authHeaders() {
+      const tok = tokenEl.value.trim();
+      return tok ? { 'Authorization': `Bearer ${tok}` } : {};
+    }
+
+    // Token persistence across pages
+    try {
+      const remembered = (localStorage.getItem('rememberToken') === 'true');
+      rememberEl.checked = remembered;
+      const savedTok = localStorage.getItem('apiToken') || '';
+      if (remembered && savedTok && !tokenEl.value) tokenEl.value = savedTok;
+    } catch (e) {}
+    tokenEl.addEventListener('change', () => {
+      try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
+      fetchTemplates();
+    });
+    rememberEl.addEventListener('change', () => {
+      try {
+        localStorage.setItem('rememberToken', rememberEl.checked ? 'true' : 'false');
+        if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
+      } catch (e) {}
+    });
+
+    async function fetchTemplates() {
+      try {
+        const res = await fetch(`${apiBase}/api/templates`, { headers: authHeaders() });
+        const data = await res.json();
+        tplListEl.innerHTML = '';
+        for (const t of (data.templates || [])) {
+          const opt = document.createElement('option');
+          opt.value = t.name; opt.textContent = `${t.name}${t.exists ? '' : ' (missing)'}`;
+          tplListEl.appendChild(opt);
+        }
+        statusA.textContent = `Status: loaded ${tplListEl.options.length} template(s)`;
+      } catch (e) { statusA.textContent = `Status: failed (${e.message})`; }
+    }
+
+    async function loadTemplate(name) {
+      if (!name) { document.getElementById('tplName').value = ''; document.getElementById('tplPath').value = ''; previewEl.src = ''; return; }
+      try {
+        const res = await fetch(`${apiBase}/api/templates/${encodeURIComponent(name)}`, { headers: authHeaders() });
+        const t = await res.json();
+        if (res.ok) {
+          document.getElementById('tplName').value = t.name;
+          document.getElementById('tplPath').value = t.path || '';
+          const tok = tokenEl.value.trim();
+          previewEl.src = `${apiBase}/api/template-image?name=${encodeURIComponent(name)}${tok ? `&token=${encodeURIComponent(tok)}` : ''}`;
+          statusB.textContent = `Status: ${t.exists ? 'preview loaded' : 'file missing'}`;
+        } else {
+          statusB.textContent = `Status: failed to load (${t.error})`;
+          previewEl.src = '';
+        }
+      } catch (e) { statusB.textContent = `Status: error (${e.message})`; }
+    }
+
+    async function savePath() {
+      const name = document.getElementById('tplName').value;
+      const path = document.getElementById('tplPath').value.trim();
+      if (!name) { statusB.textContent = 'Status: select template'; return; }
+      if (!path) { statusB.textContent = 'Status: enter path'; return; }
+      try {
+        const res = await fetch(`${apiBase}/api/templates/${encodeURIComponent(name)}`, {
+          method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ path })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusB.textContent = 'Status: path saved';
+        await fetchTemplates();
+        await loadTemplate(name);
+      } catch (e) { statusB.textContent = `Status: save failed (${e.message})`; }
+    }
+
+    async function addTemplate() {
+      const name = document.getElementById('newTplName').value.trim();
+      const path = document.getElementById('newTplPath').value.trim();
+      if (!name || !path) { statusA.textContent = 'Status: enter name and path'; return; }
+      try {
+        const res = await fetch(`${apiBase}/api/templates`, {
+          method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ name, path })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusA.textContent = 'Status: template added';
+        document.getElementById('newTplName').value = '';
+        document.getElementById('newTplPath').value = '';
+        await fetchTemplates();
+      } catch (e) { statusA.textContent = `Status: add failed (${e.message})`; }
+    }
+
+    async function deleteTemplate() {
+      const name = tplListEl.value;
+      if (!name) { statusA.textContent = 'Status: select template'; return; }
+      try {
+        const res = await fetch(`${apiBase}/api/templates/${encodeURIComponent(name)}`, {
+          method: 'DELETE', headers: authHeaders()
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusA.textContent = 'Status: template deleted';
+        document.getElementById('tplName').value = '';
+        document.getElementById('tplPath').value = '';
+        previewEl.src = '';
+        await fetchTemplates();
+      } catch (e) { statusA.textContent = `Status: delete failed (${e.message})`; }
+    }
+
+    tplListEl.addEventListener('change', () => loadTemplate(tplListEl.value));
+    document.getElementById('btnSave').addEventListener('click', savePath);
+    document.getElementById('btnAdd').addEventListener('click', addTemplate);
+    document.getElementById('btnDelete').addEventListener('click', deleteTemplate);
+    tokenEl.addEventListener('change', fetchTemplates);
+
+    const urlTok = new URLSearchParams(location.search).get('token');
+    if (urlTok) { tokenEl.value = urlTok; }
+    fetchTemplates();
+  </script>
+</body>
+</html>

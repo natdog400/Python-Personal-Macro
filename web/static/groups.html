@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Groups Editor</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #1e1e1e; color: #ddd; margin: 0; }
+    header { padding: 12px 16px; background: #2b2b2b; border-bottom: 1px solid #3a3a3a; display:flex; gap:16px; align-items:center; }
+    main { display: grid; grid-template-columns: 320px 1fr; gap: 16px; padding: 16px; }
+    .panel { background: #252525; border: 1px solid #3a3a3a; border-radius: 6px; padding: 12px; }
+    label { display: block; margin-bottom: 8px; }
+    input[type=text], input[type=number], select, textarea { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #555; background: #1f1f1f; color: #ddd; }
+    button { padding: 8px 12px; border-radius: 4px; border: 1px solid #555; background: #333; color: #eee; cursor: pointer; }
+    button:hover { background: #3d3d3d; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+    .row label { display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; }
+    .row label select, .row label input { width: auto; }
+    .actions .row { flex-wrap: wrap; }
+    .steps { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; padding-right: 8px; }
+    .step { border: 1px solid #444; border-radius: 4px; padding: 8px; background: #212121; }
+    .actions { display:flex; flex-direction:column; gap:6px; max-height: 40vh; overflow-y:auto; padding-right:6px; }
+    .action { border: 1px dashed #555; border-radius: 4px; padding: 6px; background: #1a1a1a; }
+    small { color: #999; }
+    nav a { color: #9bd; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+  </style>
+  </head>
+<body>
+  <header>
+    <div><strong>Groups Editor</strong></div>
+    <nav style="display:flex; gap:12px">
+      <a href="/">Dashboard</a>
+      <a href="/static/sequences.html">Sequences</a>
+      <a href="/static/groups.html">Groups</a>
+      <a href="/static/control.html">Controls</a>
+      <a href="/static/schedules.html">Schedules</a>
+      <a href="/static/templates.html">Templates</a>
+      <a href="/static/failsafe.html">Failsafe</a>
+    </nav>
+    <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
+      <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
+      <input type="text" id="token" placeholder="Access Token" style="width:260px" />
+    </div>
+  </header>
+  <main>
+    <div class="panel">
+      <label>Groups
+        <select id="groupList" size="12"></select>
+      </label>
+      <div class="row">
+        <input type="text" id="newGroupName" placeholder="New group name" />
+        <button id="btnCreate">Create</button>
+      </div>
+      <div class="row">
+        <button id="btnDelete">Delete Selected</button>
+      </div>
+      <div style="margin-top:8px"><small id="status">Status: idle</small></div>
+    </div>
+    <div class="panel">
+      <div class="row">
+        <label style="flex:1">Name
+          <input type="text" id="groupName" placeholder="Group name" />
+        </label>
+        <button id="btnRename">Save Name</button>
+      </div>
+      <div class="row">
+        <label style="flex:1">Loop
+          <select id="groupLoop"><option value="false">false</option><option value="true">true</option></select>
+        </label>
+        <label style="width:140px">Loop Count
+          <input type="number" id="groupLoopCount" min="1" value="1" />
+        </label>
+        <button id="btnSaveMeta">Save Loop</button>
+      </div>
+      <h4>Steps</h4>
+      <div id="steps" class="steps"></div>
+      <div class="row">
+        <button id="btnAddStep">Add Step</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h4>Live Preview (Select Region)</h4>
+      <div id="grpPreviewWrap" style="width:100%">
+        <div class="row" style="margin-bottom:8px">
+          <label>Monitor
+            <select id="grpMonitor"></select>
+          </label>
+          <label style="margin-left:16px">Size
+            <select id="grpPreviewSize"><option>640</option><option>800</option><option selected>1024</option><option>1280</option></select>
+          </label>
+        </div>
+        <div id="grpImagePane" style="position:relative; width:100%">
+          <img id="grpPreview" alt="Preview" draggable="false" style="width:100%; max-height:60vh; object-fit:contain; background:#111; border:1px solid #3a3a3a; border-radius:6px" />
+          <div id="grpSel" style="position:absolute; border:2px solid #4af; background:rgba(64,160,255,0.2); display:none"></div>
+        </div>
+      </div>
+      <small>Click-drag on the preview to select a region; use action buttons to apply.</small>
+    </div>
+  </main>
+  <script>
+    const apiBase = '';
+    const tokenEl = document.getElementById('token');
+    const rememberEl = document.getElementById('rememberToken');
+    const groupListEl = document.getElementById('groupList');
+    const statusEl = document.getElementById('status');
+    const groupNameEl = document.getElementById('groupName');
+    const groupLoopEl = document.getElementById('groupLoop');
+    const groupLoopCountEl = document.getElementById('groupLoopCount');
+    const stepsEl = document.getElementById('steps');
+    const newGroupNameEl = document.getElementById('newGroupName');
+
+    function authHeaders() { const tok = tokenEl.value.trim(); return tok ? { 'Authorization': `Bearer ${tok}` } : {}; }
+
+    // Token persistence across pages
+    try {
+      const remembered = (localStorage.getItem('rememberToken') === 'true');
+      rememberEl.checked = remembered;
+      const savedTok = localStorage.getItem('apiToken') || '';
+      if (remembered && savedTok && !tokenEl.value) tokenEl.value = savedTok;
+    } catch (e) {}
+    tokenEl.addEventListener('change', () => {
+      try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
+      fetchGroups();
+    });
+    rememberEl.addEventListener('change', () => {
+      try {
+        localStorage.setItem('rememberToken', rememberEl.checked ? 'true' : 'false');
+        if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
+      } catch (e) {}
+    });
+
+    async function fetchGroups() {
+      try { const res = await fetch(`${apiBase}/api/groups`, { headers: authHeaders() }); const data = await res.json(); groupListEl.innerHTML=''; for (const name of (data.groups||[])) { const opt=document.createElement('option'); opt.value=name; opt.textContent=name; groupListEl.appendChild(opt); } statusEl.textContent = `Status: loaded ${groupListEl.options.length} group(s)`; } catch (e) { statusEl.textContent = `Status: failed to load groups (${e.message})`; }
+    }
+
+    async function loadGroup(name) {
+      if (!name) { groupNameEl.value=''; stepsEl.innerHTML=''; return; }
+      try { const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}`, { headers: authHeaders() }); const g = await res.json(); groupNameEl.value = g.name || name; groupLoopEl.value = String(!!g.loop); groupLoopCountEl.value = Number(g.loop_count||1); renderSteps(g.steps||[]); statusEl.textContent = `Status: loaded group '${name}'`; } catch (e) { statusEl.textContent = `Status: failed to load '${name}' (${e.message})`; }
+    }
+
+    function renderSteps(steps) {
+      stepsEl.innerHTML = '';
+      steps.forEach((step, idx) => {
+        const div = document.createElement('div'); div.className='step';
+        const row = document.createElement('div'); row.className='row';
+        const delBtn = document.createElement('button'); delBtn.textContent = `Delete #${idx}`; delBtn.onclick = () => deleteStep(groupListEl.value, idx);
+        const upBtn = document.createElement('button'); upBtn.textContent = 'Up'; upBtn.onclick = () => reorderStep(groupListEl.value, idx, Math.max(0, idx-1));
+        const downBtn = document.createElement('button'); downBtn.textContent = 'Down'; downBtn.onclick = () => reorderStep(groupListEl.value, idx, Math.min(steps.length-1, idx+1));
+
+        const inFind = document.createElement('input'); inFind.type='text'; inFind.placeholder='find'; inFind.value = step.find || '';
+        const selRequired = document.createElement('input'); selRequired.type='checkbox'; selRequired.checked = !!step.required;
+        const inTimeout = document.createElement('input'); inTimeout.type='number'; inTimeout.placeholder='timeout'; inTimeout.value = (step.timeout!=null?step.timeout:'');
+        const lblFind = document.createElement('label'); lblFind.textContent='Find Template '; lblFind.appendChild(inFind);
+        const lblReq = document.createElement('label'); lblReq.textContent='Required '; lblReq.appendChild(selRequired);
+        const lblTimeout = document.createElement('label'); lblTimeout.textContent='Timeout (s) '; lblTimeout.appendChild(inTimeout);
+        const saveBtn = document.createElement('button'); saveBtn.textContent='Save'; saveBtn.onclick = async () => { try { const name = groupListEl.value; const updated = { ...step, find: inFind.value || '', required: !!selRequired.checked }; if (inTimeout.value!=='') updated.timeout = parseInt(inTimeout.value,10); const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ step: updated }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = `Status: saved step #${idx}`; } catch (e){ statusEl.textContent = `Status: save failed (${e.message})`; } };
+
+        row.appendChild(lblFind); row.appendChild(lblReq); row.appendChild(lblTimeout); row.appendChild(saveBtn); row.appendChild(upBtn); row.appendChild(downBtn); row.appendChild(delBtn);
+        div.appendChild(row);
+        // Render actions within this group step
+        const actionsWrap = document.createElement('div'); actionsWrap.className = 'actions';
+        const actions = Array.isArray(step.actions) ? step.actions : [];
+        actions.forEach((act, aidx) => {
+          const aDiv = document.createElement('div'); aDiv.className = 'action';
+          const aRow = document.createElement('div'); aRow.className = 'row';
+          const aType = document.createElement('select'); ['click','wait','type','drag','move','move_to','keypress','scroll','click_and_hold'].forEach(t=>{ const opt=document.createElement('option'); opt.value=t; opt.textContent=t; aType.appendChild(opt); }); aType.value = act.type || act.action || 'click';
+          const aButton = document.createElement('select'); ['left','right','middle'].forEach(b=>{ const opt=document.createElement('option'); opt.value=b; opt.textContent=b; aButton.appendChild(opt); }); aButton.value = act.button || 'left';
+          const aClicks = document.createElement('input'); aClicks.type='number'; aClicks.placeholder='clicks'; aClicks.value=(act.clicks!=null?act.clicks:'');
+          const aX = document.createElement('input'); aX.type='number'; aX.placeholder='X'; aX.value=(act.x!=null?act.x:'');
+          const aY = document.createElement('input'); aY.type='number'; aY.placeholder='Y'; aY.value=(act.y!=null?act.y:'');
+          const aRandom = document.createElement('input'); aRandom.type='checkbox'; aRandom.checked=!!act.random; aRandom.title='Toggle Random';
+          const aDuration = document.createElement('input'); aDuration.type='number'; aDuration.placeholder='duration'; aDuration.value=(act.duration!=null?act.duration:'');
+          const aSeconds = document.createElement('input'); aSeconds.type='number'; aSeconds.placeholder='seconds'; aSeconds.value=(act.seconds!=null?act.seconds:'');
+          const aPixels = document.createElement('input'); aPixels.type='number'; aPixels.placeholder='pixels'; aPixels.value=(act.pixels!=null?act.pixels:'');
+          const aKey = document.createElement('input'); aKey.type='text'; aKey.placeholder='key'; aKey.value=act.key||'';
+          const aMods = document.createElement('input'); aMods.type='text'; aMods.placeholder='modifiers (comma)'; aMods.value=(Array.isArray(act.modifiers)?act.modifiers.join(','):(act.modifiers||''));
+          // Labels
+          const lblAType=document.createElement('label'); lblAType.textContent='Action '; lblAType.appendChild(aType);
+          const lblBtn=document.createElement('label'); lblBtn.textContent='Button '; lblBtn.appendChild(aButton);
+          const lblClicks=document.createElement('label'); lblClicks.textContent='Clicks '; lblClicks.appendChild(aClicks);
+          const lblX=document.createElement('label'); lblX.textContent='X '; lblX.appendChild(aX);
+          const lblY=document.createElement('label'); lblY.textContent='Y '; lblY.appendChild(aY);
+          const lblRand=document.createElement('label'); lblRand.textContent='Random '; lblRand.appendChild(aRandom);
+          const lblDur=document.createElement('label'); lblDur.textContent='Duration (s) '; lblDur.appendChild(aDuration);
+          const lblSec=document.createElement('label'); lblSec.textContent='Seconds '; lblSec.appendChild(aSeconds);
+          const lblPix=document.createElement('label'); lblPix.textContent='Pixels '; lblPix.appendChild(aPixels);
+          const lblKey=document.createElement('label'); lblKey.textContent='Key '; lblKey.appendChild(aKey);
+          const lblMods=document.createElement('label'); lblMods.textContent='Modifiers '; lblMods.appendChild(aMods);
+          function updateActionFieldsA(){ const t=aType.value; aButton.style.display=(t==='click'?'inline-block':'none'); aClicks.style.display=(t==='click'?'inline-block':'none'); aX.style.display=((t==='move'||t==='move_to'||t==='drag')?'inline-block':'none'); aY.style.display=((t==='move'||t==='move_to'||t==='drag')?'inline-block':'none'); aRandom.style.display=((t==='move'||t==='move_to'||t==='drag')?'inline-block':'none'); aDuration.style.display=((t==='move'||t==='move_to'||t==='drag'||t==='click_and_hold')?'inline-block':'none'); aSeconds.style.display=(t==='wait'?'inline-block':'none'); aPixels.style.display=(t==='scroll'?'inline-block':'none'); aKey.style.display=(t==='keypress'?'inline-block':'none'); aMods.style.display=(t==='keypress'?'inline-block':'none'); }
+          updateActionFieldsA(); aType.addEventListener('change', updateActionFieldsA);
+          const aSave = document.createElement('button'); aSave.textContent='Save Action'; aSave.onclick = async () => { try { const name = groupListEl.value; const updated = { ...act }; updated.type = aType.value; if (aButton.value) updated.button = aButton.value; if (aClicks.value!=='') updated.clicks = parseInt(aClicks.value,10); if (aX.value!=='') updated.x = parseInt(aX.value,10); if (aY.value!=='') updated.y = parseInt(aY.value,10); updated.random = !!aRandom.checked; if (aDuration.value!=='') updated.duration = parseFloat(aDuration.value); if (aSeconds.value!=='') updated.seconds = parseFloat(aSeconds.value); if (aPixels.value!=='') updated.pixels = parseInt(aPixels.value,10); if (aKey.value) updated.key = aKey.value; if (aMods.value) updated.modifiers = aMods.value.split(',').map(s=>s.trim()).filter(Boolean); const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = `Status: saved action #${aidx} in step #${idx}`; } catch (e) { statusEl.textContent = `Status: action save failed (${e.message})`; } };
+          const aDel = document.createElement('button'); aDel.textContent='Delete Action'; aDel.onclick = async () => { try { const name = groupListEl.value; const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'DELETE', headers: authHeaders() }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = `Status: deleted action #${aidx} in step #${idx}`; } catch (e) { statusEl.textContent = `Status: action delete failed (${e.message})`; } };
+          const aUp = document.createElement('button'); aUp.textContent='Up'; aUp.onclick = async () => { const name=groupListEl.value; await reorderAction(name, idx, aidx, Math.max(0,aidx-1)); };
+          const aDown = document.createElement('button'); aDown.textContent='Down'; aDown.onclick = async () => { const name=groupListEl.value; const to = Math.min(actions.length-1,aidx+1); await reorderAction(name, idx, aidx, to); };
+          const aUseRegion = document.createElement('button'); aUseRegion.textContent='Select Region'; aUseRegion.onclick = async () => { try { if (!lastGrpRegion) { statusEl.textContent='Status: select a region on the preview first'; return; } const name=groupListEl.value; const updated={ ...act, region: lastGrpRegion }; const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); aRegionReadout.textContent = `Region: (${lastGrpRegion[0]}, ${lastGrpRegion[1]}, ${lastGrpRegion[2]}x${lastGrpRegion[3]})`; await loadGroup(name); statusEl.textContent = `Status: applied action region #${aidx}`; } catch (e){ statusEl.textContent = `Status: apply failed (${e.message})`; } };
+          const aUseRandomRegion = document.createElement('button'); aUseRandomRegion.textContent='Set Random Region'; aUseRandomRegion.onclick = async () => { try { if (!lastGrpRegion) { statusEl.textContent='Status: select a region on the preview first'; return; } const name=groupListEl.value; const updated={ ...act, random_region: lastGrpRegion }; const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); aRandomRegionReadout.textContent = `Random Region: (${lastGrpRegion[0]}, ${lastGrpRegion[1]}, ${lastGrpRegion[2]}x${lastGrpRegion[3]})`; await loadGroup(name); statusEl.textContent = `Status: applied action random_region #${aidx}`; } catch (e){ statusEl.textContent = `Status: apply failed (${e.message})`; } };
+          const aRegionReadout = document.createElement('small'); const arr = Array.isArray(act.region)?act.region:null; aRegionReadout.textContent = arr?`Region: (${arr[0]}, ${arr[1]}, ${arr[2]}x${arr[3]})`:'Region: (none)';
+          const aRandomRegionReadout = document.createElement('small'); const arrr = Array.isArray(act.random_region)?act.random_region:null; aRandomRegionReadout.textContent = arrr?`Random Region: (${arrr[0]}, ${arrr[1]}, ${arrr[2]}x${arrr[3]})`:'Random Region: (none)';
+          aRow.appendChild(lblAType); aRow.appendChild(lblBtn); aRow.appendChild(lblClicks); aRow.appendChild(lblX); aRow.appendChild(lblY); aRow.appendChild(lblRand); aRow.appendChild(lblDur); aRow.appendChild(lblSec); aRow.appendChild(lblPix); aRow.appendChild(lblKey); aRow.appendChild(lblMods); aRow.appendChild(aSave); aRow.appendChild(aUseRegion); aRow.appendChild(aUseRandomRegion); aRow.appendChild(aRegionReadout); aRow.appendChild(aRandomRegionReadout); aRow.appendChild(aUp); aRow.appendChild(aDown); aRow.appendChild(aDel);
+          aDiv.appendChild(aRow);
+          actionsWrap.appendChild(aDiv);
+        });
+        const addActionRow = document.createElement('div'); addActionRow.className='row';
+        function addActionOfType(t,preset={}){ return async () => { try { const name = groupListEl.value; const payload = { type:t, ...preset }; const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions`, { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: payload }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = `Status: added ${t} to step #${idx}`; } catch (e) { statusEl.textContent = `Status: add action failed (${e.message})`; } }; }
+        const palette = [ {label:'Add click', t:'click'}, {label:'Add right_click', t:'click', preset:{button:'right'}}, {label:'Add double_click', t:'click', preset:{clicks:2}}, {label:'Add move', t:'move', preset:{duration:1.0}}, {label:'Add move_to', t:'move_to', preset:{duration:1.0}}, {label:'Add type', t:'type', preset:{text:'', delay:0.0}}, {label:'Add wait', t:'wait', preset:{seconds:0.5}}, {label:'Add scroll', t:'scroll', preset:{pixels:100}}, {label:'Add click_and_hold', t:'click_and_hold', preset:{duration:1.0}} ];
+        palette.forEach(p => { const b=document.createElement('button'); b.textContent=p.label; b.onclick=addActionOfType(p.t, p.preset||{}); addActionRow.appendChild(b); });
+        actionsWrap.appendChild(addActionRow);
+        div.appendChild(actionsWrap);
+        stepsEl.appendChild(div);
+      });
+    }
+
+    async function reorderAction(name, stepIdx, fromIdx, toIdx){ if (fromIdx===toIdx) return; try { const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${stepIdx}/actions/reorder`, { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ from_index: fromIdx, to_index: toIdx }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = `Status: reordered action ${fromIdx} → ${toIdx}`; } catch (e){ statusEl.textContent = `Status: action reorder failed (${e.message})`; } }
+
+    async function reorderStep(name, fromIdx, toIdx) { if (fromIdx===toIdx) return; try { const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/reorder`, { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ from_index: fromIdx, to_index: toIdx }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = `Status: reordered step ${fromIdx} → ${toIdx}`; } catch (e){ statusEl.textContent = `Status: reorder failed (${e.message})`; } }
+
+    async function createGroup() { const name = newGroupNameEl.value.trim(); if (!name) { statusEl.textContent='Status: enter a name'; return; } try { const res = await fetch(`${apiBase}/api/groups`, { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ name }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await fetchGroups(); groupListEl.value = name; await loadGroup(name); statusEl.textContent = `Status: created '${name}'`; } catch (e) { statusEl.textContent = `Status: create failed (${e.message})`; } }
+    async function deleteGroup() { const name = groupListEl.value; if (!name) { statusEl.textContent='Status: select a group'; return; } try { const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}`, { method:'DELETE', headers: authHeaders() }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await fetchGroups(); stepsEl.innerHTML=''; groupNameEl.value=''; statusEl.textContent = `Status: deleted '${name}'`; } catch (e){ statusEl.textContent = `Status: delete failed (${e.message})`; } }
+    async function renameGroup() { const oldName = groupListEl.value; const newName = groupNameEl.value.trim(); if (!oldName || !newName) { statusEl.textContent='Status: select and enter name'; return; } try { const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(oldName)}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ name: newName }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await fetchGroups(); groupListEl.value = newName; await loadGroup(newName); statusEl.textContent = `Status: renamed '${oldName}' → '${newName}'`; } catch (e){ statusEl.textContent = `Status: rename failed (${e.message})`; } }
+    async function saveMeta() { const name = groupListEl.value; if (!name) { statusEl.textContent='Status: select a group'; return; } try { const loop = (groupLoopEl.value==='true'); const loop_count = parseInt(groupLoopCountEl.value||'1',10); const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ loop, loop_count }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = 'Status: saved loop settings'; } catch (e){ statusEl.textContent = `Status: save failed (${e.message})`; } }
+    async function addStep() { const name = groupListEl.value; if (!name) { statusEl.textContent='Status: select a group'; return; } try { const stepObj = { find:'', required:true, timeout:10, actions:[] }; const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps`, { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ step: stepObj }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = `Status: added step #${data.index}`; } catch (e){ statusEl.textContent = `Status: add failed (${e.message})`; } }
+
+    tokenEl.addEventListener('change', () => { fetchGroups(); });
+    groupListEl.addEventListener('change', () => loadGroup(groupListEl.value));
+    document.getElementById('btnCreate').addEventListener('click', createGroup);
+    document.getElementById('btnDelete').addEventListener('click', deleteGroup);
+    document.getElementById('btnRename').addEventListener('click', renameGroup);
+    document.getElementById('btnSaveMeta').addEventListener('click', saveMeta);
+    document.getElementById('btnAddStep').addEventListener('click', addStep);
+
+    const urlTok = new URLSearchParams(location.search).get('token'); if (urlTok) { tokenEl.value = urlTok; }
+    fetchGroups();
+  </script>
+  <script>
+    // Groups preview & region selection
+    const grpPreview = document.getElementById('grpPreview');
+    const grpSel = document.getElementById('grpSel');
+    const grpPane = document.getElementById('grpImagePane');
+    let grpMonitors = []; let grpSelectedMonitor = 0; let lastGrpRegion = null; let grpDragStart = null;
+    async function fetchGrpMonitors(){ try { const res = await fetch(`${apiBase}/api/monitors`, { headers: authHeaders() }); const data = await res.json(); grpMonitors = data.monitors||[]; const sel=document.getElementById('grpMonitor'); sel.innerHTML=''; for (const m of grpMonitors){ const opt=document.createElement('option'); opt.value=String(m.index); opt.textContent=(m.index===0?`All (${m.width}x${m.height})`:`Monitor ${m.index} (${m.width}x${m.height})`); sel.appendChild(opt);} sel.value=String(grpSelectedMonitor); } catch (e){} }
+    function updateGrpPreviewSrc(){ const tok = tokenEl.value.trim(); const q=[`monitor=${encodeURIComponent(String(grpSelectedMonitor))}`]; if (tok) q.push(`token=${encodeURIComponent(tok)}`); grpPreview.src = `${apiBase}/stream.mjpeg?${q.join('&')}`; }
+    document.getElementById('grpMonitor').addEventListener('change', (e)=>{ grpSelectedMonitor=parseInt(e.target.value,10); updateGrpPreviewSrc(); });
+    grpPreview.addEventListener('dragstart', (e)=>e.preventDefault());
+    // Preview resizing
+    function setGrpPreviewSize(){ const val = parseInt(document.getElementById('grpPreviewSize').value||'1024',10); if (!isNaN(val)&&val>0){ grpPreview.style.width = `${val}px`; } }
+    document.getElementById('grpPreviewSize').addEventListener('change', setGrpPreviewSize);
+    // Compute actual drawn image content rect inside the <img> (object-fit: contain)
+    function getGrpImageContentInfo(img){
+      const rect = img.getBoundingClientRect();
+      const nw = img.naturalWidth || rect.width;
+      const nh = img.naturalHeight || rect.height;
+      const elemW = rect.width, elemH = rect.height;
+      let contentW = elemW; let contentH = contentW * (nh / nw);
+      if (contentH > elemH){ contentH = elemH; contentW = contentH * (nw / nh); }
+      const offsetX = (elemW - contentW) / 2; const offsetY = (elemH - contentH) / 2;
+      return { rect, nw, nh, contentW, contentH, offsetX, offsetY };
+    }
+    let grpLastDragPos = null;
+    grpPreview.addEventListener('mousedown', (e)=>{ const paneRect=grpPane.getBoundingClientRect(); const info=getGrpImageContentInfo(grpPreview); let ix=e.clientX-info.rect.left-info.offsetX; let iy=e.clientY-info.rect.top-info.offsetY; if (ix<0||iy<0||ix>info.contentW||iy>info.contentH) return; const offX=(info.rect.left-paneRect.left)+info.offsetX; const offY=(info.rect.top-paneRect.top)+info.offsetY; grpDragStart={ x:ix, y:iy, offX, offY }; grpSel.style.display='block'; grpSel.style.left=`${offX+ix}px`; grpSel.style.top=`${offY+iy}px`; grpSel.style.width='0px'; grpSel.style.height='0px'; });
+    grpPreview.addEventListener('mousemove', (e)=>{ if(!grpDragStart) return; const info=getGrpImageContentInfo(grpPreview); let ix=e.clientX-info.rect.left-info.offsetX; let iy=e.clientY-info.rect.top-info.offsetY; ix=Math.max(0, Math.min(info.contentW, ix)); iy=Math.max(0, Math.min(info.contentH, iy)); grpLastDragPos = { x: ix, y: iy }; const left=Math.min(grpDragStart.x, ix)+grpDragStart.offX; const top=Math.min(grpDragStart.y, iy)+grpDragStart.offY; const w=Math.abs(ix-grpDragStart.x); const h=Math.abs(iy-grpDragStart.y); grpSel.style.left=`${left}px`; grpSel.style.top=`${top}px`; grpSel.style.width=`${w}px`; grpSel.style.height=`${h}px`; });
+    window.addEventListener('mouseup', ()=>{ if(!grpDragStart) return; const info=getGrpImageContentInfo(grpPreview); const ix0=Math.min(grpDragStart.x, (grpLastDragPos?grpLastDragPos.x:grpDragStart.x)); const iy0=Math.min(grpDragStart.y, (grpLastDragPos?grpLastDragPos.y:grpDragStart.y)); const iw=Math.abs(((grpLastDragPos?grpLastDragPos.x:grpDragStart.x))-grpDragStart.x); const ih=Math.abs(((grpLastDragPos?grpLastDragPos.y:grpDragStart.y))-grpDragStart.y); const scaleX=info.nw/info.contentW; const scaleY=info.nh/info.contentH; const x0=Math.round(ix0*scaleX); const y0=Math.round(iy0*scaleY); const rw=Math.round(iw*scaleX); const rh=Math.round(ih*scaleY); lastGrpRegion=[x0,y0,rw,rh]; statusEl.textContent=`Status: selected region ${x0},${y0},${rw},${rh}`; grpDragStart=null; grpLastDragPos=null; });
+    tokenEl.addEventListener('change', ()=>{ fetchGrpMonitors().then(()=>{ updateGrpPreviewSrc(); setGrpPreviewSize(); }); });
+    fetchGrpMonitors().then(()=>{ updateGrpPreviewSrc(); setGrpPreviewSize(); });
+  </script>
+</body>
+</html>

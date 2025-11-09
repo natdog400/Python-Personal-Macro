@@ -1,0 +1,7 @@
+{
+  "bind": "0.0.0.0",
+  "port": 8765,
+  "token": "ThisIsYourTokenNEVER-GIVE-OR-SHOW-TO-ANYONE-EVER",
+  "mjpeg_fps": 15,
+  "backup_retention": 5
+}

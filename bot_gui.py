@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QGroupBox, QScrollArea, QSplitter, QFrame, QSizePolicy, QToolBar, 
                             QStatusBar, QProgressBar, QDialog, QFormLayout, QListWidgetItem, QInputDialog, QMenu,
                             QDialogButtonBox, QMenuBar, QTableWidget, QTableWidgetItem, QGridLayout,
-                            QHeaderView, QAbstractItemView, QTabWidget)
+                            QHeaderView, QAbstractItemView, QTabWidget, QTimeEdit)
 from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QThread, QObject, QPoint, QRect, QEvent
 from PyQt6.QtGui import (QAction, QIcon, QPixmap, QImage, QPainter, QPen, QColor, 
                         QScreen, QGuiApplication, QKeySequence, QShortcut, QKeyEvent)
@@ -307,6 +307,9 @@ class BotWorker(QThread):
                                             if action.type == ActionType.MOVE:
                                                 if action.x is not None and action.y is not None:
                                                     success = self.bot.execute_action(action)
+                                                elif position is not None:
+                                                    # Treat MOVE as MOVE_TO when a detected position is available
+                                                    success = self.bot.execute_action_at_position(action, position)
                                                 else:
                                                     self.signals.error.emit("MOVE action requires x and y coordinates")
                                                     should_continue = False
@@ -413,7 +416,35 @@ class BotWorker(QThread):
                 "progress": 0
             })
             
-            for i, step in enumerate(failsafe_sequence):
+            # Expand group call steps inline
+            expanded = []
+            try:
+                grp_map = getattr(self, 'groups', {}) or {}
+                for st in failsafe_sequence:
+                    if isinstance(st, dict) and 'call_group' in st:
+                        gname = st.get('call_group')
+                        gsteps = []
+                        if gname and gname in grp_map:
+                            grp = grp_map.get(gname)
+                            gsteps = grp if isinstance(grp, list) else (grp.get('steps', []) if isinstance(grp, dict) else [])
+                            try:
+                                logger.info(f"Failsafe: expanding group '{gname}' into {len(gsteps)} steps")
+                            except Exception:
+                                pass
+                        else:
+                            logger.warning(f"Group '{gname}' not found for failsafe call; skipping.")
+                        expanded.extend(gsteps)
+                    else:
+                        expanded.append(st)
+            except Exception as e:
+                logger.debug(f"Failsafe group expansion error: {e}")
+                expanded = failsafe_sequence
+            try:
+                logger.info(f"Failsafe: expanded sequence size {len(expanded)} (original {len(failsafe_sequence)})")
+            except Exception:
+                pass
+
+            for i, step in enumerate(expanded):
                 if not self._is_running or self._should_stop:
                     break
                     
@@ -428,8 +459,9 @@ class BotWorker(QThread):
 
                 if template_name and str(template_name).lower() != 'none':
                     # Find template first
-                    strategy = step.get('strategy')
-                    region = step.get('search_region')
+                    # Accept both desktop and web editor keys
+                    strategy = step.get('strategy') or step.get('detection_strategy')
+                    region = step.get('search_region') or step.get('region')
                     mon = step.get('monitor')
                     if not region and mon and ((isinstance(mon, tuple) and len(mon) == 4) or (isinstance(mon, list) and len(mon) == 4)):
                         region = tuple(mon)
@@ -440,8 +472,8 @@ class BotWorker(QThread):
                         confidence=step.get('confidence', 0.9),
                         strategy=strategy,
                         min_inliers=step.get('min_inliers', 12),
-                        ratio_thresh=step.get('ratio_thresh', 0.75),
-                        ransac_thresh=step.get('ransac_thresh', 4.0)
+                        ratio_thresh=step.get('ratio_thresh', step.get('ratio', 0.75)),
+                        ransac_thresh=step.get('ransac_thresh', step.get('ransac', 4.0))
                     )
 
                     if position is None and step.get('required', True):
@@ -1319,9 +1351,26 @@ class StepEditor(QGroupBox):
             }
         """)
         self.remove_btn.clicked.connect(self.remove_self)
+
+        # Move step up/down buttons
+        self.up_btn = QPushButton("↑")
+        self.up_btn.setFixedSize(24, 24)
+        self.up_btn.setToolTip("Move step up")
+        self.down_btn = QPushButton("↓")
+        self.down_btn.setFixedSize(24, 24)
+        self.down_btn.setToolTip("Move step down")
+        # Connect to parent sequence editor
+        try:
+            if hasattr(self, 'parent_sequence') and self.parent_sequence is not None:
+                self.up_btn.clicked.connect(lambda: getattr(self.parent_sequence, 'move_step_up')(self))
+                self.down_btn.clicked.connect(lambda: getattr(self.parent_sequence, 'move_step_down')(self))
+        except Exception:
+            pass
         
         header_layout.addWidget(self.step_label)
         header_layout.addStretch()
+        header_layout.addWidget(self.up_btn)
+        header_layout.addWidget(self.down_btn)
         header_layout.addWidget(self.remove_btn)
         
         # Template selection and region group
@@ -1467,6 +1516,34 @@ class StepEditor(QGroupBox):
             self.ransac_spin.setEnabled(use_feature)
         self.strategy_combo.currentIndexChanged.connect(toggle_advanced_by_strategy)
         toggle_advanced_by_strategy()
+
+        # Wire change events to persist config and refresh UI
+        def notify_change():
+            try:
+                # Walk up to the MainWindow
+                p = self.parent()
+                while p is not None and not isinstance(p, MainWindow):
+                    p = p.parent()
+                # Skip during initial load
+                if isinstance(p, MainWindow) and not getattr(p, '_suppress_auto_save', False):
+                    p.update_config_from_ui()
+                    p.save_config()
+            except Exception:
+                pass
+
+        try:
+            self.template_combo.currentTextChanged.connect(lambda _=None: notify_change())
+            self.required_check.toggled.connect(lambda _=None: notify_change())
+            self.confidence_spin.valueChanged.connect(lambda _=None: notify_change())
+            self.timeout_spin.valueChanged.connect(lambda _=None: notify_change())
+            self.step_loop_spin.valueChanged.connect(lambda _=None: notify_change())
+            self.strategy_combo.currentIndexChanged.connect(lambda _=None: notify_change())
+            self.min_inliers_spin.valueChanged.connect(lambda _=None: notify_change())
+            self.ratio_spin.valueChanged.connect(lambda _=None: notify_change())
+            self.ransac_spin.valueChanged.connect(lambda _=None: notify_change())
+            self.monitor_combo.currentIndexChanged.connect(lambda _=None: notify_change())
+        except Exception:
+            pass
         
         # Actions group with scrollable area
         actions_group = QGroupBox("Actions")
@@ -1481,12 +1558,18 @@ class StepEditor(QGroupBox):
         self.actions_scroll = QScrollArea()
         self.actions_scroll.setWidgetResizable(True)
         self.actions_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.actions_scroll.setMinimumHeight(200)  # Set a minimum height to ensure visibility
+        self.actions_scroll.setMinimumHeight(200)  # Ensure visibility
         self.actions_scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        try:
+            from PyQt6.QtCore import Qt as _Qt
+            self.actions_scroll.setVerticalScrollBarPolicy(_Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        except Exception:
+            pass
         
         # Container for action widgets with proper size policies
         self.actions_container = QWidget()
-        self.actions_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        # Allow vertical growth based on content so scrollbars appear automatically
+        self.actions_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         
         # Use a vertical layout for the container
         self.actions_layout = QVBoxLayout(self.actions_container)
@@ -1538,9 +1621,9 @@ class StepEditor(QGroupBox):
         # Add existing actions after UI is fully set up
         for action in self.step_data.get("actions", []):
             self.add_action(action)
-            
-        # Set minimum height after actions are added
-        self.actions_container.setMinimumHeight(max(50, len(self.step_data.get("actions", [])) * 50))
+        # Recalculate geometry to ensure scrollbar visibility when needed
+        self.actions_container.updateGeometry()
+        self.actions_scroll.updateGeometry()
         
         # Styling
         self.setStyleSheet("""
@@ -1587,9 +1670,36 @@ class StepEditor(QGroupBox):
         self.actions_container.setMinimumHeight(min_height)
         
         # Ensure the new action is visible
-        QTimer.singleShot(50, lambda: self.actions_scroll.ensureWidgetVisible(action_editor))
+        QTimer.singleShot(50, lambda: self._scroll_widget_into_view(action_editor))
+
+        # Persist config after adding an action
+        try:
+            p = self.parent()
+            while p is not None and not isinstance(p, MainWindow):
+                p = p.parent()
+            if isinstance(p, MainWindow) and not getattr(p, '_suppress_auto_save', False):
+                p.update_config_from_ui()
+                p.save_config()
+        except Exception:
+            pass
         
         return action_editor
+
+    def set_templates(self, templates: List[str]):
+        """Update available templates and refresh the template combo while preserving selection."""
+        try:
+            self.templates = templates or []
+            current = self.template_combo.currentText() if hasattr(self, 'template_combo') else ''
+            self.template_combo.blockSignals(True)
+            self.template_combo.clear()
+            self.template_combo.addItems([""] + self.templates)
+            self.template_combo.blockSignals(False)
+            if current:
+                idx = self.template_combo.findText(current)
+                if idx >= 0:
+                    self.template_combo.setCurrentIndex(idx)
+        except Exception:
+            pass
     
     def move_action_up(self, action_widget):
         """Move the specified action up in the list."""
@@ -1605,7 +1715,7 @@ class StepEditor(QGroupBox):
             self.action_widgets.insert(new_index, action_widget)
             
             # Ensure the moved action is visible
-            QTimer.singleShot(50, lambda: self.actions_scroll.ensureWidgetVisible(action_widget))
+            QTimer.singleShot(50, lambda: self._scroll_widget_into_view(action_widget))
     
     def move_action_down(self, action_widget):
         """Move the specified action down in the list."""
@@ -1621,7 +1731,32 @@ class StepEditor(QGroupBox):
             self.action_widgets.insert(new_index, action_widget)
             
             # Ensure the moved action is visible
-            QTimer.singleShot(50, lambda: self.actions_scroll.ensureWidgetVisible(action_widget))
+            QTimer.singleShot(50, lambda: self._scroll_widget_into_view(action_widget))
+
+    def _scroll_widget_into_view(self, widget):
+        """Safely scroll the actions area to make the given widget visible.
+        Works even if ensureWidgetVisible is unavailable or the widget hasn't fully laid out yet.
+        """
+        try:
+            if not hasattr(self, 'actions_scroll') or self.actions_scroll is None:
+                return
+            sa = self.actions_scroll
+            container = sa.widget()
+            if container is None or widget is None:
+                return
+            # Map widget position to the scroll area's content widget
+            pos = widget.mapTo(container, QPoint(0, 0))
+            margin = 24
+            # Scroll vertically to widget's Y position minus a small margin
+            y = max(0, pos.y() - margin)
+            sb = sa.verticalScrollBar()
+            if sb is not None:
+                sb.setValue(y)
+        except Exception as e:
+            try:
+                logger.debug(f"_scroll_widget_into_view failed: {e}")
+            except Exception:
+                pass
     
     def remove_action(self, action_widget):
         """Remove the specified action from this step."""
@@ -1638,6 +1773,17 @@ class StepEditor(QGroupBox):
             min_height = max(50, len(self.action_widgets) * 80)
             self.actions_container.setMinimumHeight(min_height)
             self.actions_container.updateGeometry()
+
+            # Persist config after removing an action
+            try:
+                p = self.parent()
+                while p is not None and not isinstance(p, MainWindow):
+                    p = p.parent()
+                if isinstance(p, MainWindow) and not getattr(p, '_suppress_auto_save', False):
+                    p.update_config_from_ui()
+                    p.save_config()
+            except Exception:
+                pass
     
     def remove_self(self):
         """Remove this step from its parent."""
@@ -1722,6 +1868,7 @@ class GroupCallStepEditor(QGroupBox):
     """Lightweight editor for a group call step."""
     def __init__(self, step_data: Optional[dict] = None, groups: Optional[list] = None, parent=None):
         super().__init__(parent)
+        self.parent_sequence = parent
         self.step_data = step_data or {"call_group": ""}
         self.groups = groups or []
         self.init_ui()
@@ -1734,8 +1881,23 @@ class GroupCallStepEditor(QGroupBox):
         self.remove_btn = QPushButton("×")
         self.remove_btn.setFixedSize(24, 24)
         self.remove_btn.clicked.connect(self.remove_self)
+        # Move step up/down buttons
+        self.up_btn = QPushButton("↑")
+        self.up_btn.setFixedSize(24, 24)
+        self.up_btn.setToolTip("Move step up")
+        self.down_btn = QPushButton("↓")
+        self.down_btn.setFixedSize(24, 24)
+        self.down_btn.setToolTip("Move step down")
+        try:
+            if hasattr(self, 'parent_sequence') and self.parent_sequence is not None:
+                self.up_btn.clicked.connect(lambda: getattr(self.parent_sequence, 'move_step_up')(self))
+                self.down_btn.clicked.connect(lambda: getattr(self.parent_sequence, 'move_step_down')(self))
+        except Exception:
+            pass
         header_layout.addWidget(self.step_label)
         header_layout.addStretch()
+        header_layout.addWidget(self.up_btn)
+        header_layout.addWidget(self.down_btn)
         header_layout.addWidget(self.remove_btn)
 
         group_layout = QHBoxLayout()
@@ -1747,6 +1909,18 @@ class GroupCallStepEditor(QGroupBox):
             if idx >= 0:
                 self.group_combo.setCurrentIndex(idx)
         group_layout.addWidget(self.group_combo, 1)
+        # Persist on group selection change
+        try:
+            def _commit_group_change():
+                p = self.parent()
+                while p is not None and not isinstance(p, MainWindow):
+                    p = p.parent()
+                if isinstance(p, MainWindow) and not getattr(p, '_suppress_auto_save', False):
+                    p.update_config_from_ui()
+                    p.save_config()
+            self.group_combo.currentTextChanged.connect(lambda _=None: _commit_group_change())
+        except Exception:
+            pass
 
         main_layout.addLayout(header_layout)
         main_layout.addLayout(group_layout)
@@ -1837,7 +2011,8 @@ class SequenceEditor(QGroupBox):
         
         # Container widget for steps
         self.steps_container = QWidget()
-        self.steps_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        # Prefer vertical growth based on content; allow scroll area to show bars as needed
+        self.steps_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.steps_layout = QVBoxLayout(self.steps_container)
         self.steps_layout.setSpacing(10)
         self.steps_layout.setContentsMargins(0, 0, 10, 10)
@@ -1855,6 +2030,8 @@ class SequenceEditor(QGroupBox):
         
         # Add existing steps
         self._add_steps_from_data()
+        # Ensure scroll metrics are recalculated after population
+        QTimer.singleShot(0, lambda: self.scroll_area.updateGeometry())
         
         # Styling
         self.setStyleSheet("""
@@ -1883,6 +2060,25 @@ class SequenceEditor(QGroupBox):
             }
         """)
     
+    def update_groups(self, groups: Optional[list] = None):
+        """Update available groups and refresh any group-call step dropdowns.
+        Preserves current selections.
+        """
+        try:
+            self.groups = groups or []
+            for sw in getattr(self, 'step_widgets', []):
+                if isinstance(sw, GroupCallStepEditor) and hasattr(sw, 'group_combo'):
+                    current = sw.group_combo.currentText()
+                    sw.group_combo.blockSignals(True)
+                    sw.group_combo.clear()
+                    sw.group_combo.addItems([""] + list(self.groups))
+                    # Restore selection if it exists in the new list
+                    idx = sw.group_combo.findText(current)
+                    if idx >= 0:
+                        sw.group_combo.setCurrentIndex(idx)
+                    sw.group_combo.blockSignals(False)
+        except Exception:
+            pass
 
 
     def add_step(self, step_data: Optional[dict] = None):
@@ -1894,10 +2090,29 @@ class SequenceEditor(QGroupBox):
                     "find": "",
                     "required": True,
                     "timeout": 10,
+                    "confidence": 0.8,
+                    "detection_strategy": "default",
+                    "step_loops": 1,
+                    "monitor": None,
                     "actions": [{"type": "click"}]
                 }
+            # Inject global search_region if available
+            try:
+                p = self.parent()
+                from types import SimpleNamespace
+                while p is not None and p.__class__.__name__ != 'MainWindow':
+                    p = p.parent()
+                if p is not None and hasattr(p, 'search_region') and isinstance(p.search_region, (list, tuple)) and len(p.search_region) == 4:
+                    step_data.setdefault('search_region', list(p.search_region))
+                elif p is not None and isinstance(getattr(p, 'config', {}), dict):
+                    sr = (p.config or {}).get('search_region')
+                    if isinstance(sr, list) and len(sr) == 4:
+                        step_data.setdefault('search_region', sr)
+            except Exception:
+                pass
             # If this is a group call, use the GroupCallStepEditor
             if isinstance(step_data, dict) and 'call_group' in step_data:
+                # Ensure groups list is current before building the editor
                 step_editor = GroupCallStepEditor(step_data, self.groups, self)
             else:
                 if not step_data.get('actions') or not isinstance(step_data['actions'], list):
@@ -1925,8 +2140,13 @@ class SequenceEditor(QGroupBox):
         # Update the step numbers
         self.update_step_numbers()
         
-        # Ensure the new step is visible
-        QTimer.singleShot(100, lambda: self.scroll_area.ensureWidgetVisible(step_editor))
+        # Ensure the new step is visible (safe scrolling)
+        try:
+            import weakref
+            ref = weakref.ref(step_editor)
+            QTimer.singleShot(100, lambda: self._scroll_step_into_view(ref))
+        except Exception:
+            QTimer.singleShot(100, lambda: self._scroll_widget_into_view_safe(self.scroll_area, step_editor))
         
         # Update the container size
         self.steps_container.adjustSize()
@@ -1982,12 +2202,90 @@ class SequenceEditor(QGroupBox):
             self.steps_container.adjustSize()
             self.steps_container.update()
             self.scroll_area.update()
+
+    def move_step_up(self, step_editor):
+        """Move the specified step up in the sequence."""
+        if step_editor in self.step_widgets:
+            idx = self.step_widgets.index(step_editor)
+            if idx > 0:
+                # Update layout order
+                try:
+                    self.steps_layout.removeWidget(step_editor)
+                    self.step_widgets.pop(idx)
+                    new_idx = idx - 1
+                    # Insert before stretch
+                    layout_idx = min(new_idx, self.steps_layout.count() - 1)
+                    self.steps_layout.insertWidget(layout_idx, step_editor)
+                    self.step_widgets.insert(new_idx, step_editor)
+                    self.update_step_numbers()
+                    try:
+                        import weakref
+                        ref = weakref.ref(step_editor)
+                        QTimer.singleShot(50, lambda: self._scroll_step_into_view(ref))
+                    except Exception:
+                        QTimer.singleShot(50, lambda: self._scroll_widget_into_view_safe(self.scroll_area, step_editor))
+                except Exception:
+                    pass
+
+    def move_step_down(self, step_editor):
+        """Move the specified step down in the sequence."""
+        if step_editor in self.step_widgets:
+            idx = self.step_widgets.index(step_editor)
+            if idx < len(self.step_widgets) - 1:
+                try:
+                    self.steps_layout.removeWidget(step_editor)
+                    self.step_widgets.pop(idx)
+                    new_idx = idx + 1
+                    layout_idx = min(new_idx, self.steps_layout.count() - 1)
+                    self.steps_layout.insertWidget(layout_idx, step_editor)
+                    self.step_widgets.insert(new_idx, step_editor)
+                    self.update_step_numbers()
+                    try:
+                        import weakref
+                        ref = weakref.ref(step_editor)
+                        QTimer.singleShot(50, lambda: self._scroll_step_into_view(ref))
+                    except Exception:
+                        QTimer.singleShot(50, lambda: self._scroll_widget_into_view_safe(self.scroll_area, step_editor))
+                except Exception:
+                    pass
     
     def update_step_numbers(self):
         """Update the step numbers in the UI."""
         for i, step in enumerate(self.step_widgets, 1):
             if hasattr(step, 'step_label'):
                 step.step_label.setText(f"Step {i}")
+
+    def _scroll_step_into_view(self, widget_ref):
+        """Scroll the sequence scroll area to bring the referenced step editor into view.
+        Uses weak references to avoid RuntimeError when the widget is deleted before the timer fires.
+        """
+        try:
+            widget = widget_ref()
+            if widget is None:
+                return
+            self._scroll_widget_into_view_safe(self.scroll_area, widget)
+        except Exception as e:
+            try:
+                logger.debug(f"_scroll_step_into_view failed: {e}")
+            except Exception:
+                pass
+
+    def _scroll_widget_into_view_safe(self, scroll_area, widget):
+        """Generic safe scroll helper for QScrollArea to make a child widget visible."""
+        try:
+            if scroll_area is None or widget is None:
+                return
+            container = scroll_area.widget()
+            if container is None:
+                return
+            pos = widget.mapTo(container, QPoint(0, 0))
+            margin = 24
+            y = max(0, pos.y() - margin)
+            sb = scroll_area.verticalScrollBar()
+            if sb is not None:
+                sb.setValue(y)
+        except Exception:
+            pass
 
     def get_sequence_data(self) -> dict:
         """Get the sequence data including all steps and their actions."""
@@ -2099,6 +2397,25 @@ class TemplateTester(QWidget):
         viz_layout.addStretch()
         form_layout.addRow("Visualizer:", viz_layout)
 
+        # Capture backend selector (for performance)
+        cap_layout = QHBoxLayout()
+        cap_layout.addWidget(QLabel("Backend"))
+        self.capture_backend_combo = QComboBox()
+        self.capture_backend_combo.addItems(["Auto (best)", "QScreen", "MSS"])
+        self.capture_backend_combo.setCurrentIndex(0)
+        cap_layout.addWidget(self.capture_backend_combo)
+        # Availability indicator
+        self.backend_status = QLabel("Unknown")
+        self.backend_status.setStyleSheet("color: #cfcfcf;")
+        cap_layout.addWidget(self.backend_status)
+        cap_layout.addStretch()
+        form_layout.addRow("Capture:", cap_layout)
+        # Update availability when backend changes
+        try:
+            self.capture_backend_combo.currentIndexChanged.connect(self.update_capture_backend_status)
+        except Exception:
+            pass
+
         # Metrics display (move overlay metrics into GUI)
         metrics_layout = QHBoxLayout()
         self.metric_inliers = QLabel("Inliers: -")
@@ -2139,6 +2456,50 @@ class TemplateTester(QWidget):
         
         layout.addWidget(template_group)
         layout.addStretch()
+        # Initial availability update
+        try:
+            self.update_capture_backend_status()
+        except Exception:
+            pass
+
+        # (removed) Scheduler timer setup here was incorrect; initialized in MainWindow later
+
+    def update_capture_backend_status(self):
+        """Check whether the selected capture backend is available and update the UI label."""
+        name = self.capture_backend_combo.currentText() if hasattr(self, 'capture_backend_combo') else "Auto (best)"
+        available = False
+        detail = ""
+        try:
+            if name == "MSS":
+                try:
+                    import mss
+                    with mss.mss() as _sct:
+                        pass
+                    available = True
+                except Exception as e:
+                    detail = f"mss failed: {e}"
+                    available = False
+            elif name == "QScreen":
+                # PyQt6 QScreen is always available
+                available = True
+            else:  # Auto (best)
+                # Prefer MSS, else QScreen
+                try:
+                    import mss
+                    with mss.mss() as _sct:
+                        available = True
+                        detail = "Using MSS"
+                except Exception as e2:
+                    available = True
+                    detail = "Using QScreen"
+        except Exception as e:
+            available = False
+            detail = f"error: {e}"
+
+        self.backend_status.setText("Available" if available else "Unavailable")
+        self.backend_status.setStyleSheet("color: #4caf50;" if available else "color: #ff6b6b;")
+        if detail:
+            self.backend_status.setToolTip(detail)
     
     def on_template_selected(self, index):
         template_path = self.template_combo.currentData()
@@ -2187,8 +2548,22 @@ class TemplateTester(QWidget):
             logger.info(f"TemplateTester: start preview, region={self.search_region}, strategy={self.strategy_combo.currentData()}")
             # Capture screen with multi-monitor support
             def capture_region_bgr(x: int, y: int, w: int, h: int) -> np.ndarray:
+                backend = self.capture_backend_combo.currentText() if hasattr(self, 'capture_backend_combo') else "Auto (best)"
+                # DXCAM removed
+                # Try MSS if selected or Auto
+                if backend in ("Auto (best)", "MSS"):
+                    try:
+                        import mss
+                        with mss.mss() as sct:
+                            bbox = {"left": int(x), "top": int(y), "width": int(w), "height": int(h)}
+                            img = sct.grab(bbox)
+                            arr = np.array(img)  # BGRA
+                            self.debug_fallback.setText("MSS region")
+                            return cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+                    except Exception:
+                        pass
+                # Fallback to QScreen DPI-aware region capture
                 screens = QGuiApplication.screens()
-                # Choose screen with the largest intersection area with the requested rect
                 best = None
                 best_area = -1
                 for sc in screens:
@@ -2211,16 +2586,12 @@ class TemplateTester(QWidget):
                 pm = target.grabWindow(0, int(local_x * dpr), int(local_y * dpr), int(grab_w * dpr), int(grab_h * dpr))
                 qi = pm.toImage().convertToFormat(QImage.Format.Format_BGR888)
                 height = qi.height(); width = qi.width(); bpl = qi.bytesPerLine()
-                # PyQt6: use sizeInBytes() instead of byteCount()
                 size_bytes = qi.sizeInBytes() if hasattr(qi, 'sizeInBytes') else (bpl * height)
                 bits = qi.bits(); bits.setsize(size_bytes)
                 buf = np.frombuffer(bits, dtype=np.uint8)
                 img_row = buf.reshape((height, bpl))
                 img_row = img_row[:, :width * 3]
-                arr = img_row.reshape((height, width, 3))
-                # Return a copy to avoid referencing QImage memory after this scope
-                arr_copy = arr.copy()
-                # Update debug info
+                arr = img_row.reshape((height, width, 3)).copy()
                 try:
                     target_idx = next((i for i, sc in enumerate(QGuiApplication.screens(), start=1) if sc is target), None)
                 except Exception:
@@ -2233,7 +2604,7 @@ class TemplateTester(QWidget):
                 self.debug_pm.setText(f"Pixmap: {'null' if pm.isNull() else 'ok'}")
                 self.debug_fallback.setText("Fallback: QScreen")
                 logger.info(f"TemplateTester: target_screen={target_idx}, geom=({geom.x()},{geom.y()},{geom.width()}x{geom.height()}), local=({local_x},{local_y},{grab_w}x{grab_h}), size={width}x{height}, dpr={dpr}, pm_null={pm.isNull()}")
-                return arr_copy
+                return arr
 
             if self.search_region:
                 rx, ry, rw, rh = self.search_region
@@ -2250,7 +2621,38 @@ class TemplateTester(QWidget):
                         logger.info("TemplateTester: region fallback via pyautogui region")
                     screenshot = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
             else:
-                # Full virtual desktop snapshot (all monitors) via stitched screens
+                # Full virtual desktop snapshot (all monitors)
+                # Try fast backends first
+                backend = self.capture_backend_combo.currentText() if hasattr(self, 'capture_backend_combo') else "Auto (best)"
+                # DXCAM removed
+                if backend == "MSS":
+                    try:
+                        import mss
+                        with mss.mss() as sct:
+                            mon = sct.monitors[0]  # virtual desktop
+                            img = sct.grab(mon)
+                            arr = np.array(img)
+                            screenshot = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+                            self.debug_fallback.setText("MSS full")
+                    except Exception:
+                        screenshot = None
+                else:
+                    screenshot = None
+                if screenshot is None:
+                    # Fallback via stitched QScreen captures
+                    screens = QGuiApplication.screens()
+                    if screens:
+                        x0 = min(sc.geometry().x() for sc in screens)
+                        y0 = min(sc.geometry().y() for sc in screens)
+                        x1 = max(sc.geometry().x() + sc.geometry().width() for sc in screens)
+                        y1 = max(sc.geometry().y() + sc.geometry().height() for sc in screens)
+                        total_w, total_h = x1 - x0, y1 - y0
+                        canvas = np.zeros((total_h, total_w, 3), dtype=np.uint8)
+                        for sc in screens:
+                            g = sc.geometry()
+                            pm = sc.grabWindow(0)
+                            if pm.isNull():
+                                continue
                 screens = QGuiApplication.screens()
                 if screens:
                     x0 = min(sc.geometry().x() for sc in screens)
@@ -2442,10 +2844,11 @@ class TemplateTester(QWidget):
 
 class FailsafeSequenceEditor(QWidget):
     """Widget to edit the failsafe sequence."""
-    def __init__(self, failsafe_data: dict = None, templates: List[str] = None, parent=None):
+    def __init__(self, failsafe_data: dict = None, templates: List[str] = None, parent=None, groups: Optional[list] = None):
         super().__init__(parent)
         self.failsafe_data = failsafe_data or {"steps": []}
         self.templates = templates or []
+        self.groups = groups or []
         self.step_widgets = []
         self.init_ui()
     
@@ -2462,6 +2865,10 @@ class FailsafeSequenceEditor(QWidget):
         add_step_btn = QPushButton("Add Step")
         add_step_btn.clicked.connect(self.add_step)
         header_layout.addWidget(add_step_btn)
+        # Add Group Call button
+        add_group_btn = QPushButton("Add Group Call")
+        add_group_btn.clicked.connect(lambda: self.add_step({"call_group": ""}))
+        header_layout.addWidget(add_group_btn)
         
         main_layout.addLayout(header_layout)
         
@@ -2483,19 +2890,34 @@ class FailsafeSequenceEditor(QWidget):
         for step_data in self.failsafe_data.get("steps", []):
             self.add_step_from_data(step_data)
     
-    def add_step(self):
-        """Add a new step to the failsafe sequence."""
-        step_data = {
-            "find": "",
-            "required": True,
-            "timeout": 10,
-            "actions": [{"type": "click"}]
-        }
+    def add_step(self, step_data: Optional[dict] = None):
+        """Add a new step to the failsafe sequence.
+        If step_data has {call_group: ...}, inserts a group-call step.
+        """
+        if step_data is None or not isinstance(step_data, dict):
+            step_data = {"find": "", "required": True, "timeout": 10, "confidence": 0.9, "detection_strategy": "default", "monitor": None, "actions": [{"type": "click"}]}
+        # Inject global search_region if available
+        try:
+            p = self.parent()
+            while p is not None and p.__class__.__name__ != 'MainWindow':
+                p = p.parent()
+            if p is not None and hasattr(p, 'search_region') and isinstance(p.search_region, (list, tuple)) and len(p.search_region) == 4:
+                step_data.setdefault('search_region', list(p.search_region))
+            elif p is not None and isinstance(getattr(p, 'config', {}), dict):
+                sr = (p.config or {}).get('search_region')
+                if isinstance(sr, list) and len(sr) == 4:
+                    step_data.setdefault('search_region', sr)
+        except Exception:
+            pass
         self.add_step_from_data(step_data)
     
     def add_step_from_data(self, step_data: dict):
         """Add a step from existing data."""
-        step_widget = StepEditor(step_data, self.templates, self)
+        # Route group-call steps to dedicated editor
+        if isinstance(step_data, dict) and 'call_group' in step_data:
+            step_widget = GroupCallStepEditor(step_data, self.groups, self)
+        else:
+            step_widget = StepEditor(step_data, self.templates, self)
         step_widget.setParent(self.steps_container)
 
         # Explicitly wire the delete button to the parent remover with this instance
@@ -2515,6 +2937,16 @@ class FailsafeSequenceEditor(QWidget):
         self.steps_container.adjustSize()
         self.steps_container.update()
         self.scroll_area.update()
+        # Persist after adding a step
+        try:
+            p = self.parent()
+            while p is not None and not isinstance(p, MainWindow):
+                p = p.parent()
+            if isinstance(p, MainWindow) and not getattr(p, '_suppress_auto_save', False):
+                p.update_config_from_ui()
+                p.save_config()
+        except Exception:
+            pass
 
     def remove_step(self, step_editor):
         """Remove a step from the failsafe sequence.
@@ -2545,6 +2977,16 @@ class FailsafeSequenceEditor(QWidget):
             self.steps_container.adjustSize()
             self.steps_container.update()
             self.scroll_area.update()
+            # Persist after removing a step
+            try:
+                p = self.parent()
+                while p is not None and not isinstance(p, MainWindow):
+                    p = p.parent()
+                if isinstance(p, MainWindow) and not getattr(p, '_suppress_auto_save', False):
+                    p.update_config_from_ui()
+                    p.save_config()
+            except Exception:
+                pass
         else:
             # Fallback: if the widget isn't tracked, remove it anyway
             logger.info("FailsafeSequenceEditor: step not tracked; removing widget directly")
@@ -2574,6 +3016,42 @@ class FailsafeSequenceEditor(QWidget):
         for step_widget in self.step_widgets:
             steps.append(step_widget.get_step_data())
         return {"steps": steps}
+
+    def load_sequence(self, steps_list: list):
+        """Replace the current steps with the provided list and refresh UI."""
+        try:
+            # Remove existing step widgets
+            for sw in list(self.step_widgets):
+                try:
+                    self.remove_step(sw)
+                except Exception:
+                    try:
+                        self.steps_layout.removeWidget(sw)
+                        sw.setParent(None)
+                        sw.deleteLater()
+                    except Exception:
+                        pass
+            self.step_widgets.clear()
+            # Add new steps
+            for step_data in (steps_list or []):
+                if isinstance(step_data, dict):
+                    self.add_step_from_data(step_data)
+            self.update_step_numbers()
+            self.steps_container.adjustSize()
+            self.steps_container.update()
+            self.scroll_area.update()
+        except Exception:
+            pass
+
+    def update_templates(self, templates: List[str]):
+        """Update available templates list and refresh all step editors."""
+        try:
+            self.templates = templates or []
+            for sw in self.step_widgets:
+                if isinstance(sw, StepEditor):
+                    sw.set_templates(self.templates)
+        except Exception:
+            pass
 
 
 class MainWindow(QMainWindow):
@@ -2613,7 +3091,11 @@ class MainWindow(QMainWindow):
         os.makedirs(self.failsafe_images_dir, exist_ok=True)
         
         self.init_ui()
-        self.load_config()
+        try:
+            # Defer config load until UI is fully constructed
+            QTimer.singleShot(0, lambda: self.load_config())
+        except Exception:
+            pass
         
         # Set up F8 key monitoring
         self.f8_timer = QTimer(self)
@@ -2633,10 +3115,34 @@ class MainWindow(QMainWindow):
         # Create main widget and layout
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
+        # Set central widget early to ensure window shows even if init bails early
+        try:
+            self.setCentralWidget(main_widget)
+        except Exception:
+            pass
         
         # Toolbar
         toolbar = QToolBar()
         self.addToolBar(toolbar)
+
+        # Quick config actions on toolbar
+        cfg_new_action = QAction("New", self)
+        cfg_new_action.setToolTip("Create a new configuration")
+        cfg_new_action.triggered.connect(self.new_config)
+        cfg_open_action = QAction("Open", self)
+        cfg_open_action.setToolTip("Open configuration file")
+        cfg_open_action.triggered.connect(self.open_config)
+        cfg_save_action = QAction("Save", self)
+        cfg_save_action.setToolTip("Save current configuration")
+        cfg_save_action.triggered.connect(self.save_config)
+        cfg_save_as_action = QAction("Save As", self)
+        cfg_save_as_action.setToolTip("Save configuration to a new file")
+        cfg_save_as_action.triggered.connect(self.save_config_as)
+        toolbar.addAction(cfg_new_action)
+        toolbar.addAction(cfg_open_action)
+        toolbar.addAction(cfg_save_action)
+        toolbar.addAction(cfg_save_as_action)
+        toolbar.addSeparator()
         
         # Region selection action
         self.region_action = QAction("Select Region", self)
@@ -2689,6 +3195,10 @@ class MainWindow(QMainWindow):
         # Mouse position label
         self.mouse_pos_label = QLabel("X: 0, Y: 0")
         status_bar.addPermanentWidget(self.mouse_pos_label)
+
+        # Next scheduled run indicator
+        self.scheduler_label = QLabel("Next: (none)")
+        status_bar.addPermanentWidget(self.scheduler_label)
         
         # Set up a timer to update mouse position
         self.mouse_timer = QTimer(self)
@@ -2708,7 +3218,7 @@ class MainWindow(QMainWindow):
         content_layout = QVBoxLayout(content_widget)
         content_layout.setContentsMargins(0, 0, 0, 0)
         
-        main_layout.addWidget(toolbar)
+        # QMainWindow manages toolbars; no need to add to central layout
         main_layout.addWidget(content_widget)
         
         # Create tab widget
@@ -2874,6 +3384,11 @@ class MainWindow(QMainWindow):
         self.failsafe_enable_checkbox = QCheckBox("Enable Failsafe")
         self.failsafe_enable_checkbox.setChecked(False)
         failsafe_config_layout.addWidget(self.failsafe_enable_checkbox)
+        # Wire checkbox to toggle UI (use toggled(bool) only to avoid duplicate/oscillating calls)
+        try:
+            self.failsafe_enable_checkbox.toggled.connect(self.toggle_failsafe_ui)
+        except Exception:
+            pass
         
         # Failsafe template selection
         fs_template_layout = QHBoxLayout()
@@ -2933,6 +3448,11 @@ class MainWindow(QMainWindow):
         self.failsafe_region_label = QLabel("Region: Full Screen")
         fs_region_layout.addWidget(self.failsafe_region_btn)
         fs_region_layout.addWidget(self.failsafe_region_label)
+        # Wire region selection
+        try:
+            self.failsafe_region_btn.clicked.connect(self.select_failsafe_region)
+        except Exception:
+            pass
         fs_region_layout.addStretch()
         failsafe_config_layout.addLayout(fs_region_layout)
         
@@ -2947,6 +3467,11 @@ class MainWindow(QMainWindow):
         self.test_failsafe_btn = QPushButton("Test Failsafe")
         self.test_failsafe_btn.setEnabled(False)
         fs_control_layout.addWidget(self.test_failsafe_btn)
+        # Wire test button
+        try:
+            self.test_failsafe_btn.clicked.connect(self.test_failsafe_sequence)
+        except Exception:
+            pass
         
         fs_control_group.setLayout(fs_control_layout)
         failsafe_sidebar_layout.addWidget(fs_control_group)
@@ -2958,7 +3483,27 @@ class MainWindow(QMainWindow):
         
         # Add failsafe sequence editor stack
         self.failsafe_sequence_stack = QStackedWidget()
+        # Add a welcome/placeholder page at index 0
+        placeholder = QWidget()
+        ph_layout = QVBoxLayout(placeholder)
+        ph_layout.addWidget(QLabel("Enable Failsafe to edit the sequence"))
+        ph_layout.addStretch()
+        self.failsafe_sequence_stack.addWidget(placeholder)
         failsafe_tab_layout.addWidget(self.failsafe_sequence_stack)
+        # Sync UI with current checkbox state
+        try:
+            # Avoid any persistence during initial UI sync
+            try:
+                self._suppress_auto_save = True
+            except Exception:
+                pass
+            self.toggle_failsafe_ui(self.failsafe_enable_checkbox.isChecked())
+            try:
+                self._suppress_auto_save = False
+            except Exception:
+                pass
+        except Exception:
+            pass
         
         # Set up templates tab
         templates_tab_layout = QHBoxLayout(self.templates_tab)
@@ -3045,6 +3590,22 @@ class MainWindow(QMainWindow):
         time_layout.addStretch()
         break_group_layout.addLayout(time_layout)
 
+        # Final sequence after break toggle and selector
+        final_layout = QHBoxLayout()
+        self.break_run_final_checkbox = QCheckBox("Run final sequence when time is hit")
+        self.break_run_final_checkbox.setChecked(False)
+        final_layout.addWidget(self.break_run_final_checkbox)
+        final_layout.addWidget(QLabel("Final Sequence:"))
+        self.break_final_sequence_combo = QComboBox()
+        # Populate with available sequences names now; will be refreshed in update_ui_from_config
+        try:
+            seq_names = [s.get('name', 'Unnamed Sequence') for s in self.config.get('sequences', [])]
+            self.break_final_sequence_combo.addItems(["(none)"] + seq_names)
+        except Exception:
+            self.break_final_sequence_combo.addItem("(none)")
+        final_layout.addWidget(self.break_final_sequence_combo, 1)
+        break_group_layout.addLayout(final_layout)
+
         break_group.setLayout(break_group_layout)
         break_layout.addWidget(break_group)
         break_layout.addStretch()
@@ -3054,6 +3615,8 @@ class MainWindow(QMainWindow):
             self.break_hours_spin.setEnabled(enabled)
             self.break_minutes_spin.setEnabled(enabled)
             self.break_seconds_spin.setEnabled(enabled)
+            self.break_run_final_checkbox.setEnabled(enabled)
+            self.break_final_sequence_combo.setEnabled(enabled)
         _set_break_inputs_enabled(False)
         self.break_enabled_checkbox.stateChanged.connect(
             lambda state: _set_break_inputs_enabled(state == Qt.CheckState.Checked.value)
@@ -3061,6 +3624,26 @@ class MainWindow(QMainWindow):
 
         # Add tabs to tab widget
         self.tab_widget.addTab(self.sequences_tab, "Sequences")
+        # Scheduled Sequences tab
+        self.scheduled_tab = QWidget()
+        scheduled_layout = QVBoxLayout(self.scheduled_tab)
+        # Controls: add schedule
+        sched_controls = QHBoxLayout()
+        self.add_sched_btn = QPushButton("Add Schedule")
+        self.add_sched_btn.clicked.connect(self.add_schedule_row)
+        sched_controls.addWidget(self.add_sched_btn)
+        sched_controls.addStretch()
+        scheduled_layout.addLayout(sched_controls)
+        # Container for schedule rows
+        self.schedules_container_widget = QWidget()
+        self.schedules_container_layout = QVBoxLayout(self.schedules_container_widget)
+        self.schedules_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.schedules_container_layout.setSpacing(8)
+        scheduled_layout.addWidget(self.schedules_container_widget)
+        scheduled_layout.addStretch()
+        # Track rows
+        self.schedule_rows = []
+        self.tab_widget.addTab(self.scheduled_tab, "Scheduled Sequences")
         self.tab_widget.addTab(self.groups_tab, "Groups")
         self.tab_widget.addTab(self.failsafe_tab, "Failsafe")
         self.tab_widget.addTab(self.templates_tab, "Templates")
@@ -3069,6 +3652,11 @@ class MainWindow(QMainWindow):
         
         # Welcome screen
         welcome_widget = QWidget()
+        # Default to Sequences tab on initial UI setup
+        try:
+            self.tab_widget.setCurrentWidget(self.sequences_tab)
+        except Exception:
+            pass
         welcome_layout = QVBoxLayout(welcome_widget)
         welcome_label = QLabel("Welcome to Image Detection Bot")
         welcome_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3088,91 +3676,121 @@ class MainWindow(QMainWindow):
         # Add welcome widget to both stacks initially
         self.sequence_stack.addWidget(welcome_widget)
         self.template_stack.addWidget(QLabel("Select a template to edit"))
-        
-        # Failsafe welcome screen
-        failsafe_welcome_widget = QWidget()
-        failsafe_welcome_layout = QVBoxLayout(failsafe_welcome_widget)
-        failsafe_welcome_label = QLabel("Failsafe Sequence Editor")
-        failsafe_welcome_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        failsafe_welcome_info = QLabel("Enable failsafe and configure template detection to create failsafe sequences")
-        failsafe_welcome_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        failsafe_welcome_info.setStyleSheet("color: gray;")
-        failsafe_welcome_layout.addWidget(failsafe_welcome_label)
-        failsafe_welcome_layout.addWidget(failsafe_welcome_info)
-        failsafe_welcome_layout.addStretch()
-        
-        # Add welcome widget to failsafe stack
-        self.failsafe_sequence_stack.addWidget(failsafe_welcome_widget)
-        
-        # Set initial content
-        self.sequence_stack.setCurrentWidget(welcome_widget)
-        self.setCentralWidget(main_widget)
-        
-        # Create menu bar
-        menubar = self.menuBar()
-        
-        # File menu
-        file_menu = menubar.addMenu("&File")
-        
-        new_action = QAction("&New", self)
-        new_action.setShortcut("Ctrl+N")
-        new_action.triggered.connect(self.new_config)
-        file_menu.addAction(new_action)
-        
-        open_action = QAction("&Open...", self)
-        open_action.setShortcut("Ctrl+O")
-        open_action.triggered.connect(self.open_config)
-        file_menu.addAction(open_action)
-        
-        save_action = QAction("&Save", self)
-        save_action.setShortcut("Ctrl+S")
-        save_action.triggered.connect(self.save_config)
-        file_menu.addAction(save_action)
-        
-        save_as_action = QAction("Save &As...", self)
-        save_as_action.triggered.connect(self.save_config_as)
-        file_menu.addAction(save_as_action)
-        
-        file_menu.addSeparator()
-        
-        exit_action = QAction("E&xit", self)
-        exit_action.setShortcut("Alt+F4")
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-        
-        # Run menu
-        run_menu = menubar.addMenu("&Run")
-        
-        self.run_action = QAction("Run Sequence", self)
-        self.run_action.setShortcut("F5")
-        self.run_action.triggered.connect(self.run_sequence)
-        run_menu.addAction(self.run_action)
-        
-        self.stop_action = QAction("Stop Sequence", self)
-        self.stop_action.setShortcut("F8")
-        self.stop_action.triggered.connect(self.stop_sequence)
-        self.stop_action.setEnabled(False)  # Disabled by default
-        run_menu.addAction(self.stop_action)
-        
-        # Help menu
-        help_menu = menubar.addMenu("&Help")
-        
-        about_action = QAction("&About", self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
-        
-        # Add global shortcut for F8 to stop sequence
-        self.stop_shortcut = QShortcut(QKeySequence("F8"), self)
-        self.stop_shortcut.activated.connect(self.stop_sequence)
-        
-        # Connect failsafe enable checkbox to UI toggle
-        self.failsafe_enable_checkbox.toggled.connect(self.toggle_failsafe_ui)
 
-        # Connect failsafe UI elements
-        self.failsafe_region_btn.clicked.connect(self.select_failsafe_region)
-        self.test_failsafe_btn.clicked.connect(self.test_failsafe_sequence)
-        # Initialize failsafe template list from config
-        self.refresh_failsafe_templates()
+        # Initialize scheduler timer in MainWindow and update the indicator
+        try:
+            self.scheduler_timer = QTimer(self)
+            self.scheduler_timer.setInterval(30000)  # check every 30 seconds
+            self.scheduler_timer.timeout.connect(self.check_schedules)
+            self.scheduler_timer.start()
+            QTimer.singleShot(0, self.update_scheduler_indicator)
+        except Exception as e:
+            logger.debug(f"Scheduler init failed: {e}")
+
+        # Initialize scheduler state
+        self._scheduled_queue = []
+        self._schedule_pending = None
+        self._resume_after_scheduled = None
+        self._current_run_is_scheduled = False
+
+        # Simple IPC: poll for commands from web_server (ipc_command.json)
+        try:
+            self.ipc_timer = QTimer(self)
+            self.ipc_timer.setInterval(400)
+            self.ipc_timer.timeout.connect(self.handle_ipc_commands)
+            self.ipc_timer.start()
+        except Exception as e:
+            logger.debug(f"IPC timer init failed: {e}")
+
+    def add_schedule_row(self):
+        """Add a new schedule row to the Scheduled Sequences tab."""
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(6, 6, 6, 6)
+        enabled_chk = QCheckBox("Enabled")
+        enabled_chk.setChecked(False)
+        seq_combo = QComboBox()
+        seq_names = [s.get('name', 'Unnamed Sequence') for s in self.config.get('sequences', [])]
+        if not seq_names:
+            seq_combo.addItem("(none)")
+        else:
+            for name in seq_names:
+                seq_combo.addItem(name)
+        time_edit = QTimeEdit()
+        # Show 12-hour time with AM/PM, while storing 24-hour in config
+        time_edit.setDisplayFormat("hh:mm AP")
+        try:
+            time_edit.setWrapping(True)
+        except Exception:
+            pass
+        remove_btn = QPushButton("Remove")
+        remove_btn.setToolTip("Remove this schedule")
+        # assemble
+        layout.addWidget(enabled_chk)
+        layout.addWidget(QLabel("Sequence:"))
+        layout.addWidget(seq_combo)
+        layout.addWidget(QLabel("Time:"))
+        layout.addWidget(time_edit)
+        # Behavior toggles
+        queue_chk = QCheckBox("Queue if busy")
+        preempt_chk = QCheckBox("Preempt if busy")
+        resume_chk = QCheckBox("Resume previous")
+        queue_chk.setToolTip("Start scheduled sequence after current run finishes")
+        preempt_chk.setToolTip("Stop current run and start scheduled sequence now")
+        resume_chk.setToolTip("After scheduled finishes, resume the preempted run")
+        layout.addWidget(queue_chk)
+        layout.addWidget(preempt_chk)
+        layout.addWidget(resume_chk)
+        layout.addStretch()
+        layout.addWidget(remove_btn)
+        # Handle remove
+        remove_btn.clicked.connect(lambda: self.remove_schedule_row(row))
+        # Reflect changes immediately when user edits the row
+        try:
+            enabled_chk.toggled.connect(self._on_schedule_row_changed)
+            seq_combo.currentIndexChanged.connect(self._on_schedule_row_changed)
+            time_edit.timeChanged.connect(self._on_schedule_row_changed)
+            queue_chk.toggled.connect(self._on_schedule_row_changed)
+            preempt_chk.toggled.connect(self._on_schedule_row_changed)
+            resume_chk.toggled.connect(self._on_schedule_row_changed)
+        except Exception:
+            pass
+        # Track row components
+        row._enabled_chk = enabled_chk
+        row._seq_combo = seq_combo
+        row._time_edit = time_edit
+        row._queue_chk = queue_chk
+        row._preempt_chk = preempt_chk
+        row._resume_chk = resume_chk
+        row._last_run_date = None
+        self.schedules_container_layout.addWidget(row)
+        self.schedule_rows.append(row)
+        # Initial update so indicator and config reflect this new row
+        try:
+            self._on_schedule_row_changed()
+        except Exception:
+            pass
+
+    def remove_schedule_row(self, row: QWidget):
+        try:
+            self.schedules_container_layout.removeWidget(row)
+            row.deleteLater()
+            if row in self.schedule_rows:
+                self.schedule_rows.remove(row)
+            # Persist changes and update indicator
+            try:
+                self.update_config_from_ui()
+                self.save_config()
+            except Exception:
+                pass
+            try:
+                self.update_scheduler_indicator()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"remove_schedule_row failed: {e}")
+
+        # No further UI resets needed
     
     def new_config(self):
         """Create a new configuration."""
@@ -3234,20 +3852,50 @@ class MainWindow(QMainWindow):
             file_path = self.config_path
             
         try:
+            # Prevent auto-save hooks from firing during initial load
+            try:
+                self._suppress_auto_save = True
+            except Exception:
+                pass
             if os.path.exists(file_path):
                 with open(file_path, 'r') as f:
                     self.config = json.load(f)
                 self.config_path = os.path.abspath(file_path)  # Store absolute path
+                # Basic type normalization to prevent downstream UI errors
+                try:
+                    if not isinstance(self.config, dict):
+                        raise ValueError("Config root must be an object (dict)")
+                    # Ensure keys are of expected types
+                    templates = self.config.get('templates') or {}
+                    if not isinstance(templates, dict):
+                        templates = {}
+                    sequences = self.config.get('sequences') or []
+                    if not isinstance(sequences, list):
+                        sequences = []
+                    groups = self.config.get('groups') or {}
+                    if not isinstance(groups, dict):
+                        groups = {}
+                    break_settings = self.config.get('break_settings') or {"enabled": False, "max_runtime_seconds": 0}
+                    if not isinstance(break_settings, dict):
+                        break_settings = {"enabled": False, "max_runtime_seconds": 0}
+                    self.config['templates'] = templates
+                    self.config['sequences'] = sequences
+                    self.config['groups'] = groups
+                    self.config['break_settings'] = break_settings
+                except Exception as e_norm:
+                    logger.debug(f"Config normalization warning: {e_norm}")
                 
                 # Load search region if it exists
                 if 'search_region' in self.config:
                     self.search_region = self.config['search_region']
                     if isinstance(self.search_region, (list, tuple)) and len(self.search_region) == 4:
                         x, y, w, h = self.search_region
-                        self.region_status.setText(f"Region: ({x}, {y}, {w}, {h})")
+                        if hasattr(self, 'region_status'):
+                            self.region_status.setText(f"Region: ({x}, {y}, {w}, {h})")
                     else:
                         self.search_region = None
-                        self.region_status.setText("Region: Full Screen")
+                        if hasattr(self, 'region_status'):
+                            self.region_status.setText("Region: Full Screen")
                 
                 # Convert template paths to absolute paths for the bot
                 if 'templates' in self.config:
@@ -3272,9 +3920,10 @@ class MainWindow(QMainWindow):
                             
                             if not found:
                                 logger.warning(f"Template file not found: {path}")
-                                continue
+                                # Keep original (possibly relative) path so the UI still shows the template
+                                path = abs_path
                         
-                        # Load the template into the bot
+                        # Load the template into the bot if available on disk
                         if hasattr(self, 'bot') and os.path.exists(path):
                             success = self.bot.load_template(name, path)
                             if success:
@@ -3282,17 +3931,39 @@ class MainWindow(QMainWindow):
                             else:
                                 logger.error(f"Failed to load template '{name}' from {path}")
                         else:
+                            # Still include in config so the UI lists it (even if missing on disk)
                             updated_templates[name] = path
                     
                     self.config['templates'] = updated_templates
                 
                 # Update UI
-                self.update_ui_from_config()
+                try:
+                    self.update_ui_from_config()
+                except Exception as e_ui:
+                    logger.debug(f"update_ui_from_config skipped: {e_ui}")
                 self.statusBar().showMessage(f"Loaded configuration from {os.path.basename(file_path)}")
             else:
                 self.statusBar().showMessage("No configuration file found, using defaults")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load configuration: {str(e)}")
+            logger.error(f"Failed to load configuration: {e}")
+            # Fallback to defaults
+            self.config = {
+                "templates": {},
+                "sequences": [],
+                "groups": {},
+                "break_settings": {"enabled": False, "max_runtime_seconds": 0}
+            }
+            try:
+                self.update_ui_from_config()
+            except Exception:
+                pass
+            self.statusBar().showMessage("Failed to load configuration — using defaults")
+        finally:
+            # Re-enable auto-save after finishing load
+            try:
+                self._suppress_auto_save = False
+            except Exception:
+                pass
     
     # Duplicate save_config removed; using the unified version defined later in the class.
     
@@ -3368,7 +4039,11 @@ class MainWindow(QMainWindow):
             self.bot.templates = {}
             
         # Update templates list and load them into the bot
-        self.templates_list.clear()
+        try:
+            if hasattr(self, 'templates_list'):
+                self.templates_list.clear()
+        except Exception:
+            pass
         templates = self.config.get('templates', {})
         logger.info(f"Found {len(templates)} templates in config")
         
@@ -3376,7 +4051,11 @@ class MainWindow(QMainWindow):
             logger.info(f"Processing template: {name} -> {path}")
             
             # Add to UI
-            self.templates_list.addItem(name)
+            try:
+                if hasattr(self, 'templates_list'):
+                    self.templates_list.addItem(name)
+            except Exception:
+                pass
             
             # Load into bot if the file exists
             if hasattr(self, 'bot'):
@@ -3391,28 +4070,52 @@ class MainWindow(QMainWindow):
                     logger.error(f"Template file not found: {path}")
         
         # Update sequences list
-        self.sequences_list.clear()
-        for seq in self.config.get('sequences', []):
-            self.sequences_list.addItem(seq.get('name', 'Unnamed Sequence'))
+        try:
+            if hasattr(self, 'sequences_list'):
+                self.sequences_list.clear()
+                for seq in self.config.get('sequences', []):
+                    self.sequences_list.addItem(seq.get('name', 'Unnamed Sequence'))
+                # Auto-select first sequence for immediate usability
+                if self.sequences_list.count() > 0 and not self.sequences_list.currentItem():
+                    self.sequences_list.setCurrentRow(0)
+        except Exception:
+            pass
 
         # Update groups list
         if hasattr(self, 'groups_list'):
             self.groups_list.clear()
             for name in sorted(self.config.get('groups', {}).keys()):
                 self.groups_list.addItem(name)
+        # Default focus to Sequences tab after reload
+        try:
+            if hasattr(self, 'tab_widget') and hasattr(self, 'sequences_tab'):
+                self.tab_widget.setCurrentWidget(self.sequences_tab)
+        except Exception:
+            pass
         
         # Update Template Tester's template list
-        self.update_template_tester_templates()
+        try:
+            self.update_template_tester_templates()
+        except Exception:
+            pass
 
         # Refresh templates in active editors so new templates appear in dropdowns
         try:
             # Sequence editor refresh
             if hasattr(self, 'sequence_editor_widget') and self.sequence_editor_widget:
                 self.sequence_editor_widget.templates = list(self.config.get('templates', {}).keys())
-                if hasattr(self, 'sequences_list'):
-                    current_seq_item = self.sequences_list.currentItem()
-                    if current_seq_item:
-                        self.on_sequence_selected(current_seq_item, None)
+                # Also refresh available groups for group-call steps
+                try:
+                    self.sequence_editor_widget.update_groups(list(self.config.get('groups', {}).keys()))
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'sequences_list') and self.sequences_list:
+                        current_seq_item = self.sequences_list.currentItem()
+                        if current_seq_item:
+                            self.on_sequence_selected(current_seq_item, None)
+                except Exception:
+                    pass
             # Group editor refresh
             if hasattr(self, 'group_editor_widget') and self.group_editor_widget:
                 self.group_editor_widget.templates = list(self.config.get('templates', {}).keys())
@@ -3438,6 +4141,17 @@ class MainWindow(QMainWindow):
             self.break_minutes_spin.setValue(mins)
         if hasattr(self, 'break_seconds_spin'):
             self.break_seconds_spin.setValue(secs)
+
+        # Ensure templates list has a selection to enable template actions
+        try:
+            if hasattr(self, 'templates_list'):
+                if self.templates_list.count() > 0 and not self.templates_list.currentItem():
+                    self.templates_list.setCurrentRow(0)
+                # Reflect delete button enabled state
+                if hasattr(self, 'delete_template_btn'):
+                    self.delete_template_btn.setEnabled(self.templates_list.currentItem() is not None)
+        except Exception:
+            pass
         # Enable/disable inputs based on enabled flag
         if hasattr(self, 'break_enabled_checkbox'):
             enabled = bool(br.get('enabled', False))
@@ -3445,43 +4159,131 @@ class MainWindow(QMainWindow):
             self.break_minutes_spin.setEnabled(enabled)
             if hasattr(self, 'break_seconds_spin'):
                 self.break_seconds_spin.setEnabled(enabled)
+            if hasattr(self, 'break_run_final_checkbox'):
+                self.break_run_final_checkbox.setEnabled(enabled)
+                self.break_run_final_checkbox.setChecked(bool(br.get('run_final_after_break', False)))
+            if hasattr(self, 'break_final_sequence_combo'):
+                # Refresh sequence names
+                try:
+                    self.break_final_sequence_combo.clear()
+                    seq_names = [s.get('name', 'Unnamed Sequence') for s in self.config.get('sequences', [])]
+                    self.break_final_sequence_combo.addItems(["(none)"] + seq_names)
+                    sel_name = br.get('final_sequence_name') or "(none)"
+                    idx = self.break_final_sequence_combo.findText(sel_name)
+                    if idx >= 0:
+                        self.break_final_sequence_combo.setCurrentIndex(idx)
+                except Exception:
+                    pass
         
         # Update failsafe configuration
-        failsafe_config = self.config.get('failsafe', {})
-        if failsafe_config:
-            # Enable failsafe
-            self.failsafe_enable_checkbox.setChecked(True)
-            
+        failsafe_config = self.config.get('failsafe', {}) or {}
+        enabled_flag = bool(failsafe_config.get('enabled', False))
+        # If the user has the checkbox checked, prefer UI state over config to prevent immediate flip
+        try:
+            if hasattr(self, 'failsafe_enable_checkbox') and self.failsafe_enable_checkbox.isChecked():
+                enabled_flag = True
+        except Exception:
+            pass
+        # Reflect enabled flag into checkbox without re-entrant signals
+        try:
+            self.failsafe_enable_checkbox.blockSignals(True)
+            self.failsafe_enable_checkbox.setChecked(enabled_flag)
+            self.failsafe_enable_checkbox.blockSignals(False)
+        except Exception:
+            pass
+        # Update UI state based on enabled flag
+        self.toggle_failsafe_ui(enabled_flag)
+        
+        # Populate failsafe fields when enabled
+        if enabled_flag:
             # Set template
-            template_name = failsafe_config.get('template')
+            # Accept both 'template' (GUI) and 'template_name' (web API)
+            template_name = failsafe_config.get('template') or failsafe_config.get('template_name')
             if template_name:
                 index = self.failsafe_template_combo.findText(template_name)
                 if index >= 0:
                     self.failsafe_template_combo.setCurrentIndex(index)
-            
             # Set confidence
             confidence = failsafe_config.get('confidence', 0.8)
             self.failsafe_conf_spin.setValue(confidence)
-            
             # Set region
             region = failsafe_config.get('region')
             if region:
                 self.failsafe_region = region
                 self.failsafe_region_label.setText(f"Region: {region[2]}x{region[3]} at ({region[0]}, {region[1]})")
-            
             # Load failsafe sequence
             failsafe_sequence = failsafe_config.get('sequence', [])
-            if hasattr(self, 'failsafe_sequence_editor'):
-                self.failsafe_sequence_editor.load_sequence(failsafe_sequence)
-            
-            # Update UI state
-            self.toggle_failsafe_ui(True)
-        else:
-            # Disable failsafe
-            self.failsafe_enable_checkbox.setChecked(False)
-            self.toggle_failsafe_ui(False)
+            if hasattr(self, 'current_failsafe_editor'):
+                try:
+                    self.current_failsafe_editor.load_sequence(failsafe_sequence)
+                except Exception:
+                    pass
         # Ensure failsafe template combo reflects current templates
         self.refresh_failsafe_templates()
+        # Populate scheduled sequences
+        try:
+            # Clear existing rows
+            if hasattr(self, 'schedule_rows'):
+                for r in list(self.schedule_rows):
+                    self.remove_schedule_row(r)
+            schedules = self.config.get('scheduled_sequences', [])
+            for sch in schedules:
+                self.add_schedule_row()
+                row = self.schedule_rows[-1]
+                # Set row values
+                row._enabled_chk.setChecked(bool(sch.get('enabled', True)))
+                seq_name = sch.get('sequence_name') or "(none)"
+                idx = row._seq_combo.findText(seq_name)
+                if idx >= 0:
+                    row._seq_combo.setCurrentIndex(idx)
+                # Time
+                try:
+                    from PyQt6.QtCore import QTime
+                    hhmm = str(sch.get('time', '00:00')).strip()
+                    # Support both 24-hour (HH:mm) and 12-hour (hh:mm AM/PM)
+                    h, m = 0, 0
+                    try:
+                        from datetime import datetime
+                        dt = datetime.strptime(hhmm, "%H:%M")
+                        h, m = dt.hour, dt.minute
+                    except Exception:
+                        try:
+                            from datetime import datetime
+                            dt = datetime.strptime(hhmm, "%I:%M %p")
+                            h, m = dt.hour, dt.minute
+                        except Exception:
+                            pass
+                    row._time_edit.setTime(QTime(h, m))
+                except Exception:
+                    pass
+                # Behavior toggles
+                try:
+                    if hasattr(row, '_queue_chk'):
+                        row._queue_chk.setChecked(bool(sch.get('queue_if_busy', False)))
+                    if hasattr(row, '_preempt_chk'):
+                        row._preempt_chk.setChecked(bool(sch.get('preempt_if_busy', False)))
+                    if hasattr(row, '_resume_chk'):
+                        row._resume_chk.setChecked(bool(sch.get('resume_previous', False)))
+                except Exception:
+                    pass
+                # Last run date
+                row._last_run_date = sch.get('last_run_date')
+        except Exception as e:
+            logger.debug(f"Failed to populate scheduled sequences: {e}")
+
+    def refresh_break_sequences(self):
+        """Refresh the 'Final Sequence' dropdown in Break Settings with current sequences."""
+        try:
+            if hasattr(self, 'break_final_sequence_combo'):
+                current_text = self.break_final_sequence_combo.currentText()
+                self.break_final_sequence_combo.clear()
+                seq_names = [s.get('name', 'Unnamed Sequence') for s in self.config.get('sequences', [])]
+                self.break_final_sequence_combo.addItems(["(none)"] + seq_names)
+                # Try to preserve selection if it still exists
+                if current_text and self.break_final_sequence_combo.findText(current_text) >= 0:
+                    self.break_final_sequence_combo.setCurrentText(current_text)
+        except Exception as e:
+            logger.debug(f"refresh_break_sequences failed: {e}")
     
     def update_config_from_ui(self):
         """Update config from UI elements."""
@@ -3501,28 +4303,34 @@ class MainWindow(QMainWindow):
         
         # Update sequences and preserve loop fields
         if hasattr(self, 'sequence_editor_widget'):
-            sequence_data = self.sequence_editor_widget.get_sequence_data()
-            if sequence_data.get('name'):
-                # Preserve loop settings from UI
-                ui_loop = self.loop_checkbox.isChecked() if hasattr(self, 'loop_checkbox') else None
-                ui_loop_count = self.loop_count_spin.value() if hasattr(self, 'loop_count_spin') else None
-                # Find and update the sequence in the config
-                found = False
-                for i, seq in enumerate(self.config.get('sequences', [])):
-                    if seq.get('name') == sequence_data['name']:
+            # Skip sequence write-back during editor rebuild to avoid wiping steps
+            if not getattr(self, '_rebuilding_sequence_editor', False):
+                sequence_data = self.sequence_editor_widget.get_sequence_data()
+                name = sequence_data.get('name')
+                steps = sequence_data.get('steps')
+                if name:
+                    # Preserve loop settings from UI
+                    ui_loop = self.loop_checkbox.isChecked() if hasattr(self, 'loop_checkbox') else None
+                    ui_loop_count = self.loop_count_spin.value() if hasattr(self, 'loop_count_spin') else None
+                    # Find existing sequence
+                    existing_index = -1
+                    existing_seq = None
+                    for i, seq in enumerate(self.config.get('sequences', [])):
+                        if seq.get('name') == name:
+                            existing_index = i
+                            existing_seq = seq
+                            break
+                    # If editor reports no steps but config has steps, do not overwrite
+                    if not isinstance(steps, list) or (steps == [] and existing_seq and isinstance(existing_seq.get('steps'), list) and len(existing_seq.get('steps')) > 0):
+                        pass  # Keep existing steps
+                    else:
                         merged = sequence_data.copy()
-                        # Carry over existing loop fields if UI not available
-                        merged['loop'] = ui_loop if ui_loop is not None else seq.get('loop', False)
-                        merged['loop_count'] = ui_loop_count if ui_loop_count is not None else seq.get('loop_count', 1)
-                        self.config['sequences'][i] = merged
-                        found = True
-                        break
-                if not found:
-                    # Add new sequence if not found
-                    merged = sequence_data.copy()
-                    merged['loop'] = ui_loop if ui_loop is not None else False
-                    merged['loop_count'] = ui_loop_count if ui_loop_count is not None else 1
-                    self.config.setdefault('sequences', []).append(merged)
+                        merged['loop'] = ui_loop if ui_loop is not None else (existing_seq.get('loop', False) if existing_seq else False)
+                        merged['loop_count'] = ui_loop_count if ui_loop_count is not None else (existing_seq.get('loop_count', 1) if existing_seq else 1)
+                        if existing_index >= 0:
+                            self.config['sequences'][existing_index] = merged
+                        else:
+                            self.config.setdefault('sequences', []).append(merged)
         
         # Update failsafe configuration
         failsafe_config = self.get_failsafe_config()
@@ -3540,8 +4348,44 @@ class MainWindow(QMainWindow):
             secs = int(hrs) * 3600 + int(mins) * 60 + int(secs_extra)
             self.config['break_settings'] = {
                 'enabled': bool(enabled),
-                'max_runtime_seconds': int(secs)
+                'max_runtime_seconds': int(secs),
+                'run_final_after_break': bool(getattr(self, 'break_run_final_checkbox', None) and self.break_run_final_checkbox.isChecked()),
+                'final_sequence_name': (self.break_final_sequence_combo.currentText() if hasattr(self, 'break_final_sequence_combo') else "(none)")
             }
+
+        # Update scheduled sequences from UI
+        try:
+            schedules = []
+            if hasattr(self, 'schedule_rows'):
+                for row in self.schedule_rows:
+                    seq_name = row._seq_combo.currentText()
+                    enabled = row._enabled_chk.isChecked()
+                    t = row._time_edit.time()
+                    # Persist as 12-hour AM/PM string for user-friendly readability
+                    h24 = int(t.hour())
+                    m = int(t.minute())
+                    ap = "AM" if h24 < 12 else "PM"
+                    h12 = h24 % 12
+                    if h12 == 0:
+                        h12 = 12
+                    hhmm = f"{h12:02d}:{m:02d} {ap}"
+                    queue_if_busy = bool(getattr(row, '_queue_chk', None) and row._queue_chk.isChecked())
+                    preempt_if_busy = bool(getattr(row, '_preempt_chk', None) and row._preempt_chk.isChecked())
+                    resume_previous = bool(getattr(row, '_resume_chk', None) and row._resume_chk.isChecked())
+                    if preempt_if_busy:
+                        queue_if_busy = False
+                    schedules.append({
+                        'enabled': bool(enabled),
+                        'sequence_name': seq_name,
+                        'time': hhmm,
+                        'queue_if_busy': queue_if_busy,
+                        'preempt_if_busy': preempt_if_busy,
+                        'resume_previous': resume_previous,
+                        'last_run_date': row._last_run_date
+                    })
+            self.config['scheduled_sequences'] = schedules
+        except Exception as e:
+            logger.debug(f"Failed to update scheduled sequences from UI: {e}")
 
         # Update groups if an editor is open
         try:
@@ -3550,7 +4394,16 @@ class MainWindow(QMainWindow):
                 name = data.get('name')
                 steps = data.get('steps', [])
                 if name:
-                    self.config.setdefault('groups', {})[name] = steps
+                    # Only update groups that still exist or are currently selected
+                    exists_in_config = name in (self.config.get('groups', {}) or {})
+                    selected_name = None
+                    try:
+                        if hasattr(self, 'groups_list') and self.groups_list.currentItem():
+                            selected_name = self.groups_list.currentItem().text()
+                    except Exception:
+                        selected_name = None
+                    if exists_in_config or selected_name == name:
+                        self.config.setdefault('groups', {})[name] = steps
         except Exception as e:
             logger.debug(f"Skipping group update from UI: {e}")
 
@@ -3605,6 +4458,11 @@ class MainWindow(QMainWindow):
             # Clear editor
             if hasattr(self, 'group_stack'):
                 self.group_stack.setCurrentIndex(0) if self.group_stack.count() > 0 else None
+            # Drop stale editor reference to avoid resurrecting deleted groups during config sync
+            try:
+                self.group_editor_widget = None
+            except Exception:
+                pass
             self.save_config()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to remove group: {e}")
@@ -4115,6 +4973,9 @@ class MainWindow(QMainWindow):
         # Save changes
         if self.save_config():
             self.statusBar().showMessage(f"Created copy: '{new_name}'")
+            # Refresh break settings final sequence dropdown
+            if hasattr(self, 'refresh_break_sequences'):
+                self.refresh_break_sequences()
     
     def remove_sequence(self):
         """Remove the currently selected sequence."""
@@ -4156,6 +5017,9 @@ class MainWindow(QMainWindow):
             # Save changes
             self.save_config()
             self.statusBar().showMessage(f"Sequence '{sequence_name}' deleted")
+            # Refresh break settings final sequence dropdown
+            if hasattr(self, 'refresh_break_sequences'):
+                self.refresh_break_sequences()
     
     def add_sequence(self):
         """Add a new sequence."""
@@ -4231,6 +5095,9 @@ class MainWindow(QMainWindow):
                 
             self.sequences_list.addItem(name)
             self.sequences_list.setCurrentRow(self.sequences_list.count() - 1)
+            # Refresh break settings final sequence dropdown
+            if hasattr(self, 'refresh_break_sequences'):
+                self.refresh_break_sequences()
             
             # Save the config
             print("DEBUG: Saving config")  # Debug print
@@ -4282,7 +5149,12 @@ class MainWindow(QMainWindow):
             self.template_stack.setCurrentWidget(self.current_template_widget)
             
             # Make sure we're on the templates tab
-            self.tab_widget.setCurrentWidget(self.templates_tab)
+            try:
+                # Avoid tab switching during config/UI reloads
+                if not getattr(self, '_suppress_tab_switch', False) and not getattr(self, '_suppress_auto_save', False):
+                    self.tab_widget.setCurrentWidget(self.templates_tab)
+            except Exception:
+                pass
     
     def on_sequence_selected(self, current, previous):
         """Handle sequence selection change."""
@@ -4302,41 +5174,57 @@ class MainWindow(QMainWindow):
         sequence = next((s for s in self.config.get('sequences', []) if s.get('name') == sequence_name), None)
         
         if sequence:
+            # Mark that we are rebuilding the editor to avoid config writes with partial data
+            try:
+                self._rebuilding_sequence_editor = True
+            except Exception:
+                pass
+            # Temporarily suppress autosave while rebuilding editor
+            try:
+                self._suppress_auto_save = True
+            except Exception:
+                pass
+
             # Update loop controls state
             if hasattr(self, 'loop_checkbox'):
-                loop_enabled = sequence.get('loop', False)
+                loop_enabled = bool(sequence.get('loop', False))
                 self.loop_checkbox.setChecked(loop_enabled)
                 if hasattr(self, 'loop_count_spin'):
-                    self.loop_count_spin.setValue(sequence.get('loop_count', 1))
+                    self.loop_count_spin.setValue(int(sequence.get('loop_count', 1)))
                     self.loop_count_spin.setEnabled(loop_enabled)
             
-            # Check if we already have an editor widget
-            if not hasattr(self, 'sequence_editor_widget'):
-                # Create new sequence editor widget if it doesn't exist
-                self.sequence_editor_widget = SequenceEditor(
-                    sequence,
-                    list(self.config.get('templates', {}).keys()),
-                    self,
-                    groups=list(self.config.get('groups', {}).keys())
-                )
-                # Add to stack if not already there
-                if hasattr(self, 'sequence_stack') and self.sequence_stack.indexOf(self.sequence_editor_widget) == -1:
-                    self.sequence_stack.addWidget(self.sequence_editor_widget)
-            else:
-                # Update existing widget with new sequence data
-                self.sequence_editor_widget.sequence_data = sequence.copy()
-                # Update the name in the UI
-                if hasattr(self.sequence_editor_widget, 'name_edit'):
-                    self.sequence_editor_widget.name_edit.setText(sequence.get('name', 'New Sequence'))
-                # Reload steps
-                if hasattr(self.sequence_editor_widget, '_add_steps_from_data'):
-                    self.sequence_editor_widget._add_steps_from_data()
-            
-            # Show the sequence editor
+            # Always build a fresh SequenceEditor for the selected sequence to avoid stale state
+            new_editor = SequenceEditor(
+                sequence.copy(),
+                list(self.config.get('templates', {}).keys()),
+                self,
+                groups=list(self.config.get('groups', {}).keys())
+            )
+            # Replace stack contents with the new editor
             if hasattr(self, 'sequence_stack'):
-                self.sequence_stack.setCurrentWidget(self.sequence_editor_widget)
-                self.current_sequence_widget = self.sequence_editor_widget
+                try:
+                    while self.sequence_stack.count() > 0:
+                        w = self.sequence_stack.widget(0)
+                        self.sequence_stack.removeWidget(w)
+                        w.deleteLater()
+                except Exception:
+                    pass
+                self.sequence_stack.addWidget(new_editor)
+                self.sequence_stack.setCurrentWidget(new_editor)
+                self.sequence_editor_widget = new_editor
+                self.current_sequence_widget = new_editor
                 self.current_sequence_name = sequence_name
+
+            # Re-enable autosave
+            try:
+                self._suppress_auto_save = False
+            except Exception:
+                pass
+            # Clear rebuilding flag
+            try:
+                self._rebuilding_sequence_editor = False
+            except Exception:
+                pass
     
     def on_loop_toggled(self, checked):
         """Handle loop checkbox state change."""
@@ -4346,6 +5234,9 @@ class MainWindow(QMainWindow):
     def save_config(self):
         """Save configuration to file (unified and robust)."""
         try:
+            # Skip saving during initial load to avoid wiping config.json
+            if getattr(self, '_suppress_auto_save', False):
+                return True
             # Update config from UI before saving
             self.update_config_from_ui()
 
@@ -4581,8 +5472,7 @@ class MainWindow(QMainWindow):
         except Exception:
             max_secs = None
 
-        # Disable UI during execution
-        self.setEnabled(False)
+        # Keep UI responsive during execution; only enable Stop and update status
         status_text = f"Running sequence: {sequence_name}"
         if should_loop:
             if loop_count > 1:
@@ -4609,6 +5499,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
+        # Reset break-hit flag for this run
+        self._break_time_hit = False
         # Update bot with search region
         self.bot.search_region = self.search_region
         
@@ -4655,14 +5547,22 @@ class MainWindow(QMainWindow):
             # Update the live status prefix and refresh the timer-driven text
             self.run_status_prefix = data['status']
             self.update_run_status_text()
+            # Detect when max runtime is reached to trigger final sequence later
+            try:
+                if isinstance(data['status'], str) and 'Max runtime reached' in data['status']:
+                    self._break_time_hit = True
+            except Exception:
+                pass
         if 'progress' in data:
             # Update progress bar if you have one
             pass
             
     def on_worker_finished(self):
         """Handle worker completion."""
-        self.setEnabled(True)
+        # UI remains enabled; just toggle Stop state
         self.stop_action.setEnabled(False)
+        if hasattr(self, 'run_action'):
+            self.run_action.setEnabled(True)
         # Stop the live timer and clear timing state
         try:
             if hasattr(self, 'run_timer') and self.run_timer:
@@ -4673,10 +5573,481 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.statusBar().showMessage("Sequence completed successfully")
+
+        # If a preempted scheduled run is pending, start it now
+        try:
+            if self._schedule_pending and not (hasattr(self, 'worker') and self.worker and self.worker.isRunning()):
+                seq_name = self._schedule_pending.get('sequence_name')
+                if seq_name:
+                    started = self.start_sequence_by_name(seq_name)
+                    self._current_run_is_scheduled = bool(started)
+                    # If we should resume previous after scheduled, store snapshot for later
+                    if started and self._schedule_pending.get('resume_previous') and self._schedule_pending.get('original'):
+                        self._resume_after_scheduled = self._schedule_pending['original']
+                    self._schedule_pending = None
+                    return  # avoid running final-break sequence immediately after
+        except Exception:
+            pass
+
+        # If a queued scheduled run exists, start it next
+        try:
+            if getattr(self, '_scheduled_queue', None) and len(self._scheduled_queue) > 0 and not (hasattr(self, 'worker') and self.worker and self.worker.isRunning()):
+                item = self._scheduled_queue.pop(0)
+                started = self.start_sequence_by_name(item.get('sequence_name'))
+                self._current_run_is_scheduled = bool(started)
+                if started:
+                    return
+        except Exception:
+            pass
+
+        # If the just-finished run was a scheduled run and we have a resume snapshot, restart previous
+        try:
+            if getattr(self, '_current_run_is_scheduled', False) and self._resume_after_scheduled and not (hasattr(self, 'worker') and self.worker and self.worker.isRunning()):
+                snap = self._resume_after_scheduled
+                seq = snap.get('sequence')
+                if seq:
+                    failsafe_config = self.get_failsafe_config()
+                    self.worker = BotWorker(
+                        bot=self.bot,
+                        sequence=seq,
+                        loop=bool(snap.get('loop', False)),
+                        loop_count=int(snap.get('loop_count', 1)),
+                        non_required_wait=bool(snap.get('non_required_wait', False)),
+                        failsafe_config=failsafe_config if failsafe_config else None,
+                        max_runtime_seconds=None,
+                        groups=self.config.get('groups', {})
+                    )
+                    self.worker.signals.update.connect(self.on_worker_update)
+                    self.worker.signals.finished.connect(self.on_worker_finished)
+                    self.worker.signals.error.connect(self.on_worker_error)
+                    if hasattr(self, 'stop_action'):
+                        self.stop_action.setEnabled(True)
+                    if hasattr(self, 'run_action'):
+                        self.run_action.setEnabled(False)
+                    self._current_run_is_scheduled = False
+                    self._resume_after_scheduled = None
+                    self.statusBar().showMessage("Resuming previous run after scheduled")
+                    self.worker.start()
+                    return
+        except Exception:
+            pass
+        # If break time was hit and user enabled final sequence, run it once
+        try:
+            br = self.config.get('break_settings', {})
+            run_final = bool(br.get('run_final_after_break', False))
+            final_name = br.get('final_sequence_name')
+            if run_final and getattr(self, '_break_time_hit', False) and final_name and final_name != "(none)":
+                seq = next((s for s in self.config.get('sequences', []) if s.get('name') == final_name), None)
+                if seq:
+                    # Start final sequence without max runtime cap
+                    self.statusBar().showMessage(f"Running final sequence: {final_name}")
+                    # Enable stop and disable run
+                    if hasattr(self, 'stop_action'):
+                        self.stop_action.setEnabled(True)
+                    if hasattr(self, 'run_action'):
+                        self.run_action.setEnabled(False)
+                    # Clean old worker if any
+                    if hasattr(self, 'worker') and self.worker is not None:
+                        try:
+                            if self.worker.isRunning():
+                                self.worker.stop()
+                                self.worker.wait(500)
+                            self.worker.deleteLater()
+                        except Exception:
+                            pass
+                        self.worker = None
+                    failsafe_config = self.get_failsafe_config()
+                    self.worker = BotWorker(
+                        bot=self.bot,
+                        sequence=seq,
+                        loop=seq.get('loop', False),
+                        loop_count=seq.get('loop_count', 1),
+                        non_required_wait=self.non_required_wait_checkbox.isChecked() if hasattr(self, 'non_required_wait_checkbox') else False,
+                        failsafe_config=failsafe_config if failsafe_config else None,
+                        max_runtime_seconds=None,
+                        groups=self.config.get('groups', {})
+                    )
+                    self.worker.signals.update.connect(self.on_worker_update)
+                    self.worker.signals.finished.connect(self.on_worker_finished)
+                    self.worker.signals.error.connect(self.on_worker_error)
+                    # Reset flag so it only triggers once
+                    self._break_time_hit = False
+                    self.worker.start()
+        except Exception as e:
+            logger.debug(f"Final sequence after break failed to start: {e}")
+
+    def start_sequence_by_name(self, sequence_name: str) -> bool:
+        """Start a sequence by its name, using current UI loop and failsafe settings."""
+        sequence = next((s for s in self.config.get('sequences', []) if s.get('name') == sequence_name), None)
+        if not sequence:
+            self.statusBar().showMessage(f"Sequence '{sequence_name}' not found for scheduled run")
+            return False
+        # If a worker is already running, skip
+        if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
+            self.statusBar().showMessage(f"Skipped scheduled run '{sequence_name}': worker already running")
+            return False
+        # Loop and max runtime: prefer sequence metadata when triggered via IPC; otherwise use UI controls
+        if getattr(self, '_ipc_run_request', False):
+            should_loop = bool(sequence.get('loop', False))
+            try:
+                loop_count = int(sequence.get('loop_count', 1))
+            except Exception:
+                loop_count = 1
+        else:
+            should_loop = self.loop_checkbox.isChecked() if hasattr(self, 'loop_checkbox') else sequence.get('loop', False)
+            loop_count = self.loop_count_spin.value() if hasattr(self, 'loop_count_spin') else sequence.get('loop_count', 1)
+        # Clamp to sensible bounds
+        try:
+            loop_count = max(1, min(int(loop_count or 1), 999999))
+        except Exception:
+            loop_count = 1
+        # Compute max runtime: for IPC/web-start runs, prefer config break_settings; scheduled runs ignore cap
+        max_secs = None
+        hrs = mins = secs_part = 0
+        try:
+            if getattr(self, '_ipc_run_request', False):
+                br = self.config.get('break_settings', {}) or {}
+                if bool(br.get('enabled', False)):
+                    try:
+                        max_secs = int(br.get('max_runtime_seconds', 0) or 0)
+                    except Exception:
+                        max_secs = 0
+                    if max_secs and max_secs > 0:
+                        hrs = max_secs // 3600
+                        mins = (max_secs % 3600) // 60
+                        secs_part = (max_secs % 60)
+                    else:
+                        max_secs = None
+        except Exception:
+            max_secs = None
+        # Start worker
+        failsafe_config = self.get_failsafe_config()
+        self.worker = BotWorker(
+            bot=self.bot,
+            sequence=sequence,
+            loop=should_loop,
+            loop_count=loop_count,
+            non_required_wait=self.non_required_wait_checkbox.isChecked() if hasattr(self, 'non_required_wait_checkbox') else False,
+            failsafe_config=failsafe_config if failsafe_config else None,
+            max_runtime_seconds=max_secs,
+            groups=self.config.get('groups', {})
+        )
+        self.worker.signals.update.connect(self.on_worker_update)
+        self.worker.signals.finished.connect(self.on_worker_finished)
+        self.worker.signals.error.connect(self.on_worker_error)
+        if hasattr(self, 'stop_action'):
+            self.stop_action.setEnabled(True)
+        if hasattr(self, 'run_action'):
+            self.run_action.setEnabled(False)
+        self.worker.start()
+        # Initialize status/timer so break runtime is reflected in status bar for web-start
+        try:
+            status_text = f"Running sequence: {sequence_name}"
+            if should_loop:
+                if loop_count > 1:
+                    status_text += f" (Looping {loop_count} times)"
+                else:
+                    status_text += " (Looping)"
+            if max_secs is not None:
+                status_text += f" — Max runtime: {hrs}h {mins}m {secs_part}s"
+            self.statusBar().showMessage(status_text)
+            self.run_status_prefix = status_text
+            import time
+            self.run_start_time = time.time()
+            self.run_max_secs = max_secs
+            self._break_time_hit = False
+            if hasattr(self, 'run_timer') and self.run_timer:
+                self.run_timer.stop()
+            self.run_timer = QTimer(self)
+            self.run_timer.setInterval(1000)
+            self.run_timer.timeout.connect(self.update_run_status_text)
+            self.run_timer.start()
+        except Exception:
+            pass
+        self.statusBar().showMessage(f"Run started: {sequence_name}")
+        return True
+
+    def check_schedules(self):
+        """Check scheduled sequences and start them at their configured time once per day."""
+        try:
+            from datetime import datetime
+            now = datetime.now()
+            today = now.strftime('%Y-%m-%d')
+            # Normalize current time components for matching
+            curr_h = now.hour
+            curr_m = now.minute
+            # Ensure UI config is up to date
+            schedules = self.config.get('scheduled_sequences', [])
+            # Mirror UI to config if rows exist
+            if hasattr(self, 'schedule_rows') and self.schedule_rows:
+                self.update_config_from_ui()
+                schedules = self.config.get('scheduled_sequences', [])
+            for sch in schedules:
+                if not sch.get('enabled', False):
+                    continue
+                # Parse scheduled time supporting 12h (hh:mm AM/PM) and 24h (HH:mm)
+                sch_time = str(sch.get('time', '')).strip()
+                sh, sm = None, None
+                try:
+                    from datetime import datetime
+                    dt = datetime.strptime(sch_time, '%I:%M %p')
+                    sh, sm = dt.hour, dt.minute
+                except Exception:
+                    try:
+                        from datetime import datetime
+                        dt = datetime.strptime(sch_time, '%H:%M')
+                        sh, sm = dt.hour, dt.minute
+                    except Exception:
+                        pass
+                if sh is None or sm is None:
+                    continue
+                if not (sh == curr_h and sm == curr_m):
+                    continue
+                last_date = sch.get('last_run_date')
+                if last_date == today:
+                    continue  # already ran today
+                seq_name = sch.get('sequence_name')
+                if not seq_name or seq_name == "(none)":
+                    continue
+                # Decide behavior based on busy state and toggles
+                if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
+                    if sch.get('preempt_if_busy', False):
+                        # Capture current run to optionally resume later
+                        try:
+                            original = {
+                                'sequence': getattr(self.worker, 'sequence', None),
+                                'loop': (self.loop_checkbox.isChecked() if hasattr(self, 'loop_checkbox') else False),
+                                'loop_count': (self.loop_count_spin.value() if hasattr(self, 'loop_count_spin') else 1),
+                                'non_required_wait': (self.non_required_wait_checkbox.isChecked() if hasattr(self, 'non_required_wait_checkbox') else False),
+                            }
+                        except Exception:
+                            original = None
+                        self._schedule_pending = {
+                            'sequence_name': seq_name,
+                            'resume_previous': bool(sch.get('resume_previous', False)),
+                            'original': original,
+                        }
+                        # Stop current; on_worker_finished will start scheduled
+                        try:
+                            self.statusBar().showMessage(f"Preempting current run for scheduled: {seq_name}")
+                            self.stop_sequence()
+                        except Exception:
+                            pass
+                        # Update last_run_date now to avoid repeated attempts in this minute
+                        sch['last_run_date'] = today
+                    elif sch.get('queue_if_busy', False):
+                        # Queue the scheduled run to start after current finishes
+                        self._scheduled_queue.append({'sequence_name': seq_name})
+                        sch['last_run_date'] = today
+                        self.statusBar().showMessage(f"Queued scheduled run: {seq_name}")
+                    else:
+                        # Skip when busy
+                        self.statusBar().showMessage(f"Skipped scheduled run '{seq_name}': worker busy")
+                else:
+                    started = self.start_sequence_by_name(seq_name)
+                    self._current_run_is_scheduled = bool(started)
+                    if started:
+                        sch['last_run_date'] = today
+                        # Update UI row state too
+                        if hasattr(self, 'schedule_rows'):
+                            for row in self.schedule_rows:
+                                if row._seq_combo.currentText() == seq_name:
+                                    row._last_run_date = today
+                        # Persist
+                        try:
+                            self.save_config()
+                        except Exception:
+                            pass
+            # Refresh next indicator after evaluating schedules
+            try:
+                self.update_scheduler_indicator()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"check_schedules error: {e}")
+
+    def handle_ipc_commands(self):
+        """Check for an ipc_command.json file and execute commands.
+        The web_server writes commands here so the GUI can act directly without relying on global shortcuts.
+        Supported commands:
+        - {"command": "run", "sequence_name": "Name"}
+        - {"command": "stop"}
+        """
+        try:
+            from pathlib import Path
+            import sys as _sys
+            import json as _json
+            # Resolve base directory for IPC and config in both source and frozen builds
+            try:
+                base_dir = Path(_sys.executable).resolve().parent if getattr(_sys, 'frozen', False) else Path(__file__).resolve().parent
+            except Exception:
+                base_dir = Path(__file__).resolve().parent
+            cmd_path = base_dir / 'ipc_command.json'
+            if not cmd_path.exists():
+                return
+            with cmd_path.open('r', encoding='utf-8') as f:
+                data = _json.load(f)
+            # Remove command file immediately to avoid reprocessing
+            try:
+                cmd_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            cmd = (data or {}).get('command')
+            if cmd == 'run':
+                seq_name = (data or {}).get('sequence_name')
+                if seq_name:
+                    try:
+                        self._ipc_run_request = True
+                    except Exception:
+                        pass
+                    try:
+                        self.start_sequence_by_name(seq_name)
+                    finally:
+                        try:
+                            self._ipc_run_request = False
+                        except Exception:
+                            pass
+                    try:
+                        # Switch UI to Sequences tab and select the running sequence
+                        if hasattr(self, 'tab_widget') and hasattr(self, 'sequences_tab'):
+                            self.tab_widget.setCurrentWidget(self.sequences_tab)
+                        if hasattr(self, 'sequences_list') and self.sequences_list:
+                            for i in range(self.sequences_list.count()):
+                                item = self.sequences_list.item(i)
+                                if item and item.text() == seq_name:
+                                    self.sequences_list.setCurrentRow(i)
+                                    break
+                        # Bring the window to foreground so status is visible
+                        try:
+                            self.raise_()
+                            self.activateWindow()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                else:
+                    # Fallback: start current selection via Run button logic
+                    self.run_sequence()
+                    try:
+                        if hasattr(self, 'tab_widget') and hasattr(self, 'sequences_tab'):
+                            self.tab_widget.setCurrentWidget(self.sequences_tab)
+                    except Exception:
+                        pass
+                try:
+                    # Show a temporary status, then revert to live step/progress updates
+                    self.statusBar().showMessage("IPC: run requested", 1500)
+                except Exception:
+                    pass
+            elif cmd == 'stop':
+                self.stop_sequence()
+                try:
+                    self.statusBar().showMessage("IPC: stop requested", 1500)
+                except Exception:
+                    pass
+            elif cmd == 'reload_config':
+                try:
+                    # Reload configuration from disk and refresh UI
+                    from pathlib import Path as _Path
+                    try:
+                        _base = _Path(_sys.executable).resolve().parent if getattr(_sys, 'frozen', False) else _Path(__file__).resolve().parent
+                    except Exception:
+                        _base = _Path(__file__).resolve().parent
+                    project_cfg = str((_base / 'config.json'))
+                    # Prefer project config path to align with web_server writes
+                    if os.path.exists(project_cfg):
+                        self.load_config(project_cfg)
+                    else:
+                        self.load_config()
+                    self.statusBar().showMessage("IPC: config reloaded", 1500)
+                except Exception as e:
+                    logger.debug(f"IPC reload_config failed: {e}")
+            elif cmd == 'set_non_required_wait':
+                try:
+                    val = bool((data or {}).get('value', False))
+                    if hasattr(self, 'non_required_wait_checkbox') and self.non_required_wait_checkbox:
+                        self.non_required_wait_checkbox.setChecked(val)
+                        self.statusBar().showMessage("IPC: set non-required-wait", 1500)
+                except Exception as e:
+                    logger.debug(f"IPC set_non_required_wait failed: {e}")
+        except Exception as e:
+            logger.debug(f"IPC command handling failed: {e}")
+
+    def update_scheduler_indicator(self):
+        """Compute and display the next scheduled run (sequence @ time) in the status bar."""
+        try:
+            from datetime import datetime, timedelta
+            # Mirror current UI schedules to config if rows exist
+            try:
+                if hasattr(self, 'schedule_rows') and self.schedule_rows:
+                    self.update_config_from_ui()
+            except Exception:
+                pass
+            schedules = self.config.get('scheduled_sequences', [])
+            now = datetime.now()
+            best_dt = None
+            best_name = None
+
+            def parse_time_str(s: str):
+                s = str(s or '').strip()
+                try:
+                    from datetime import datetime
+                    return datetime.strptime(s, '%I:%M %p').time()
+                except Exception:
+                    try:
+                        from datetime import datetime
+                        return datetime.strptime(s, '%H:%M').time()
+                    except Exception:
+                        return None
+
+            for sch in schedules:
+                if not sch.get('enabled', False):
+                    continue
+                seq_name = sch.get('sequence_name')
+                if not seq_name or seq_name == '(none)':
+                    continue
+                t = parse_time_str(sch.get('time'))
+                if t is None:
+                    continue
+                candidate_today = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+                candidate = candidate_today if candidate_today >= now else (candidate_today + timedelta(days=1))
+                if best_dt is None or candidate < best_dt:
+                    best_dt = candidate
+                    best_name = seq_name
+
+            if not hasattr(self, 'scheduler_label'):
+                return
+            if best_dt is None:
+                self.scheduler_label.setText('Next: (none)')
+            else:
+                h24 = best_dt.hour
+                m = best_dt.minute
+                ap = 'AM' if h24 < 12 else 'PM'
+                h12 = h24 % 12
+                if h12 == 0:
+                    h12 = 12
+                hhmm_ap = f"{h12:02d}:{m:02d} {ap}"
+                day_hint = '' if best_dt.date() == now.date() else ' (tomorrow)'
+                self.scheduler_label.setText(f"Next: {best_name} @ {hhmm_ap}{day_hint}")
+        except Exception:
+            pass
+
+    def _on_schedule_row_changed(self):
+        """Persist schedule UI to config and refresh the next-run indicator."""
+        try:
+            # Avoid write-backs during initialization
+            if not getattr(self, '_suppress_auto_save', False):
+                self.update_config_from_ui()
+                self.save_config()
+        except Exception:
+            pass
+        try:
+            self.update_scheduler_indicator()
+        except Exception:
+            pass
         
     def on_worker_error(self, error: str):
         """Handle worker errors."""
-        self.setEnabled(True)
+        # UI remains enabled; toggle actions state
         # Stop the live timer and clear timing state
         try:
             if hasattr(self, 'run_timer') and self.run_timer:
@@ -4688,6 +6059,8 @@ class MainWindow(QMainWindow):
             pass
         QMessageBox.critical(self, "Error", error)
         self.statusBar().showMessage(f"Error: {error}")
+        if hasattr(self, 'run_action'):
+            self.run_action.setEnabled(True)
         
     def stop_sequence(self):
         """Stop the currently running sequence."""
@@ -4773,6 +6146,20 @@ class MainWindow(QMainWindow):
     
     def toggle_failsafe_ui(self, enabled: bool):
         """Enable/disable failsafe UI elements."""
+        try:
+            logger.info(f"toggle_failsafe_ui: enabled={enabled}")
+        except Exception:
+            pass
+        # Reflect enabled flag into in-memory config so subsequent UI refreshes don't immediately flip it back
+        try:
+            fs = self.config.get('failsafe', {}) or {}
+            fs['enabled'] = bool(enabled)
+            # Ensure sequence exists when enabling
+            if enabled and not isinstance(fs.get('sequence'), list):
+                fs['sequence'] = []
+            self.config['failsafe'] = fs
+        except Exception:
+            pass
         self.failsafe_template_combo.setEnabled(enabled)
         self.failsafe_conf_spin.setEnabled(enabled)
         self.failsafe_region_btn.setEnabled(enabled)
@@ -4790,17 +6177,38 @@ class MainWindow(QMainWindow):
 
         if enabled:
             # Switch to failsafe sequence editor
+            failsafe_cfg = self.config.get('failsafe', {}) or {}
+            steps = failsafe_cfg.get('sequence', []) if isinstance(failsafe_cfg, dict) else []
+            # Collect available groups names
+            try:
+                groups_list = list(self.config.get('groups', {}).keys())
+            except Exception:
+                groups_list = []
             if not hasattr(self, 'current_failsafe_editor'):
                 self.current_failsafe_editor = FailsafeSequenceEditor(
-                    self.config.get("failsafe_sequence", {}), 
-                    list(self.config.get("templates", {}).keys()), 
-                    self
+                    {"steps": steps},
+                    list(self.config.get("templates", {}).keys()),
+                    self,
+                    groups_list
                 )
                 self.failsafe_sequence_stack.addWidget(self.current_failsafe_editor)
+            else:
+                # Refresh existing editor with current steps
+                try:
+                    self.current_failsafe_editor.load_sequence(steps)
+                    # Update groups list if changed
+                    self.current_failsafe_editor.groups = groups_list
+                except Exception:
+                    pass
             self.failsafe_sequence_stack.setCurrentWidget(self.current_failsafe_editor)
         else:
             # Switch to welcome screen
             self.failsafe_sequence_stack.setCurrentIndex(0)
+        # Persist enabled flag to config so subsequent refreshes keep state
+        try:
+            self.save_config()
+        except Exception:
+            pass
     
     def select_failsafe_region(self):
         """Select region for failsafe template detection."""
@@ -4831,8 +6239,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Warning", "No failsafe sequence configured to test")
             return
 
-        # Disable UI during execution and show status
-        self.setEnabled(False)
+        # Keep UI responsive during failsafe test; show status only
         self.statusBar().showMessage("Testing failsafe sequence...")
 
         # Clean up any existing worker
@@ -4857,7 +6264,8 @@ class MainWindow(QMainWindow):
             loop_count=1,
             non_required_wait=False,
             failsafe_config=failsafe_config,
-            failsafe_only=True
+            failsafe_only=True,
+            groups=self.config.get('groups', {})
         )
         self.worker.signals.update.connect(self.on_worker_update)
         self.worker.signals.finished.connect(self.on_worker_finished)
@@ -4891,13 +6299,33 @@ class MainWindow(QMainWindow):
     def refresh_failsafe_templates(self):
         """Populate the failsafe template combo from current config templates."""
         try:
+            # Preserve the intended selection from config (template or template_name)
+            desired = None
+            try:
+                fs = self.config.get('failsafe', {}) or {}
+                desired = fs.get('template') or fs.get('template_name') or None
+            except Exception:
+                desired = None
+            if not desired and hasattr(self, 'failsafe_template_combo'):
+                desired = self.failsafe_template_combo.currentText().strip()
             self.failsafe_template_combo.blockSignals(True)
             self.failsafe_template_combo.clear()
             for name in sorted(self.config.get('templates', {}).keys()):
                 self.failsafe_template_combo.addItem(name)
             self.failsafe_template_combo.blockSignals(False)
+            # Restore selection if available
+            if desired:
+                idx = self.failsafe_template_combo.findText(desired)
+                if idx >= 0:
+                    self.failsafe_template_combo.setCurrentIndex(idx)
             # If a selection exists, update preview
             self.update_failsafe_preview()
+            # Update templates list for failsafe step editors
+            try:
+                if hasattr(self, 'current_failsafe_editor'):
+                    self.current_failsafe_editor.update_templates(list(self.config.get('templates', {}).keys()))
+            except Exception:
+                pass
         except Exception:
             # Ensure signals unblocked on error
             self.failsafe_template_combo.blockSignals(False)

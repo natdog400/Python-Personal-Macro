@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scheduled Sequences</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #1e1e1e; color: #ddd; margin: 0; }
+    header { padding: 12px 16px; background: #2b2b2b; border-bottom: 1px solid #3a3a3a; display:flex; gap:16px; align-items:center; }
+    main { padding: 16px; display: flex; gap: 16px; }
+    .panel { background: #252525; border: 1px solid #3a3a3a; border-radius: 6px; padding: 12px; width: 100%; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+    label { display: block; }
+    input[type=text], select { padding: 6px 8px; border-radius: 4px; border: 1px solid #555; background: #1f1f1f; color: #ddd; }
+    button { padding: 6px 10px; border-radius: 4px; border: 1px solid #555; background: #333; color: #eee; cursor: pointer; }
+    button:hover { background: #3d3d3d; }
+    .schedule { border: 1px solid #444; border-radius: 6px; padding: 8px; margin: 8px 0; background: #212121; }
+    small { color: #999; }
+    nav a { color: #9bd; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <header>
+    <div><strong>Scheduled Sequences</strong></div>
+    <nav style="display:flex; gap:12px">
+      <a href="/">Dashboard</a>
+      <a href="/static/sequences.html">Sequences</a>
+      <a href="/static/control.html">Controls</a>
+      <a href="/static/schedules.html">Schedules</a>
+      <a href="/static/templates.html">Templates</a>
+      <a href="/static/failsafe.html">Failsafe</a>
+    </nav>
+    <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
+      <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
+      <input type="text" id="token" placeholder="Access Token" style="width:260px" />
+    </div>
+  </header>
+  <main>
+    <div class="panel">
+      <div class="row">
+        <button id="btnAdd">Add Row</button>
+        <button id="btnSave">Save All</button>
+        <small id="status" style="margin-left:auto">Status: idle</small>
+      </div>
+      <div id="list"></div>
+    </div>
+  </main>
+  <script>
+    const apiBase = '';
+    const tokenEl = document.getElementById('token');
+    const rememberEl = document.getElementById('rememberToken');
+    const listEl = document.getElementById('list');
+    const statusEl = document.getElementById('status');
+    let sequences = [];
+    let schedules = [];
+
+    function authHeaders() {
+      const tok = tokenEl.value.trim();
+      return tok ? { 'Authorization': `Bearer ${tok}` } : {};
+    }
+    // Token persistence across pages
+    try {
+      const remembered = (localStorage.getItem('rememberToken') === 'true');
+      rememberEl.checked = remembered;
+      const savedTok = localStorage.getItem('apiToken') || '';
+      if (remembered && savedTok && !tokenEl.value) tokenEl.value = savedTok;
+    } catch (e) {}
+    tokenEl.addEventListener('change', () => {
+      try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
+      loadSequences(); loadSchedules();
+    });
+    rememberEl.addEventListener('change', () => {
+      try {
+        localStorage.setItem('rememberToken', rememberEl.checked ? 'true' : 'false');
+        if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
+      } catch (e) {}
+    });
+
+    async function loadSequences() {
+      try {
+        const res = await fetch(`${apiBase}/api/sequences`, { headers: authHeaders() });
+        const data = await res.json();
+        sequences = data.sequences || [];
+      } catch (e) { sequences = []; }
+    }
+
+    async function loadSchedules() {
+      try {
+        const res = await fetch(`${apiBase}/api/schedules`, { headers: authHeaders() });
+        const data = await res.json();
+        schedules = data.schedules || [];
+        render();
+        statusEl.textContent = `Status: loaded ${schedules.length} row(s)`;
+      } catch (e) { statusEl.textContent = `Status: failed to load (${e.message})`; }
+    }
+
+    function render() {
+      listEl.innerHTML = '';
+      schedules.forEach((sch, idx) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'schedule';
+        const row1 = document.createElement('div'); row1.className = 'row';
+        const enabled = document.createElement('select'); enabled.innerHTML = '<option>false</option><option>true</option>';
+        enabled.value = String(!!sch.enabled);
+        enabled.onchange = () => sch.enabled = (enabled.value === 'true');
+        const seq = document.createElement('select');
+        const noneOpt = document.createElement('option'); noneOpt.value = '(none)'; noneOpt.textContent = '(none)'; seq.appendChild(noneOpt);
+        sequences.forEach(name => { const opt = document.createElement('option'); opt.value = name; opt.textContent = name; seq.appendChild(opt); });
+        seq.value = sch.sequence_name || '(none)';
+        seq.onchange = () => sch.sequence_name = seq.value;
+        const time = document.createElement('input'); time.type = 'text'; time.placeholder = 'hh:mm AM/PM'; time.value = sch.time || '12:00 PM';
+        time.onchange = () => sch.time = time.value;
+        row1.appendChild(labelWrap('Enabled', enabled));
+        row1.appendChild(labelWrap('Sequence', seq));
+        row1.appendChild(labelWrap('Time', time));
+
+        const row2 = document.createElement('div'); row2.className = 'row';
+        const queueC = document.createElement('select'); queueC.innerHTML = '<option>false</option><option>true</option>'; queueC.value = String(!!sch.queue_if_busy);
+        queueC.onchange = () => sch.queue_if_busy = (queueC.value === 'true');
+        const preemptC = document.createElement('select'); preemptC.innerHTML = '<option>false</option><option>true</option>'; preemptC.value = String(!!sch.preempt_if_busy);
+        preemptC.onchange = () => { sch.preempt_if_busy = (preemptC.value === 'true'); if (sch.preempt_if_busy) sch.queue_if_busy = false; };
+        const resumeC = document.createElement('select'); resumeC.innerHTML = '<option>false</option><option>true</option>'; resumeC.value = String(!!sch.resume_previous);
+        resumeC.onchange = () => sch.resume_previous = (resumeC.value === 'true');
+        const delBtn = document.createElement('button'); delBtn.textContent = 'Remove'; delBtn.onclick = () => { schedules.splice(idx, 1); render(); };
+        row2.appendChild(labelWrap('Queue if busy', queueC));
+        row2.appendChild(labelWrap('Preempt if busy', preemptC));
+        row2.appendChild(labelWrap('Resume previous', resumeC));
+        row2.appendChild(delBtn);
+
+        wrap.appendChild(row1);
+        wrap.appendChild(row2);
+        listEl.appendChild(wrap);
+      });
+    }
+
+    function labelWrap(text, el) {
+      const div = document.createElement('div'); div.className = 'row';
+      const lab = document.createElement('label'); lab.textContent = text; lab.style.minWidth = '120px';
+      div.appendChild(lab); div.appendChild(el);
+      return div;
+    }
+
+    function addRow() {
+      schedules.push({ enabled: false, sequence_name: '(none)', time: '12:00 PM', queue_if_busy: false, preempt_if_busy: false, resume_previous: false });
+      render();
+    }
+
+    async function saveAll() {
+      try {
+        const res = await fetch(`${apiBase}/api/schedules`, {
+          method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ schedules })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusEl.textContent = `Status: saved ${data.count} row(s)`;
+      } catch (e) { statusEl.textContent = `Status: save failed (${e.message})`; }
+    }
+
+    document.getElementById('btnAdd').addEventListener('click', addRow);
+    document.getElementById('btnSave').addEventListener('click', saveAll);
+    tokenEl.addEventListener('change', () => { loadSequences(); loadSchedules(); });
+
+    const urlTok = new URLSearchParams(location.search).get('token');
+    if (urlTok) { tokenEl.value = urlTok; }
+    loadSequences().then(loadSchedules);
+  </script>
+</body>
+</html>

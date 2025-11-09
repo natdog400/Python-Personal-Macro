@@ -74,6 +74,13 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 
+:: Verify performance capture backend (mss); install if missing
+python -c "import sys; import importlib; sys.exit(0 if importlib.util.find_spec('mss') else 1)" >nul 2>nul
+if %ERRORLEVEL% NEQ 0 (
+    echo Installing mss for fast region capture...
+    python -m pip install --upgrade mss
+)
+
 :: Additional environment checks
 :: Ensure images and subfolders are writable
 if not exist images\temp (

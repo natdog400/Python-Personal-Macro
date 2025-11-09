@@ -217,8 +217,22 @@ class ImageDetectionBot:
             best_confidence = 0
             
             for method in methods:
+                # Ensure template does not exceed screenshot dimensions
+                ih, iw = gray_screenshot.shape[:2]
+                th, tw = gray_template.shape[:2]
+                tpl_to_use = gray_template
+                try:
+                    if ih < th or iw < tw:
+                        scale = min(ih / max(th, 1), iw / max(tw, 1))
+                        if scale <= 0:
+                            continue
+                        new_w = max(1, int(tw * scale))
+                        new_h = max(1, int(th * scale))
+                        tpl_to_use = cv2.resize(gray_template, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                except Exception:
+                    pass
                 # Perform template matching
-                result = cv2.matchTemplate(gray_screenshot, gray_template, method)
+                result = cv2.matchTemplate(gray_screenshot, tpl_to_use, method)
                 min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
                 
                 # For TM_SQDIFF and TM_SQDIFF_NORMED, the best matches are lower values
@@ -548,18 +562,37 @@ class ImageDetectionBot:
                     except Exception as e:
                         logger.debug(f"Multi-scale fallback error: {e}")
 
-                # Fallback to classic template matching
-                result = cv2.matchTemplate(screenshot_bgr, template, cv2.TM_CCOEFF_NORMED)
-                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-                if max_val >= conf_threshold:
-                    h, w = template.shape[:2]
-                    x = max_loc[0] + w // 2
-                    y = max_loc[1] + h // 2
-                    if region:
-                        x += region[0]
-                        y += region[1]
-                    logger.info(f"Found '{template_name}' at ({x}, {y}) with confidence {max_val:.2f}")
-                    return (x, y)
+                # Fallback to classic template matching (guarded by dimensions)
+                try:
+                    ih, iw = screenshot_bgr.shape[:2]
+                    th, tw = template.shape[:2]
+                    tpl_to_use = template
+                    if ih < th or iw < tw:
+                        scale = min(ih / max(th, 1), iw / max(tw, 1))
+                        if scale > 0:
+                            new_w = max(1, int(tw * scale))
+                            new_h = max(1, int(th * scale))
+                            tpl_to_use = cv2.resize(template, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                        else:
+                            # Skip classic fallback if scaling invalid
+                            tpl_to_use = None
+                    if tpl_to_use is None or tpl_to_use.size == 0:
+                        raise ValueError("Template larger than search region; skipping classic fallback")
+                    result = cv2.matchTemplate(screenshot_bgr, tpl_to_use, cv2.TM_CCOEFF_NORMED)
+                except Exception as e:
+                    logger.debug(f"Classic template match skipped: {e}")
+                    result = None
+                if result is not None:
+                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                    if max_val >= conf_threshold:
+                        h, w = (tpl_to_use.shape[0], tpl_to_use.shape[1])
+                        x = max_loc[0] + w // 2
+                        y = max_loc[1] + h // 2
+                        if region:
+                            x += region[0]
+                            y += region[1]
+                        logger.info(f"Found '{template_name}' at ({x}, {y}) with confidence {max_val:.2f}")
+                        return (x, y)
                 
                 # Wait before next attempt
                 time.sleep(check_interval)
@@ -960,8 +993,10 @@ def load_config(config_path: str) -> dict:
 def parse_action(action_dict: Dict[str, Any]) -> Action:
     """Parse action dictionary into Action object."""
     try:
-        action_type = ActionType(action_dict['type'])
-        action_args = {k: v for k, v in action_dict.items() if k != 'type'}
+        # Support legacy key 'action' as well as 'type'
+        raw_type = action_dict.get('type', action_dict.get('action'))
+        action_type = ActionType(raw_type)
+        action_args = {k: v for k, v in action_dict.items() if k not in ('type', 'action')}
         return Action(type=action_type, **action_args)
     except (KeyError, ValueError) as e:
         logger.error(f"Error parsing action: {str(e)}")
