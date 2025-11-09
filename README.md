@@ -197,36 +197,36 @@ Screenshots are embedded below; place PNGs in `docs/screenshots/` using the show
 
 - GUI
   - Sequences
-    - ![GUISequenceTab](/docs/screenshots/GUISequenceTab.png?raw=true)
+    - ![GUISequenceTab](docs/screenshots/GUISequenceTab.png)
   - Failsafe
-    - ![GUIFailSafeTab](/docs/screenshots/GUIFailSafeTab.png?raw=true)
+    - ![GUIFailSafeTab](docs/screenshots/GUIFailSafeTab.png)
   - Templates
-    - ![GUITemplateTab](/docs/screenshots/GUITemplateTab.png?raw=true)
+    - ![GUITemplateTab](docs/screenshots/GUITemplateTab.png)
   - Template Tester
-    - ![GUITemplateTesterTab](/docs/screenshots/GUITemplateTesterTab.png?raw=true)
+    - ![GUITemplateTesterTab](docs/screenshots/GUITemplateTesterTab.png)
   - Groups
-    - ![GUIGroupsTab](/docs/screenshots/GUIGroupsTab.png?raw=true)
+    - ![GUIGroupsTab](docs/screenshots/GUIGroupsTab.png)
   - Scheduled Sequences
-    - ![GUIScheduledSequenceTab](/docs/screenshots/GUIScheduledSequenceTab.png?raw=true)
+    - ![GUIScheduledSequenceTab](docs/screenshots/GUIScheduledSequenceTab.png)
   - Break Settings
-    - ![GUIBreaksettings](/docs/screenshots/GUIBreaksettings.png?raw=true)
+    - ![GUIBreaksettings](docs/screenshots/GUIBreaksettings.png)
 
 - Web
   - Dashboard
-    - ![WEBDashboard](/docs/screenshots/WEBDashboard.png?raw=true)
+    - ![WEBDashboard](docs/screenshots/WEBDashboard.png)
   - Sequence Editor
-    - ![WEBSequenceEditor](/docs/screenshots/WEBSequenceEditor.png?raw=true)
-    - ![WEBLoadedSequenceinWEB](/docs/screenshots/WEBLoadedSequenceinWEB.png?raw=true)
+    - ![WEBSequenceEditor](docs/screenshots/WEBSequenceEditor.png)
+    - ![WEBLoadedSequenceinWEB](docs/screenshots/WEBLoadedSequenceinWEB.png)
   - Groups Editor
-    - ![WEBGroupsEditor](/docs/screenshots/WEBGroupsEditor.png?raw=true)
+    - ![WEBGroupsEditor](docs/screenshots/WEBGroupsEditor.png)
   - Templates Manager
-    - ![WEBTemplatesManager](/docs/screenshots/WEBTemplatesManager.png?raw=true)
+    - ![WEBTemplatesManager](docs/screenshots/WEBTemplatesManager.png)
   - Failsafe Settings
-    - ![WEBFailsafeSettings](/docs/screenshots/WEBFailsafeSettings.png?raw=true)
+    - ![WEBFailsafeSettings](docs/screenshots/WEBFailsafeSettings.png)
   - Run Controls (with Break Settings)
-    - ![WEBRunControlswithBreakSettings](/docs/screenshots/WEBRunControlswithBreakSettings.png?raw=true)
+    - ![WEBRunControlswithBreakSettings](docs/screenshots/WEBRunControlswithBreakSettings.png)
   - Scheduled
-    - ![WEBScheduled](/docs/screenshots/WEBScheduled.png?raw=true)
+    - ![WEBScheduled](docs/screenshots/WEBScheduled.png)
   - Select Region (Preview)
     - ![WebSelectRegion](docs/screenshots/WebSelectRegion.png)
 
