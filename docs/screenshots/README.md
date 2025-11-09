@@ -47,21 +47,21 @@ This folder is reserved for screenshots used in the main README.
 - Crop to focus on the panel; avoid full desktop unless showing multi-monitor preview.
 - For web pages, include the header with navigation and token area.
 - Name files descriptively:
-  - !(GUIBreaksettings.png)
-  - `GUIFailSafeTab.png`
-  - `GUIGroupsTab.png`
-  - `GUIScheduledSequenceTab.png`
-  - `GUISequenceTab.png`
-  - `GUITemplateTab.png`
-  - `GUITemplateTesterTab.png`
-  - `WEBDashboard.png`
-  - `WEBFailsafeSettings.png`
-  - `WEBGroupsEditor.png`
-  - `WEBLoadedSequenceinWEB.png`
-  - `WEBRunControlswithBreakSettings.png`
-  - `WEBScheduled.png`
-  - `WebSelectRegion.png`
-  - `WEBSequenceEditor.png`
-  - `WEBTemplatesManager.png`
+  - ![GUI Break settings](docs/screenshots/GUIBreaksettings.png)
+  - ![GUI Failsafe Tab](docs/screenshots/GUIFailSafeTab.png)
+  - ![GUI Groups Tab](docs/screenshots/GUIGroupsTab.png)
+  - ![GUI Scheduled Sequence Tab](docs/screenshots/GUIScheduledSequenceTab.png)
+  - ![GUI Sequence Tab](docs/screenshots/GUISequenceTab.png)
+  - ![GUI Template Tab](docs/screenshots/GUITemplateTab.png)
+  - ![GUI Template Tester Tab](docs/screenshots/GUITemplateTesterTab.png)
+  - ![Web Dashboard](docs/screenshots/WEBDashboard.png)
+  - ![Web Failsafe Settings](docs/screenshots/WEBFailsafeSettings.png)
+  - ![Web Groups Editor](docs/screenshots/WEBGroupsEditor.png)
+  - ![Web Loaded Sequence in Web](docs/screenshots/WEBLoadedSequenceinWEB.png)
+  - ![Web Run Controls with Break Settings](docs/screenshots/WEBRunControlswithBreakSettings.png)
+  - ![Web Scheduled Sequences](docs/screenshots/WEBScheduled.png)
+  - ![Web Select Region](docs/screenshots/WebSelectRegion.png)
+  - ![Web Sequence Editor](docs/screenshots/WEBSequenceEditor.png)
+  - ![Web Templates Manager](docs/screenshots/WEBTemplatesManager.png)
 
 Place the final PNG files in this folder and commit. The main README will reference these filenames.
