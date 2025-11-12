@@ -13,7 +13,9 @@
     input[type=text], select { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #555; background: #1f1f1f; color: #ddd; }
     button { padding: 8px 12px; border-radius: 4px; border: 1px solid #555; background: #333; color: #eee; cursor: pointer; }
     button:hover { background: #3d3d3d; }
-    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+    .row label { display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; }
+    .row label select, .row label input { width: auto; }
     small { color: #999; }
     nav a { color: #9bd; text-decoration: none; }
     nav a:hover { text-decoration: underline; }
@@ -26,10 +28,12 @@
     <nav style="display:flex; gap:12px">
       <a href="/">Dashboard</a>
       <a href="/static/sequences.html">Sequences</a>
+      <a href="/static/groups.html">Groups</a>
       <a href="/static/control.html">Controls</a>
       <a href="/static/schedules.html">Schedules</a>
       <a href="/static/templates.html">Templates</a>
       <a href="/static/failsafe.html">Failsafe</a>
+      <a href="/static/debug.html">Debug</a>
     </nav>
     <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
       <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
@@ -67,6 +71,30 @@
       <img id="preview" alt="Preview" />
       <div style="margin-top:8px"><small id="statusB">Status: idle</small></div>
     </div>
+    <div class="panel">
+      <h4>Live Preview</h4>
+      <div id="tplPreviewWrap" style="width:100%">
+        <div class="row" style="margin-bottom:8px">
+          <label>Monitor
+            <select id="tplMonitor"></select>
+          </label>
+          <label style="margin-left:16px">Size
+            <select id="tplPreviewSize"><option>640</option><option>800</option><option selected>1024</option><option>1280</option></select>
+          </label>
+          <label style="margin-left:16px; display:inline-flex; align-items:center; gap:6px"><input type="checkbox" id="tplPhoneToggle" /> Using Phone</label>
+        </div>
+        <div id="tplImagePane" style="position:relative; width:100%">
+          <img id="tplPreview" alt="Preview" draggable="false" class="no-drag" style="width:100%; max-height:60vh; object-fit:contain; background:#111; border:1px solid #3a3a3a; border-radius:6px" />
+          <div id="tplSel" style="display:none; position:absolute; border:2px dashed #9bd; background:rgba(155, 221, 255, 0.15); pointer-events:none"></div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <input type="text" id="tplSelName" placeholder="Template name (e.g., RuneOre)" style="flex:1" />
+          <button id="btnCaptureTpl">Save Selection as Template</button>
+        </div>
+        <div style="margin-top:8px"><small id="statusC">Status: idle</small></div>
+      </div>
+      <small>Live preview shows your screen via MJPEG; use Monitor to switch.</small>
+    </div>
   </main>
 
   <script>
@@ -77,6 +105,12 @@
     const previewEl = document.getElementById('preview');
     const statusA = document.getElementById('statusA');
     const statusB = document.getElementById('statusB');
+    const tplPhoneToggle = document.getElementById('tplPhoneToggle');
+    // Live preview elements
+    const tplPreview = document.getElementById('tplPreview');
+    const tplImagePane = document.getElementById('tplImagePane');
+    let tplMonitors = [];
+    let tplSelectedMonitor = 0;
 
     function authHeaders() {
       const tok = tokenEl.value.trim();
@@ -100,6 +134,35 @@
         if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
       } catch (e) {}
     });
+
+    // Live preview helpers
+    tplPreview.addEventListener('dragstart', (e) => e.preventDefault());
+    function setTplPreviewSize(){
+      const val = parseInt(document.getElementById('tplPreviewSize').value||'1024',10);
+      if (!isNaN(val) && val>0) { tplPreview.style.width = `${val}px`; }
+    }
+    document.getElementById('tplPreviewSize').addEventListener('change', setTplPreviewSize);
+    function updateTplPreviewSrc(){
+      const tok = tokenEl.value.trim();
+      tplPreview.src = `${apiBase}/stream.mjpeg?monitor=${encodeURIComponent(tplSelectedMonitor)}${tok ? `&token=${encodeURIComponent(tok)}` : ''}`;
+    }
+    async function fetchTplMonitors(){
+      try {
+        const res = await fetch(`${apiBase}/api/monitors`, { headers: authHeaders() });
+        const data = await res.json();
+        tplMonitors = data.monitors || [];
+        const sel = document.getElementById('tplMonitor');
+        sel.innerHTML = '';
+        for (const m of tplMonitors) {
+          const opt = document.createElement('option');
+          opt.value = String(m.index);
+          opt.textContent = (m.index === 0) ? `All (${m.width}x${m.height})` : `Monitor ${m.index} (${m.width}x${m.height})`;
+          sel.appendChild(opt);
+        }
+        sel.value = String(tplSelectedMonitor);
+        sel.addEventListener('change', (e)=>{ tplSelectedMonitor = parseInt(e.target.value||'0',10)||0; updateTplPreviewSrc(); });
+      } catch (e) { /* ignore */ }
+    }
 
     async function fetchTemplates() {
       try {
@@ -188,11 +251,133 @@
     document.getElementById('btnSave').addEventListener('click', savePath);
     document.getElementById('btnAdd').addEventListener('click', addTemplate);
     document.getElementById('btnDelete').addEventListener('click', deleteTemplate);
-    tokenEl.addEventListener('change', fetchTemplates);
+    tokenEl.addEventListener('change', () => { fetchTemplates(); fetchTplMonitors().then(()=>{ updateTplPreviewSrc(); setTplPreviewSize(); }); });
+
+    // Prevent default image drag which interferes on touch devices
+    previewEl.addEventListener('dragstart', (e) => e.preventDefault());
+    // Toggle touch-action to disable scrolling during interactions (for future selection tools)
+    function updateTplTouchAction(){ tplImagePane.style.touchAction = tplPhoneToggle.checked ? 'none' : 'auto'; }
+    tplPhoneToggle.addEventListener('change', updateTplTouchAction);
+    updateTplTouchAction();
+
+    // Region selection overlay logic (mouse + touch)
+    const tplSelBox = document.getElementById('tplSel');
+    let tplDragStart = null;
+    let tplLastDragPos = null;
+    let tplLastRegion = null; // [x,y,w,h] in natural image pixels
+
+    // Compute actual drawn content rect inside the <img> (object-fit: contain)
+    function getTplImageContentInfo(img){
+      const rect = img.getBoundingClientRect();
+      const nw = img.naturalWidth || rect.width;
+      const nh = img.naturalHeight || rect.height;
+      const elemW = rect.width, elemH = rect.height;
+      let contentW = elemW;
+      let contentH = contentW * (nh / nw);
+      if (contentH > elemH){
+        contentH = elemH;
+        contentW = contentH * (nw / nh);
+      }
+      const offsetX = (elemW - contentW) / 2;
+      const offsetY = (elemH - contentH) / 2;
+      return { rect, nw, nh, contentW, contentH, offsetX, offsetY };
+    }
+
+    function tplStartDrag(clientX, clientY){
+      const paneRect = tplImagePane.getBoundingClientRect();
+      const info = getTplImageContentInfo(tplPreview);
+      const ix = clientX - info.rect.left - info.offsetX;
+      const iy = clientY - info.rect.top - info.offsetY;
+      if (ix < 0 || iy < 0 || ix > info.contentW || iy > info.contentH) return;
+      const offX = (info.rect.left - paneRect.left) + info.offsetX;
+      const offY = (info.rect.top - paneRect.top) + info.offsetY;
+      tplDragStart = { x: ix, y: iy, offX, offY };
+      tplSelBox.style.display = 'block';
+      tplSelBox.style.left = `${offX + ix}px`;
+      tplSelBox.style.top = `${offY + iy}px`;
+      tplSelBox.style.width = '0px';
+      tplSelBox.style.height = '0px';
+    }
+    function tplMoveDrag(clientX, clientY){
+      if (!tplDragStart) return;
+      const info = getTplImageContentInfo(tplPreview);
+      let ix = clientX - info.rect.left - info.offsetX; let iy = clientY - info.rect.top - info.offsetY;
+      ix = Math.max(0, Math.min(info.contentW, ix));
+      iy = Math.max(0, Math.min(info.contentH, iy));
+      tplLastDragPos = { x: ix, y: iy };
+      const left = Math.min(tplDragStart.x, ix) + tplDragStart.offX;
+      const top = Math.min(tplDragStart.y, iy) + tplDragStart.offY;
+      const w = Math.abs(ix - tplDragStart.x);
+      const h = Math.abs(iy - tplDragStart.y);
+      tplSelBox.style.left = `${left}px`;
+      tplSelBox.style.top = `${top}px`;
+      tplSelBox.style.width = `${w}px`;
+      tplSelBox.style.height = `${h}px`;
+    }
+    function tplEndDrag(){
+      if (!tplDragStart) return;
+      const info = getTplImageContentInfo(tplPreview);
+      const ix0 = Math.min(tplDragStart.x, (tplLastDragPos ? tplLastDragPos.x : tplDragStart.x));
+      const iy0 = Math.min(tplDragStart.y, (tplLastDragPos ? tplLastDragPos.y : tplDragStart.y));
+      const iw = Math.abs(((tplLastDragPos ? tplLastDragPos.x : tplDragStart.x)) - tplDragStart.x);
+      const ih = Math.abs(((tplLastDragPos ? tplLastDragPos.y : tplDragStart.y)) - tplDragStart.y);
+      const scaleX = info.nw / info.contentW;
+      const scaleY = info.nh / info.contentH;
+      const x0 = Math.round(ix0 * scaleX);
+      const y0 = Math.round(iy0 * scaleY);
+      const rw = Math.round(iw * scaleX);
+      const rh = Math.round(ih * scaleY);
+      tplLastRegion = [x0, y0, rw, rh];
+      statusC.textContent = `Status: selected region ${x0},${y0},${rw},${rh}`;
+      tplDragStart = null;
+      tplLastDragPos = null;
+    }
+    // Mouse events
+    tplPreview.addEventListener('mousedown', (e) => { tplStartDrag(e.clientX, e.clientY); });
+    tplPreview.addEventListener('mousemove', (e) => { tplMoveDrag(e.clientX, e.clientY); });
+    window.addEventListener('mouseup', () => { tplEndDrag(); });
+    // Touch events gated by Using Phone
+    tplPreview.addEventListener('touchstart', (e) => { if (!tplPhoneToggle.checked) return; e.preventDefault(); const t=e.touches[0]; if (t) tplStartDrag(t.clientX, t.clientY); }, { passive: false });
+    tplPreview.addEventListener('touchmove', (e) => { if (!tplPhoneToggle.checked || !tplDragStart) return; e.preventDefault(); const t=e.touches[0]; if (t) tplMoveDrag(t.clientX, t.clientY); }, { passive: false });
+    window.addEventListener('touchend', () => { if (!tplPhoneToggle.checked) return; tplEndDrag(); });
+
+    // Save selection as template
+    async function captureTemplateFromSelection(){
+      try {
+        const nameRaw = (document.getElementById('tplSelName').value || '').trim();
+        let name = nameRaw;
+        if (!name) {
+          const dt = new Date();
+          const pad = (n)=>String(n).padStart(2,'0');
+          name = `tpl_${dt.getFullYear()}${pad(dt.getMonth()+1)}${pad(dt.getDate())}_${pad(dt.getHours())}${pad(dt.getMinutes())}${pad(dt.getSeconds())}`;
+        }
+        if (!tplLastRegion || tplLastRegion[2] <= 0 || tplLastRegion[3] <= 0){
+          statusC.textContent = 'Status: select a region first';
+          return;
+        }
+        const [x, y, width, height] = tplLastRegion;
+        const res = await fetch(`${apiBase}/api/templates/capture`, {
+          method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, monitor: tplSelectedMonitor, x, y, width, height })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusC.textContent = `Status: saved '${name}' to ${data.path}`;
+        document.getElementById('tplSelName').value = '';
+        // Refresh lists and show preview
+        await fetchTemplates();
+        tplListEl.value = name;
+        await loadTemplate(name);
+      } catch (e) {
+        statusC.textContent = `Status: save failed (${e.message})`;
+      }
+    }
+    document.getElementById('btnCaptureTpl').addEventListener('click', captureTemplateFromSelection);
 
     const urlTok = new URLSearchParams(location.search).get('token');
     if (urlTok) { tokenEl.value = urlTok; }
     fetchTemplates();
+    fetchTplMonitors().then(()=>{ updateTplPreviewSrc(); setTplPreviewSize(); });
   </script>
 </body>
 </html>

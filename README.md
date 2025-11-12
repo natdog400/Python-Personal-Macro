@@ -59,6 +59,12 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
   - Injects a global `search_region` into new steps (when present) for faster authoring.
   - Group selectors default to the first available group for quick adds.
 
+- Templates (Web)
+  - Added Live Screen Preview to Templates with `Monitor` and `Size` controls, plus a “Using Phone” toggle to enable touch selection and disable scroll while dragging.
+  - Click‑drag (or touch‑drag) a selection box over the preview; coordinates are mapped to natural pixels regardless of preview size or zoom.
+  - New “Save Selection as Template” workflow: captures the selected region from the chosen monitor and saves it to `images/<name>.png`, then auto‑registers it in `config.json` and shows the preview.
+  - Backed by `GET /api/monitors` and `GET /stream.mjpeg`; capture endpoint `POST /api/templates/capture` stores the image and updates templates.
+
 ## Requirements
 
 - Python 3.8+ (Windows batch launcher checks 3.8+)
@@ -101,6 +107,7 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
   ```
 - Open `http://localhost:8765/` in your browser.
 - Auth: the server reads `server_config.json` for `token`; pages include a “Remember token” checkbox that persists your token across all editors via `localStorage`.
+ - Live preview and region capture require the `mss` package. If the stream or capture returns blank, ensure `mss` is installed and accessible in your Python environment.
 
 ### Python Launcher
 
@@ -158,7 +165,8 @@ This outputs `dist/ImageDetectionBotConsole.exe`, which launches the GUI and sho
 
 - Templates tab:
   - Click Add Template, set a name and image path
-  - Use Capture to grab from screen, or Load Image to pick a file
+  - Use “Save Selection as Template” on the web Templates page: choose a monitor, drag to select a region on the live preview, enter a name, then save.
+  - Alternatively, use GUI capture or Load Image to pick a file
   - Preview auto-updates
 - Sequences tab:
   - Add a sequence, then add steps
@@ -191,44 +199,26 @@ Suggested filenames (drop your PNGs in that folder):
   - `web_groups.png`: Groups editor (list + steps + nested actions)
   - `web_schedules.png`: Schedules page (rows with Enabled/Sequence/Time)
 
-Screenshots are embedded below; place PNGs in `docs/screenshots/` using the shown filenames.
-
-### Screenshot Gallery
+Screenshot links (not embedded):
 
 - GUI
-  - Sequences
-    - ![GUISequenceTab](./docs/screenshots/GUISequenceTab.png?raw=1)
-  - Failsafe
-    - ![GUIFailSafeTab](./docs/screenshots/GUIFailSafeTab.png?raw=1)
-  - Templates
-    - ![GUITemplateTab](./docs/screenshots/GUITemplateTab.png?raw=1)
-  - Template Tester
-    - ![GUITemplateTesterTab](./docs/screenshots/GUITemplateTesterTab.png?raw=1)
-  - Groups
-    - ![GUIGroupsTab](./docs/screenshots/GUIGroupsTab.png?raw=1)
-  - Scheduled Sequences
-    - ![GUIScheduledSequenceTab](./docs/screenshots/GUIScheduledSequenceTab.png?raw=1)
-  - Break Settings
-    - ![GUIBreaksettings](./docs/screenshots/GUIBreaksettings.png?raw=1)
-
+  - [GUISequenceTab](./docs/screenshots/GUISequenceTab.png)
+  - [GUIFailSafeTab](./docs/screenshots/GUIFailSafeTab.png)
+  - [GUITemplateTab](./docs/screenshots/GUITemplateTab.png)
+  - [GUITemplateTesterTab](./docs/screenshots/GUITemplateTesterTab.png)
+  - [GUIGroupsTab](./docs/screenshots/GUIGroupsTab.png)
+  - [GUIScheduledSequenceTab](./docs/screenshots/GUIScheduledSequenceTab.png)
+  - [GUIBreaksettings](./docs/screenshots/GUIBreaksettings.png)
 - Web
-  - Dashboard
-    - ![WEBDashboard](./docs/screenshots/WEBDashboard.png?raw=1)
-  - Sequence Editor
-    - ![WEBSequenceEditor](./docs/screenshots/WEBSequenceEditor.png?raw=1)
-    - ![WEBLoadedSequenceinWEB](./docs/screenshots/WEBLoadedSequenceinWEB.png?raw=1)
-  - Groups Editor
-    - ![WEBGroupsEditor](./docs/screenshots/WEBGroupsEditor.png?raw=1)
-  - Templates Manager
-    - ![WEBTemplatesManager](./docs/screenshots/WEBTemplatesManager.png?raw=1)
-  - Failsafe Settings
-    - ![WEBFailsafeSettings](./docs/screenshots/WEBFailsafeSettings.png?raw=1)
-  - Run Controls (with Break Settings)
-    - ![WEBRunControlswithBreakSettings](./docs/screenshots/WEBRunControlswithBreakSettings.png?raw=1)
-  - Scheduled
-    - ![WEBScheduled](./docs/screenshots/WEBScheduled.png?raw=1)
-  - Select Region (Preview)
-    - ![WebSelectRegion](./docs/screenshots/WebSelectRegion.png?raw=1)
+  - [WEBDashboard](./docs/screenshots/WEBDashboard.png)
+  - [WEBSequenceEditor](./docs/screenshots/WEBSequenceEditor.png)
+  - [WEBLoadedSequenceinWEB](./docs/screenshots/WEBLoadedSequenceinWEB.png)
+  - [WEBGroupsEditor](./docs/screenshots/WEBGroupsEditor.png)
+  - [WEBTemplatesManager](./docs/screenshots/WEBTemplatesManager.png)
+  - [WEBFailsafeSettings](./docs/screenshots/WEBFailsafeSettings.png)
+  - [WEBRunControlswithBreakSettings](./docs/screenshots/WEBRunControlswithBreakSettings.png)
+  - [WEBScheduled](./docs/screenshots/WEBScheduled.png)
+  - [WebSelectRegion](./docs/screenshots/WebSelectRegion.png)
 
 ## Web UI (Editors & Controls)
 
@@ -239,6 +229,7 @@ The project includes a lightweight web server with browser-based editors that mi
   - `Failsafe` (`/static/failsafe.html`): failsafe settings and sequence editor, live preview
   - `Groups` (`/static/groups.html`): group management (sequence-like collections), nested actions, live preview
   - `Controls` (`/static/control.html`): run/stop, non-required-wait toggle, “Run Group”
+  - `Templates` (`/static/templates.html`): templates list, path editor, live screen preview with region selection and “Save Selection as Template”
 
 - Fully implemented in web editors
   - Per-step header controls (Sequences): `find` template, `required`, `confidence`, `timeout`, `monitor`, `Step Loops`, `Detection Strategy`, `Min Inliers`, `Ratio`, `RANSAC`, `Select Search Region`
@@ -247,6 +238,7 @@ The project includes a lightweight web server with browser-based editors that mi
   - Group Call steps: dropdown picker and save in Sequences and Failsafe; adds `{ call_group: "GroupName" }` step
   - Groups editor: CRUD for groups; per-step header (`find`, `required`, `timeout`, save, reorder/delete); nested actions with same controls as sequences/failsafe; “Add Action” palette
   - Live Preview on all editors (Sequences/Failsafe/Groups) with monitor selection; click‑drag selection draws a box and maps to natural image coordinates
+  - Live Preview on Templates with monitor selection; click‑drag selection and “Save Selection as Template” to capture and register a new template
   - Preview “Size” dropdown (640/800/1024/1280) on all editors; region mapping remains accurate regardless of browser zoom or selected size
 
 - Partially implemented / known gaps
@@ -266,6 +258,17 @@ The project includes a lightweight web server with browser-based editors that mi
     - `POST /api/sequences/:name/steps/:idx/actions` → append action
     - `PUT /api/sequences/:name/steps/:idx/actions/:aidx` → update action
     - `DELETE /api/sequences/:name/steps/:idx/actions/:aidx` → delete action
+  - Templates
+    - `GET /api/templates` → list names, paths, existence
+    - `GET /api/templates/:name` → template detail (path, exists)
+    - `PUT /api/templates/:name` → update path for a template
+    - `DELETE /api/templates/:name` → delete template mapping
+    - `GET /api/template-image?name=<name>` → serve the template image
+    - `POST /api/templates` → add a template mapping `{ name, path }`
+    - `POST /api/templates/capture` → capture a selected screen region and save to `images/<name>.png` (or provided `path`), then update the templates map
+  - Preview & Monitors
+    - `GET /api/monitors` → list monitor bounds and indexes
+    - `GET /stream.mjpeg?monitor=<index>` → MJPEG stream of selected monitor (PNG frames)
     - `POST /api/sequences/:name/steps/:idx/actions/reorder` → move an action
   - Failsafe
     - `GET /api/failsafe` → settings

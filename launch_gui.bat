@@ -1,4 +1,6 @@
 @echo off
+:: Ensure working directory is the script's location
+cd /d "%~dp0"
 
 :: Check if Python is installed
 where python >nul 2>nul
@@ -28,9 +30,7 @@ if %ERRORLEVEL% NEQ 0 (
     echo pip is not available. Attempting to install pip...
     python -m ensurepip --default-pip
     if %ERRORLEVEL% NEQ 0 (
-        echo Failed to install pip. Please install pip manually.
-        pause
-        exit /b 1
+        echo Warning: Failed to install pip. Continuing without pip operations.
     )
 )
 
@@ -38,18 +38,14 @@ if %ERRORLEVEL% NEQ 0 (
 echo Updating pip and setuptools...
 python -m pip install --upgrade pip setuptools wheel
 if %ERRORLEVEL% NEQ 0 (
-    echo Failed to update pip and setuptools.
-    pause
-    exit /b 1
+    echo Warning: Failed to update pip/setuptools. Continuing.
 )
 
 :: Install required packages
 echo Installing required packages...
 python -m pip install -r requirements.txt
 if %ERRORLEVEL% NEQ 0 (
-    echo Failed to install required packages.
-    pause
-    exit /b 1
+    echo Warning: Failed to install some packages. GUI may still run.
 )
 
 :: Ensure opencv-contrib-python is available for SIFT support (feature strategy)
@@ -68,10 +64,8 @@ if %ERRORLEVEL% NEQ 0 (
 echo Verifying Python imports...
 python -c "import cv2, pyautogui, PIL, PyQt6, numpy; print('Imports OK')" >nul 2>nul
 if %ERRORLEVEL% NEQ 0 (
-    echo One or more Python packages failed to import. Please check your Python installation.
-    echo Try: python -m pip install --upgrade -r requirements.txt
-    pause
-    exit /b 1
+    echo Warning: One or more Python packages failed to import.
+    echo Try later: python -m pip install --upgrade -r requirements.txt
 )
 
 :: Verify performance capture backend (mss); install if missing
@@ -81,18 +75,7 @@ if %ERRORLEVEL% NEQ 0 (
     python -m pip install --upgrade mss
 )
 
-:: Additional environment checks
-:: Ensure images and subfolders are writable
-if not exist images\temp (
-    mkdir images\temp >nul 2>nul
-)
-> images\temp\write_test.tmp echo test >nul 2>nul
-if not exist images\temp\write_test.tmp (
-    echo Cannot write to images\temp. Please check folder permissions.
-    pause
-    exit /b 1
-)
-del /q images\temp\write_test.tmp >nul 2>nul
+:: Skip pre-flight write tests; GUI handles temp folder creation
 
 :: Basic repo checks
 if not exist bot_gui.py (
@@ -122,9 +105,7 @@ if not exist config.json (
 )
 python -c "import json; json.load(open('config.json')); print('Config OK')" >nul 2>nul
 if %ERRORLEVEL% NEQ 0 (
-    echo config.json is invalid JSON. Please fix or delete it and rerun to regenerate.
-    pause
-    exit /b 1
+    echo Warning: config.json seems invalid. GUI may prompt or recreate entries.
 )
 
 :: Touch log file if missing
@@ -137,7 +118,7 @@ python bot_gui.py %*
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
-    echo An error occurred while running the application.
+    echo Warning: The application exited with an error code.
+    echo You can run launcher.py directly if issues persist.
     pause
-    exit /b 1
 )

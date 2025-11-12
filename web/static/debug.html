@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Debug Logs</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #1e1e1e; color: #ddd; margin: 0; }
+    header { padding: 12px 16px; background: #2b2b2b; border-bottom: 1px solid #3a3a3a; display:flex; gap:16px; align-items:center; }
+    main { display: grid; grid-template-columns: 1fr 320px; gap: 16px; padding: 16px; }
+    .panel { background: #252525; border: 1px solid #3a3a3a; border-radius: 6px; padding: 12px; }
+    label { display: block; margin-bottom: 8px; }
+    input[type=text], input[type=number], select { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #555; background: #1f1f1f; color: #ddd; }
+    button { padding: 8px 12px; border-radius: 4px; border: 1px solid #555; background: #333; color: #eee; cursor: pointer; }
+    button:hover { background: #3d3d3d; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+    small { color: #999; }
+    nav a { color: #9bd; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    #logView { background: #111; border: 1px solid #3a3a3a; border-radius: 6px; padding: 10px; white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; max-height: 70vh; overflow: auto; }
+  </style>
+  </head>
+  <body>
+    <header>
+      <div><strong>Debug Logs</strong></div>
+      <nav style="display:flex; gap:12px">
+        <a href="/">Dashboard</a>
+        <a href="/static/sequences.html">Sequences</a>
+        <a href="/static/groups.html">Groups</a>
+        <a href="/static/control.html">Controls</a>
+        <a href="/static/schedules.html">Schedules</a>
+        <a href="/static/templates.html">Templates</a>
+        <a href="/static/failsafe.html">Failsafe</a>
+        <a href="/static/debug.html">Debug</a>
+      </nav>
+      <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
+        <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
+        <input type="text" id="token" placeholder="Access Token" style="width:260px" />
+      </div>
+    </header>
+    <main>
+      <div class="panel">
+        <div class="row">
+          <label style="width:140px">Tail Lines
+            <input type="number" id="tailLines" min="10" max="5000" value="500" />
+          </label>
+          <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="autoRefresh" /> Auto-refresh</label>
+          <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="autoScroll" checked /> Auto-scroll</label>
+          <button id="btnRefresh">Refresh</button>
+        </div>
+        <div id="logView">Loading...</div>
+        <div style="margin-top:8px"><small id="status">Status: idle</small></div>
+      </div>
+      <div class="panel">
+        <h3>Debug Options</h3>
+        <div class="row">
+          <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="branchTraces" /> Branch Debug Traces</label>
+        </div>
+        <div class="row">
+          <button id="btnSaveDebug">Apply</button>
+        </div>
+        <small id="statusOpt">Status: idle</small>
+      </div>
+    </main>
+
+    <script>
+      const apiBase = '';
+      const tokenEl = document.getElementById('token');
+      const rememberEl = document.getElementById('rememberToken');
+      const statusEl = document.getElementById('status');
+      const statusOptEl = document.getElementById('statusOpt');
+      const tailLinesEl = document.getElementById('tailLines');
+      const autoRefreshEl = document.getElementById('autoRefresh');
+      const autoScrollEl = document.getElementById('autoScroll');
+      const logViewEl = document.getElementById('logView');
+      const btnRefresh = document.getElementById('btnRefresh');
+      const branchTracesEl = document.getElementById('branchTraces');
+      const btnSaveDebug = document.getElementById('btnSaveDebug');
+      let timer = null;
+
+      function authHeaders() {
+        const tok = tokenEl.value.trim();
+        return tok ? { 'Authorization': `Bearer ${tok}` } : {};
+      }
+
+      async function fetchLogs() {
+        const tok = tokenEl.value.trim();
+        if (!tok) { statusEl.textContent = 'Status: enter token'; return; }
+        const n = parseInt(tailLinesEl.value || '500', 10);
+        try {
+          const res = await fetch(`${apiBase}/api/debug-log?lines=${encodeURIComponent(String(n))}`, { headers: authHeaders() });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+          const lines = data.lines || [];
+          logViewEl.textContent = lines.join('\n');
+          statusEl.textContent = `Status: loaded ${lines.length} line(s)`;
+          if (autoScrollEl.checked) {
+            logViewEl.scrollTop = logViewEl.scrollHeight;
+          }
+        } catch (e) {
+          statusEl.textContent = `Status: load failed (${e.message})`;
+        }
+      }
+
+      async function loadDebugOptions() {
+        const tok = tokenEl.value.trim();
+        if (!tok) return;
+        try {
+          const res = await fetch(`${apiBase}/api/config`, { headers: authHeaders() });
+          const cfg = await res.json();
+          const enabled = !!(((cfg.debug || {}).branch_traces) || cfg.debug_branch_traces);
+          branchTracesEl.checked = enabled;
+          statusOptEl.textContent = `Status: branch traces ${enabled ? 'enabled' : 'disabled'}`;
+        } catch (e) {
+          statusOptEl.textContent = `Status: failed to load options (${e.message})`;
+        }
+      }
+
+      async function saveDebugOptions() {
+        const tok = tokenEl.value.trim();
+        if (!tok) { statusOptEl.textContent = 'Status: enter token'; return; }
+        try {
+          const res = await fetch(`${apiBase}/api/debug`, {
+            method: 'POST',
+            headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ branch_traces: !!branchTracesEl.checked })
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+          statusOptEl.textContent = `Status: applied (branch traces ${branchTracesEl.checked ? 'enabled' : 'disabled'})`;
+        } catch (e) {
+          statusOptEl.textContent = `Status: apply failed (${e.message})`;
+        }
+      }
+
+      function startAuto() {
+        if (timer) { clearInterval(timer); timer = null; }
+        if (autoRefreshEl.checked) {
+          timer = setInterval(fetchLogs, 2000);
+        }
+      }
+
+      // Token persistence across pages
+      try {
+        const remembered = (localStorage.getItem('rememberToken') === 'true');
+        rememberEl.checked = remembered;
+        const savedTok = localStorage.getItem('apiToken') || '';
+        if (remembered && savedTok && !tokenEl.value) tokenEl.value = savedTok;
+      } catch (e) {}
+      tokenEl.addEventListener('change', () => {
+        try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
+        fetchLogs(); loadDebugOptions();
+      });
+      rememberEl.addEventListener('change', () => {
+        try {
+          localStorage.setItem('rememberToken', rememberEl.checked ? 'true' : 'false');
+          if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
+        } catch (e) {}
+      });
+      autoRefreshEl.addEventListener('change', startAuto);
+      btnRefresh.addEventListener('click', fetchLogs);
+      btnSaveDebug.addEventListener('click', saveDebugOptions);
+
+      // Initial load
+      fetchLogs();
+      loadDebugOptions();
+      startAuto();
+    </script>
+  </body>
+</html>

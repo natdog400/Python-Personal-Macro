@@ -56,6 +56,12 @@ class Action:
     region: Optional[Tuple[int, int, int, int]] = None
     random: bool = False
     random_region: Optional[Tuple[int, int, int, int]] = None
+    if_template: Optional[str] = None
+    if_confidence: Optional[float] = None
+    if_region: Optional[Tuple[int, int, int, int]] = None
+    if_timeout: float = 0.5
+    else_actions: Optional[List[Any]] = None
+    if_not_actions: Optional[List[Any]] = None
 
 class ImageDetectionBot:
     def __init__(self, confidence: float = 0.8):
@@ -66,6 +72,8 @@ class ImageDetectionBot:
             confidence: Confidence threshold for template matching (0.0 to 1.0)
         """
         self.confidence = confidence
+        # Optional debug flag to trace conditional branches (else vs if_not)
+        self.branch_debug: bool = False
         self.templates: Dict[str, np.ndarray] = {}
         # Cache for feature-based matching (scale/rotation robust)
         self.template_features: Dict[str, Dict[str, Any]] = {}
@@ -763,7 +771,18 @@ class ImageDetectionBot:
                 logger.error("No position provided and no current position set")
                 return False
             position = self.current_position
-            
+        cond_tpl = getattr(action, 'if_template', None)
+        cond_pos = None
+        if cond_tpl:
+            cond_pos = self.find_image(
+                template_name=cond_tpl,
+                region=getattr(action, 'if_region', None),
+                timeout=max(0.0, float(getattr(action, 'if_timeout', 0.5))),
+                confidence=getattr(action, 'if_confidence', None)
+            )
+            if self.branch_debug:
+                logger.info(f"Condition check for '{cond_tpl}' => {'FOUND' if cond_pos is not None else 'NOT FOUND'}{f' at {cond_pos}' if cond_pos is not None else ''} (execute_at_position)")
+
         x, y = position
         
         # If this is a click action and a region is specified, pick a random point in the region
@@ -835,6 +854,29 @@ class ImageDetectionBot:
                 logger.error(f"Unsupported action type: {action.type}")
                 return False
                 
+            # After main action, run conditional follow-ups
+            try:
+                if cond_tpl:
+                    if cond_pos is not None:
+                        # Template found -> run else_actions
+                        else_actions = getattr(action, 'else_actions', None)
+                        if else_actions:
+                            if self.branch_debug:
+                                logger.info(f"[Branch ELSE] {action.type.value} at-position: running {len(else_actions)} follow-up action(s)")
+                            for ea in else_actions:
+                                if not self.execute_action_at_position(ea, position):
+                                    return False
+                    else:
+                        # Template NOT found -> run if_not_actions
+                        if_not_actions = getattr(action, 'if_not_actions', None)
+                        if if_not_actions:
+                            if self.branch_debug:
+                                logger.info(f"[Branch IF_NOT] {action.type.value} at-position: running {len(if_not_actions)} follow-up action(s)")
+                            for na in if_not_actions:
+                                if not self.execute_action_at_position(na, position):
+                                    return False
+            except Exception:
+                pass
             return True
             
         except Exception as e:
@@ -852,10 +894,42 @@ class ImageDetectionBot:
             bool: True if action was executed successfully, False otherwise
         """
         try:
+            cond_tpl = getattr(action, 'if_template', None)
+            cond_pos = None
+            if cond_tpl:
+                cond_pos = self.find_image(
+                    template_name=cond_tpl,
+                    region=getattr(action, 'if_region', None),
+                    timeout=max(0.0, float(getattr(action, 'if_timeout', 0.5))),
+                    confidence=getattr(action, 'if_confidence', None)
+                )
+                if self.branch_debug:
+                    logger.info(f"Condition check for '{cond_tpl}' => {'FOUND' if cond_pos is not None else 'NOT FOUND'}{f' at {cond_pos}' if cond_pos is not None else ''} (execute_action)")
             if action.type == ActionType.MOVE and action.x is not None and action.y is not None:
                 # For MOVE action with absolute coordinates
                 self.current_position = (action.x, action.y)
                 self.move_to(action.x, action.y, duration=action.duration)
+                # After main action, run conditional follow-ups
+                try:
+                    if cond_tpl:
+                        if cond_pos is not None:
+                            else_actions = getattr(action, 'else_actions', None)
+                            if else_actions:
+                                if self.branch_debug:
+                                    logger.info(f"[Branch ELSE] {action.type.value}: running {len(else_actions)} follow-up action(s)")
+                                for ea in else_actions:
+                                    if not self.execute_action(ea):
+                                        return False
+                        else:
+                            if_not_actions = getattr(action, 'if_not_actions', None)
+                            if if_not_actions:
+                                if self.branch_debug:
+                                    logger.info(f"[Branch IF_NOT] {action.type.value}: running {len(if_not_actions)} follow-up action(s)")
+                                for na in if_not_actions:
+                                    if not self.execute_action(na):
+                                        return False
+                except Exception:
+                    pass
                 return True
             elif action.type == ActionType.MOVE_TO:
                 try:
@@ -893,7 +967,27 @@ class ImageDetectionBot:
                     # Verify the final position
                     final_pos = pyautogui.position()
                     logger.info(f"Final mouse position after move: {final_pos}")
-                    
+                    # After main action, run conditional follow-ups
+                    try:
+                        if cond_tpl:
+                            if cond_pos is not None:
+                                else_actions = getattr(action, 'else_actions', None)
+                                if else_actions:
+                                    if self.branch_debug:
+                                        logger.info(f"[Branch ELSE] {action.type.value}: running {len(else_actions)} follow-up action(s)")
+                                    for ea in else_actions:
+                                        if not self.execute_action(ea):
+                                            return False
+                            else:
+                                if_not_actions = getattr(action, 'if_not_actions', None)
+                                if if_not_actions:
+                                    if self.branch_debug:
+                                        logger.info(f"[Branch IF_NOT] {action.type.value}: running {len(if_not_actions)} follow-up action(s)")
+                                    for na in if_not_actions:
+                                        if not self.execute_action(na):
+                                            return False
+                    except Exception:
+                        pass
                     return True
                 except Exception as e:
                     logger.error(f"Error in MOVE_TO action: {str(e)}")
@@ -950,6 +1044,27 @@ class ImageDetectionBot:
             else:
                 # For other actions, use execute_action_at_position with current position
                 return self.execute_action_at_position(action, self.current_position)
+            # After main CLICK action, run conditional follow-ups
+            try:
+                if cond_tpl:
+                    if cond_pos is not None:
+                        else_actions = getattr(action, 'else_actions', None)
+                        if else_actions:
+                            if self.branch_debug:
+                                logger.info(f"[Branch ELSE] {action.type.value}: running {len(else_actions)} follow-up action(s)")
+                            for ea in else_actions:
+                                if not self.execute_action(ea):
+                                    return False
+                    else:
+                        if_not_actions = getattr(action, 'if_not_actions', None)
+                        if if_not_actions:
+                            if self.branch_debug:
+                                logger.info(f"[Branch IF_NOT] {action.type.value}: running {len(if_not_actions)} follow-up action(s)")
+                            for na in if_not_actions:
+                                if not self.execute_action(na):
+                                    return False
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"Error executing {action.type.value if hasattr(action.type, 'value') else action.type} action: {str(e)}")
             return False
@@ -996,7 +1111,68 @@ def parse_action(action_dict: Dict[str, Any]) -> Action:
         # Support legacy key 'action' as well as 'type'
         raw_type = action_dict.get('type', action_dict.get('action'))
         action_type = ActionType(raw_type)
-        action_args = {k: v for k, v in action_dict.items() if k not in ('type', 'action')}
+        action_args = {k: v for k, v in action_dict.items() if k not in ('type', 'action', 'if', 'else', 'if_not')}
+        cond = action_dict.get('if')
+        if isinstance(cond, dict):
+            tpl = cond.get('template') or cond.get('name')
+            if tpl:
+                action_args['if_template'] = tpl
+            if 'confidence' in cond:
+                action_args['if_confidence'] = cond.get('confidence')
+            if 'timeout' in cond:
+                try:
+                    action_args['if_timeout'] = float(cond.get('timeout'))
+                except Exception:
+                    pass
+            reg = cond.get('region') or cond.get('search_region')
+            if reg and (isinstance(reg, (list, tuple)) and len(reg) == 4):
+                action_args['if_region'] = tuple(reg)
+        # Support both legacy 'else' and new 'else_actions' keys
+        els = action_dict.get('else')
+        els2 = action_dict.get('else_actions')
+        else_actions: List[Action] = []
+        # Parse legacy 'else' field
+        if isinstance(els, dict):
+            else_actions.append(parse_action(els))
+        elif isinstance(els, list):
+            for item in els:
+                if isinstance(item, dict):
+                    else_actions.append(parse_action(item))
+                elif isinstance(item, Action):
+                    else_actions.append(item)
+        # Parse new 'else_actions' field
+        if isinstance(els2, dict):
+            else_actions.append(parse_action(els2))
+        elif isinstance(els2, list):
+            for item in els2:
+                if isinstance(item, dict):
+                    else_actions.append(parse_action(item))
+                elif isinstance(item, Action):
+                    else_actions.append(item)
+        if else_actions:
+            action_args['else_actions'] = else_actions
+        # Parse 'if_not' and 'if_not_actions' keys for actions to run when condition not met
+        nots = action_dict.get('if_not')
+        nots2 = action_dict.get('if_not_actions')
+        if_not_actions: List[Action] = []
+        if isinstance(nots, dict):
+            if_not_actions.append(parse_action(nots))
+        elif isinstance(nots, list):
+            for item in nots:
+                if isinstance(item, dict):
+                    if_not_actions.append(parse_action(item))
+                elif isinstance(item, Action):
+                    if_not_actions.append(item)
+        if isinstance(nots2, dict):
+            if_not_actions.append(parse_action(nots2))
+        elif isinstance(nots2, list):
+            for item in nots2:
+                if isinstance(item, dict):
+                    if_not_actions.append(parse_action(item))
+                elif isinstance(item, Action):
+                    if_not_actions.append(item)
+        if if_not_actions:
+            action_args['if_not_actions'] = if_not_actions
         return Action(type=action_type, **action_args)
     except (KeyError, ValueError) as e:
         logger.error(f"Error parsing action: {str(e)}")

@@ -275,6 +275,34 @@ class WebHandler(BaseHTTPRequestHandler):
             # Minimal status for now
             return self._write_json({"status": "ok", "time": int(time.time())})
 
+        # Debug log tail
+        if path == '/api/debug-log':
+            if not self._check_auth():
+                return self._write_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+            try:
+                qs = urllib.parse.parse_qs(parsed.query)
+                try:
+                    max_lines = int((qs.get('lines') or ['500'])[0])
+                except Exception:
+                    max_lines = 500
+                max_lines = max(1, min(max_lines, 5000))
+                log_path = os.path.join(PROJECT_ROOT, 'bot_debug.log')
+                if not os.path.exists(log_path):
+                    return self._write_json({"exists": False, "lines": []})
+                # Read tail lines (simple approach, acceptable for moderate sizes)
+                with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                lines = content.splitlines()
+                tail = lines[-max_lines:]
+                return self._write_json({
+                    "exists": True,
+                    "lines": tail,
+                    "count": len(tail),
+                    "total": len(lines)
+                })
+            except Exception as e:
+                return self._write_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
         # Scheduled sequences
         if path == '/api/schedules':
             if not self._check_auth():
@@ -800,6 +828,60 @@ class WebHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._write_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+        # Capture a screen region and save as a template image
+        if path == '/api/templates/capture':
+            try:
+                payload = json.loads(body.decode('utf-8')) if body else {}
+                name = (payload.get('name') or '').strip()
+                # Region params relative to the selected monitor's coordinate space
+                mon_idx = int(payload.get('monitor', 0))
+                x = int(payload.get('x', -1))
+                y = int(payload.get('y', -1))
+                w = int(payload.get('width', 0))
+                h = int(payload.get('height', 0))
+                if not name:
+                    return self._write_json({"error": "name required"}, HTTPStatus.BAD_REQUEST)
+                if x < 0 or y < 0 or w <= 0 or h <= 0:
+                    return self._write_json({"error": "invalid region"}, HTTPStatus.BAD_REQUEST)
+                if mss is None:
+                    return self._write_json({"error": "mss not available"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                # Grab the region
+                with mss.mss() as sct:
+                    if mon_idx < 0 or mon_idx >= len(sct.monitors):
+                        mon_idx = 0
+                    monitor = sct.monitors[mon_idx]
+                    region = {
+                        'left': int(monitor.get('left', 0)) + x,
+                        'top': int(monitor.get('top', 0)) + y,
+                        'width': max(1, int(w)),
+                        'height': max(1, int(h))
+                    }
+                    img = sct.grab(region)
+                    png = mss.tools.to_png(img.rgb, img.size)
+                # Determine output path (default to images/<name>.png)
+                out_rel = (payload.get('path') or '').strip()
+                if not out_rel:
+                    safe = ''.join([c for c in name if c.isalnum() or c in ('-', '_')])
+                    if not safe:
+                        safe = f"tpl_{int(time.time())}"
+                    out_rel = f"images/{safe}.png"
+                out_full = os.path.join(PROJECT_ROOT, out_rel) if not os.path.isabs(out_rel) else out_rel
+                os.makedirs(os.path.dirname(out_full), exist_ok=True)
+                with open(out_full, 'wb') as f:
+                    f.write(png)
+                # Update config template mapping
+                cfg = read_config_json()
+                tpl_map = cfg.get('templates', {})
+                tpl_map[name] = out_rel
+                cfg['templates'] = tpl_map
+                write_config_json(cfg)
+                trigger_reload_config_ipc()
+                return self._write_json({"ok": True, "path": out_rel})
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+                return
+            except Exception as e:
+                return self._write_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
         # Create or update a template mapping (add new)
         if path == '/api/templates':
             try:
@@ -962,6 +1044,25 @@ class WebHandler(BaseHTTPRequestHandler):
                 write_config_json(cfg)
                 trigger_reload_config_ipc()
                 return self._write_json({"ok": True})
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+                return
+            except Exception as e:
+                return self._write_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+        # Update debug options (e.g., branch traces)
+        if path == '/api/debug':
+            try:
+                cfg = read_config_json()
+                dbg = cfg.get('debug', {}) or {}
+                if 'branch_traces' in payload:
+                    val = bool(payload.get('branch_traces'))
+                    dbg['branch_traces'] = val
+                    cfg['debug'] = dbg
+                    # Mirror legacy top-level flag for compatibility
+                    cfg['debug_branch_traces'] = val
+                write_config_json(cfg)
+                trigger_reload_config_ipc()
+                return self._write_json({"ok": True, "debug": cfg.get('debug', {}), "debug_branch_traces": cfg.get('debug_branch_traces')})
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
                 return
             except Exception as e:

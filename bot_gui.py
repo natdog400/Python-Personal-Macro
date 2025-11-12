@@ -1034,6 +1034,18 @@ class ActionEditor(QWidget):
     def __init__(self, action_data: Optional[dict] = None, parent=None):
         super().__init__(parent)
         self.action_data = action_data or {"type": "click"}
+        self.templates = []
+        # Try to inherit templates from parent StepEditor
+        try:
+            p = self.parent()
+            while p is not None and p.__class__.__name__ != 'StepEditor':
+                p = p.parent()
+            if p is not None and hasattr(p, 'templates'):
+                self.templates = list(getattr(p, 'templates') or [])
+        except Exception:
+            pass
+        # Track else action editors
+        self.else_action_widgets = []
         self.init_ui()
     
     def init_ui(self):
@@ -1050,8 +1062,14 @@ class ActionEditor(QWidget):
         
         # Action parameters
         self.params_widget = QWidget()
-        self.params_layout = QHBoxLayout(self.params_widget)
+        # Use vertical layout to stack main params and conditional group
+        self.params_layout = QVBoxLayout(self.params_widget)
         self.params_layout.setContentsMargins(0, 0, 0, 0)
+        try:
+            # Allow the params area to grow vertically with its content
+            self.params_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        except Exception:
+            pass
         
         # Action buttons
         btn_frame = QFrame()
@@ -1121,117 +1139,192 @@ class ActionEditor(QWidget):
         action_type = self.type_combo.currentText()
         
         # Add appropriate parameter controls based on action type
+        main_params = QWidget()
+        main_layout = QHBoxLayout(main_params)
+        main_layout.setContentsMargins(0,0,0,0)
         if action_type == "click":
-            self.params_layout.addWidget(QLabel("Button:"))
+            main_layout.addWidget(QLabel("Button:"))
             button_combo = QComboBox()
             button_combo.addItems(["left", "middle", "right"])
             button_combo.setCurrentText(self.action_data.get("button", "left"))
             button_combo.currentTextChanged.connect(
                 lambda text, key="button": self.update_action_param(key, text))
-            self.params_layout.addWidget(button_combo)
+            main_layout.addWidget(button_combo)
             
-            self.params_layout.addWidget(QLabel("Clicks:"))
+            main_layout.addWidget(QLabel("Clicks:"))
             clicks_spin = QSpinBox()
             clicks_spin.setRange(1, 10)
             clicks_spin.setValue(self.action_data.get("clicks", 1))
             clicks_spin.valueChanged.connect(
                 lambda value, key="clicks": self.update_action_param(key, value))
-            self.params_layout.addWidget(clicks_spin)
+            main_layout.addWidget(clicks_spin)
             
         elif action_type in ["type", "key_press"]:
             param_name = "text" if action_type == "type" else "key"
-            self.params_layout.addWidget(QLabel(f"{param_name.title()}: "))
+            main_layout.addWidget(QLabel(f"{param_name.title()}: "))
             text_edit = QLineEdit(self.action_data.get(param_name, ""))
             text_edit.textChanged.connect(
                 lambda text, key=param_name: self.update_action_param(key, text))
-            self.params_layout.addWidget(text_edit)
+            main_layout.addWidget(text_edit)
             
         elif action_type == "wait":
-            self.params_layout.addWidget(QLabel("Seconds:"))
+            main_layout.addWidget(QLabel("Seconds:"))
             seconds_spin = QDoubleSpinBox()
             seconds_spin.setRange(0.1, 60.0)
             seconds_spin.setValue(self.action_data.get("seconds", 1.0))
             seconds_spin.setSingleStep(0.1)
             seconds_spin.valueChanged.connect(
                 lambda value, key="seconds": self.update_action_param(key, value))
-            self.params_layout.addWidget(seconds_spin)
+            main_layout.addWidget(seconds_spin)
             
         elif action_type in ["move", "move_to"]:
             # Add X coordinate
-            self.params_layout.addWidget(QLabel("X:"))
+            main_layout.addWidget(QLabel("X:"))
             x_spin = QSpinBox()
             x_spin.setRange(0, 10000)
             x_spin.setValue(self.action_data.get("x", 0))
             x_spin.valueChanged.connect(
                 lambda value, key="x": self.update_action_param(key, value))
-            self.params_layout.addWidget(x_spin)
+            main_layout.addWidget(x_spin)
             
             # Add Y coordinate
-            self.params_layout.addWidget(QLabel("Y:"))
+            main_layout.addWidget(QLabel("Y:"))
             y_spin = QSpinBox()
             y_spin.setRange(0, 10000)
             y_spin.setValue(self.action_data.get("y", 0))
             y_spin.valueChanged.connect(
                 lambda value, key="y": self.update_action_param(key, value))
-            self.params_layout.addWidget(y_spin)
+            main_layout.addWidget(y_spin)
             
             # Toggle random checkbox
             self.random_checkbox = QCheckBox("Toggle Random")
             self.random_checkbox.setChecked(self.action_data.get("random", False))
             self.random_checkbox.toggled.connect(lambda checked: self.update_action_param("random", checked) or self.update_params())
-            self.params_layout.addWidget(self.random_checkbox)
+            main_layout.addWidget(self.random_checkbox)
 
             # If random is checked, allow region selection
             if self.action_data.get("random", False):
                 region_btn = QPushButton("Select Region")
                 region_btn.clicked.connect(self.select_random_region)
-                self.params_layout.addWidget(region_btn)
+                main_layout.addWidget(region_btn)
                 self.random_region_label = QLabel()
-                self.params_layout.addWidget(self.random_region_label)
+                main_layout.addWidget(self.random_region_label)
                 self.update_random_region_label()
             else:
                 # Show info
                 info_label = QLabel("Moves to center of detected template")
-                self.params_layout.addWidget(info_label)
+                main_layout.addWidget(info_label)
 
             # Duration
-            self.params_layout.addWidget(QLabel("Duration (s):"))
+            main_layout.addWidget(QLabel("Duration (s):"))
             duration_spin = QDoubleSpinBox()
             duration_spin.setRange(0.0, 10.0)
             duration_spin.setSingleStep(0.1)
             duration_spin.setValue(self.action_data.get("duration", 0.0))
             duration_spin.valueChanged.connect(
                 lambda value, key="duration": self.update_action_param(key, value))
-            self.params_layout.addWidget(duration_spin)
+            main_layout.addWidget(duration_spin)
         
         elif action_type == "scroll":
-            self.params_layout.addWidget(QLabel("Pixels:"))
+            main_layout.addWidget(QLabel("Pixels:"))
             pixels_spin = QSpinBox()
             pixels_spin.setRange(-1000, 1000)
             pixels_spin.setValue(self.action_data.get("pixels", 0))
             pixels_spin.valueChanged.connect(
                 lambda value, key="pixels": self.update_action_param(key, value))
-            self.params_layout.addWidget(pixels_spin)
+            main_layout.addWidget(pixels_spin)
             
         elif action_type == "click_and_hold":
             # Add button selection
-            self.params_layout.addWidget(QLabel("Button:"))
+            main_layout.addWidget(QLabel("Button:"))
             button_combo = QComboBox()
             button_combo.addItems(["left", "middle", "right"])
             button_combo.setCurrentText(self.action_data.get("button", "left"))
             button_combo.currentTextChanged.connect(
                 lambda text, key="button": self.update_action_param(key, text))
-            self.params_layout.addWidget(button_combo)
+            main_layout.addWidget(button_combo)
             
             # Add duration control
-            self.params_layout.addWidget(QLabel("Hold for (s):"))
+            main_layout.addWidget(QLabel("Hold for (s):"))
             duration_spin = QDoubleSpinBox()
             duration_spin.setRange(0.1, 60.0)
             duration_spin.setSingleStep(0.1)
             duration_spin.setValue(self.action_data.get("duration", 1.0))
             duration_spin.valueChanged.connect(
                 lambda value, key="duration": self.update_action_param(key, value))
-            self.params_layout.addWidget(duration_spin)
+            main_layout.addWidget(duration_spin)
+
+        # Add the main params row
+        self.params_layout.addWidget(main_params)
+
+        # Conditional IF/ELSE controls
+        try:
+            cond_group = QGroupBox("Condition")
+            try:
+                # Prevent the condition group from collapsing when more actions exist
+                cond_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+                cond_group.setMinimumHeight(100)
+            except Exception:
+                pass
+            cond_layout = QVBoxLayout(cond_group)
+            cond_layout.setContentsMargins(6,6,6,6)
+            # IF row
+            if_row = QHBoxLayout()
+            if_row.addWidget(QLabel("If Template:"))
+            self.if_combo = QComboBox()
+            self.if_combo.addItems([""] + list(self.templates))
+            # Preload saved value
+            self.if_combo.setCurrentText(self.action_data.get("if_template", ""))
+            self.if_combo.currentTextChanged.connect(lambda val: self.update_action_param("if_template", val))
+            if_row.addWidget(self.if_combo, 1)
+            cond_layout.addLayout(if_row)
+
+            # IF region selection row
+            if_region_row = QHBoxLayout()
+            self.if_region_btn = QPushButton("Set IF Region")
+            self.if_region_btn.setToolTip("Limit condition template search to a selected region")
+            self.if_region_btn.clicked.connect(self.select_if_region)
+            if_region_row.addWidget(self.if_region_btn)
+            self.if_region_label = QLabel("IF Region: (none)")
+            self.update_if_region_label()
+            if_region_row.addWidget(self.if_region_label, 1)
+            # Optional clear button
+            clear_if_btn = QPushButton("Clear")
+            clear_if_btn.setToolTip("Clear IF search region")
+            clear_if_btn.clicked.connect(lambda: (self.action_data.pop('if_region', None), self.update_if_region_label()))
+            if_region_row.addWidget(clear_if_btn)
+            cond_layout.addLayout(if_region_row)
+
+            # Compact Else Actions header only (count + pop-out button)
+            else_header_row = QHBoxLayout()
+            try:
+                count = len(self.action_data.get('else_actions', []) or [])
+            except Exception:
+                count = 0
+            self.else_count_label = QLabel(f"Else Actions: {count}")
+            else_header_row.addWidget(self.else_count_label, 0)
+            edit_else_btn = QPushButton("Edit Else Actions…")
+            edit_else_btn.setToolTip("Open a window to edit Else Actions")
+            edit_else_btn.clicked.connect(self.open_else_actions_dialog)
+            else_header_row.addWidget(edit_else_btn, 0)
+            cond_layout.addLayout(else_header_row)
+
+            # If-Not Actions header (count + pop-out button)
+            ifnot_header_row = QHBoxLayout()
+            try:
+                not_count = len(self.action_data.get('if_not_actions', []) or [])
+            except Exception:
+                not_count = 0
+            self.ifnot_count_label = QLabel(f"If-Not Actions: {not_count}")
+            ifnot_header_row.addWidget(self.ifnot_count_label, 0)
+            edit_ifnot_btn = QPushButton("Edit If-Not Actions…")
+            edit_ifnot_btn.setToolTip("Open a window to edit actions when IF template is not found")
+            edit_ifnot_btn.clicked.connect(self.open_if_not_actions_dialog)
+            ifnot_header_row.addWidget(edit_ifnot_btn, 0)
+            cond_layout.addLayout(ifnot_header_row)
+            self.params_layout.addWidget(cond_group)
+        except Exception:
+            pass
     
     def update_action_param(self, key: str, value: Any):
         self.action_data[key] = value
@@ -1239,7 +1332,192 @@ class ActionEditor(QWidget):
     def get_action_data(self) -> dict:
         action_type = self.type_combo.currentText()
         self.action_data["type"] = action_type
+        # Collect else actions if any
+        try:
+            if hasattr(self, 'else_action_widgets') and isinstance(self.else_action_widgets, list) and len(self.else_action_widgets) > 0:
+                ea_list = []
+                for w in self.else_action_widgets:
+                    try:
+                        ea_list.append(w.get_action_data())
+                    except Exception:
+                        pass
+                if ea_list:
+                    self.action_data['else_actions'] = ea_list
+            # If no inline editors are present, preserve existing else_actions
+        except Exception:
+            pass
         return self.action_data
+
+    def refresh_else_actions_inline(self):
+        """Update Else Actions count label to reflect current action_data."""
+        try:
+            count = len(self.action_data.get('else_actions', []) or [])
+            if hasattr(self, 'else_count_label') and self.else_count_label is not None:
+                self.else_count_label.setText(f"Else Actions: {count}")
+            # Also update If-Not Actions count label if present
+            not_count = len(self.action_data.get('if_not_actions', []) or [])
+            if hasattr(self, 'ifnot_count_label') and self.ifnot_count_label is not None:
+                self.ifnot_count_label.setText(f"If-Not Actions: {not_count}")
+        except Exception:
+            pass
+
+    def open_else_actions_dialog(self):
+        """Open a dialog window to edit Else Actions for this action."""
+        try:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Edit Else Actions")
+            layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(8,8,8,8)
+            layout.setSpacing(8)
+
+            # Container and scroll for dialog actions
+            dlg_container = QWidget()
+            dlg_v = QVBoxLayout(dlg_container)
+            dlg_v.setContentsMargins(6,6,6,6)
+            dlg_v.setSpacing(6)
+
+            # Local list of editors
+            local_widgets = []
+            for ea in list(self.action_data.get('else_actions', []) or []):
+                try:
+                    w = MiniActionEditor(ea, parent=self)
+                    local_widgets.append(w)
+                    dlg_v.addWidget(w)
+                except Exception:
+                    pass
+            # Add button
+            add_btn = QPushButton("Add Else Action")
+            def _add_local():
+                w = MiniActionEditor({"type":"click"}, parent=self)
+                local_widgets.append(w)
+                dlg_v.addWidget(w)
+                try:
+                    sb = dlg_scroll.verticalScrollBar()
+                    if sb is not None:
+                        sb.setValue(sb.maximum())
+                except Exception:
+                    pass
+            add_btn.clicked.connect(_add_local)
+            layout.addWidget(add_btn)
+
+            dlg_scroll = QScrollArea()
+            dlg_scroll.setWidgetResizable(True)
+            dlg_scroll.setWidget(dlg_container)
+            try:
+                dlg_scroll.setVerticalScrollBarPolicy(_Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+                dlg_scroll.setHorizontalScrollBarPolicy(_Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                dlg_scroll.setFocusPolicy(_Qt.FocusPolicy.StrongFocus)
+            except Exception:
+                pass
+            dlg_scroll.setMinimumHeight(260)
+            layout.addWidget(dlg_scroll)
+
+            # Button box
+            button_box = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+                parent=dialog
+            )
+            layout.addWidget(button_box)
+
+            def on_save():
+                new_list = []
+                for w in local_widgets:
+                    try:
+                        new_list.append(w.get_action_data())
+                    except Exception:
+                        pass
+                self.action_data['else_actions'] = new_list
+                # Update inline UI to reflect changes
+                self.refresh_else_actions_inline()
+                dialog.accept()
+            def on_cancel():
+                dialog.reject()
+            try:
+                button_box.accepted.connect(on_save)
+                button_box.rejected.connect(on_cancel)
+            except Exception:
+                pass
+
+            dialog.exec()
+        except Exception:
+            pass
+
+    def open_if_not_actions_dialog(self):
+        """Open a dialog window to edit actions when IF template is NOT found."""
+        try:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Edit If-Not Actions")
+            layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(8,8,8,8)
+            layout.setSpacing(8)
+
+            dlg_container = QWidget()
+            dlg_v = QVBoxLayout(dlg_container)
+            dlg_v.setContentsMargins(6,6,6,6)
+            dlg_v.setSpacing(6)
+
+            local_widgets = []
+            for na in list(self.action_data.get('if_not_actions', []) or []):
+                try:
+                    w = MiniActionEditor(na, parent=self)
+                    local_widgets.append(w)
+                    dlg_v.addWidget(w)
+                except Exception:
+                    pass
+
+            add_btn = QPushButton("Add If-Not Action")
+            def _add_local():
+                w = MiniActionEditor({"type":"click"}, parent=self)
+                local_widgets.append(w)
+                dlg_v.addWidget(w)
+                try:
+                    sb = dlg_scroll.verticalScrollBar()
+                    if sb is not None:
+                        sb.setValue(sb.maximum())
+                except Exception:
+                    pass
+            add_btn.clicked.connect(_add_local)
+            layout.addWidget(add_btn)
+
+            dlg_scroll = QScrollArea()
+            dlg_scroll.setWidgetResizable(True)
+            dlg_scroll.setWidget(dlg_container)
+            try:
+                dlg_scroll.setVerticalScrollBarPolicy(_Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+                dlg_scroll.setHorizontalScrollBarPolicy(_Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                dlg_scroll.setFocusPolicy(_Qt.FocusPolicy.StrongFocus)
+            except Exception:
+                pass
+            dlg_scroll.setMinimumHeight(260)
+            layout.addWidget(dlg_scroll)
+
+            button_box = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+                parent=dialog
+            )
+            layout.addWidget(button_box)
+
+            def on_save():
+                new_list = []
+                for w in local_widgets:
+                    try:
+                        new_list.append(w.get_action_data())
+                    except Exception:
+                        pass
+                self.action_data['if_not_actions'] = new_list
+                self.refresh_else_actions_inline()
+                dialog.accept()
+            def on_cancel():
+                dialog.reject()
+            try:
+                button_box.accepted.connect(on_save)
+                button_box.rejected.connect(on_cancel)
+            except Exception:
+                pass
+
+            dialog.exec()
+        except Exception:
+            pass
     
     def move_up(self):
         """Move this action up in the list."""
@@ -1305,6 +1583,183 @@ class ActionEditor(QWidget):
             self.random_region_label.setText(f"Region: ({x}, {y}, {w}x{h})")
         else:
             self.random_region_label.setText("Region: None (random move disabled)")
+
+    def select_if_region(self):
+        """Capture and set if_region for conditional template search."""
+        try:
+            dialog = ScreenCaptureDialog(self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                rect = dialog.get_capture_rect()
+                if rect and rect.isValid():
+                    self.action_data['if_region'] = [rect.x(), rect.y(), rect.width(), rect.height()]
+                else:
+                    self.action_data.pop('if_region', None)
+                self.update_if_region_label()
+        except Exception:
+            pass
+
+    def update_if_region_label(self):
+        try:
+            rr = self.action_data.get('if_region')
+            if isinstance(rr, (list, tuple)) and len(rr) == 4:
+                x, y, w, h = rr
+                txt = f"IF Region: ({x}, {y}, {w}x{h})"
+            else:
+                txt = "IF Region: (none)"
+            if hasattr(self, 'if_region_label') and isinstance(self.if_region_label, QLabel):
+                self.if_region_label.setText(txt)
+        except Exception:
+            pass
+
+class MiniActionEditor(QWidget):
+    """Minimal nested action editor used for else_actions lists."""
+    def __init__(self, action_data: Optional[dict] = None, parent=None):
+        super().__init__(parent)
+        self.action_data = action_data or {"type": "click"}
+        self.params = {}
+        self.init_ui()
+
+    def init_ui(self):
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0,0,0,0)
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["click", "move", "move_to", "right_click", "double_click", "type", "key_press", "wait", "scroll", "click_and_hold"])
+        self.type_combo.setCurrentText(self.action_data.get("type", "click"))
+        lay.addWidget(QLabel("Else:"))
+        lay.addWidget(self.type_combo)
+        # Container for dynamic params
+        self.params_container = QWidget()
+        self.params_layout = QHBoxLayout(self.params_container)
+        self.params_layout.setContentsMargins(0,0,0,0)
+        lay.addWidget(self.params_container, 1)
+        # Remove button only (no reordering inside nested)
+        rm = QPushButton('×'); rm.setFixedSize(24,24)
+        rm.clicked.connect(self.remove_self)
+        lay.addWidget(rm)
+        # Build initial params and hook type change
+        self.rebuild_params(self.type_combo.currentText())
+        self.type_combo.currentTextChanged.connect(self.on_type_change)
+
+    def update_param(self, key: str, value: Any):
+        self.action_data[key] = value
+
+    def get_action_data(self) -> dict:
+        self.action_data['type'] = self.type_combo.currentText()
+        return self.action_data
+
+    def remove_self(self):
+        parent = self.parent()
+        # Remove from container and parent's list
+        try:
+            if hasattr(parent, 'else_action_widgets'):
+                parent.else_action_widgets = [w for w in parent.else_action_widgets if w is not self]
+        except Exception:
+            pass
+        self.setParent(None)
+        self.deleteLater()
+
+    def clear_params(self):
+        try:
+            # Remove all widgets from params layout
+            while self.params_layout.count():
+                item = self.params_layout.takeAt(0)
+                w = item.widget()
+                if w:
+                    w.deleteLater()
+            self.params.clear()
+        except Exception:
+            self.params = {}
+
+    def rebuild_params(self, t: str):
+        self.clear_params()
+        # Helper creators bind to params_layout
+        def add_label(text):
+            self.params_layout.addWidget(QLabel(text))
+        def add_spin(label, key, rng=(0,10000), val=0, dble=False):
+            add_label(label)
+            if dble:
+                w = QDoubleSpinBox(); w.setRange(float(rng[0]), float(rng[1])); w.setSingleStep(0.1); w.setValue(float(val))
+            else:
+                w = QSpinBox(); w.setRange(int(rng[0]), int(rng[1])); w.setValue(int(val))
+            w.valueChanged.connect(lambda v, k=key: self.update_param(k, v))
+            self.params[key] = w
+            self.params_layout.addWidget(w)
+        def add_text(label, key, val=""):
+            add_label(label)
+            w = QLineEdit(str(val)); w.textChanged.connect(lambda tt, k=key: self.update_param(k, tt))
+            self.params[key] = w
+            self.params_layout.addWidget(w)
+        def add_btn_combo():
+            add_label("Button:")
+            w = QComboBox(); w.addItems(["left","middle","right"]); w.setCurrentText(self.action_data.get("button","left"))
+            w.currentTextChanged.connect(lambda tbtn: self.update_param("button", tbtn))
+            self.params['button'] = w
+            self.params_layout.addWidget(w)
+        # Build minimal param set based on type
+        if t == 'click':
+            add_btn_combo(); add_spin('Clicks:', 'clicks', (1,10), self.action_data.get('clicks',1))
+        elif t in ('move','move_to'):
+            add_spin('X:', 'x', (0,10000), self.action_data.get('x',0))
+            add_spin('Y:', 'y', (0,10000), self.action_data.get('y',0))
+            add_spin('Duration:', 'duration', (0,10), self.action_data.get('duration',0.0), dble=True)
+            # Random toggle and region for move_to
+            if t == 'move_to':
+                # Random checkbox
+                add_label('Random:')
+                rand_cb = QCheckBox()
+                rand_cb.setChecked(bool(self.action_data.get('random', False)))
+                rand_cb.stateChanged.connect(lambda s: self.update_param('random', bool(s)))
+                self.params['random'] = rand_cb
+                self.params_layout.addWidget(rand_cb)
+                # Set Random Region button
+                btn = QPushButton('Set Random Region')
+                btn.clicked.connect(self.select_random_region)
+                self.params_layout.addWidget(btn)
+                # Readout label
+                self.random_readout = QLabel()
+                self.update_random_region_label()
+                self.params_layout.addWidget(self.random_readout)
+        elif t == 'wait':
+            add_spin('Seconds:', 'seconds', (0,60), self.action_data.get('seconds',1.0), dble=True)
+        elif t == 'scroll':
+            add_spin('Pixels:', 'pixels', (-1000,1000), self.action_data.get('pixels',0))
+        elif t in ('type','key_press'):
+            add_text('Text:' if t=='type' else 'Key:', 'text' if t=='type' else 'key', self.action_data.get('text' if t=='type' else 'key',''))
+        else:
+            # No extra params for right_click/double_click/click_and_hold here
+            pass
+
+    def on_type_change(self, new_type: str):
+        # Update stored type and refresh fields
+        self.action_data['type'] = new_type
+        self.rebuild_params(new_type)
+
+    def select_random_region(self):
+        """Capture and set a random_region for this nested else action."""
+        try:
+            dialog = ScreenCaptureDialog(self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                rect = dialog.get_capture_rect()
+                if rect and rect.isValid():
+                    self.action_data['random_region'] = [rect.x(), rect.y(), rect.width(), rect.height()]
+                else:
+                    self.action_data.pop('random_region', None)
+                self.update_random_region_label()
+        except Exception:
+            pass
+
+    def update_random_region_label(self):
+        try:
+            rr = self.action_data.get('random_region')
+            if isinstance(rr, (list, tuple)) and len(rr) == 4:
+                x, y, w, h = rr
+                lbl = f"Random Region: ({x}, {y}, {w}x{h})"
+            else:
+                lbl = "Random Region: (none)"
+            if hasattr(self, 'random_readout') and isinstance(self.random_readout, QLabel):
+                self.random_readout.setText(lbl)
+        except Exception:
+            pass
 
 class StepEditor(QGroupBox):
     """Widget to edit a single step in a sequence."""
@@ -1659,15 +2114,23 @@ class StepEditor(QGroupBox):
             
         # Create the action editor
         action_editor = ActionEditor(action_data, self)
-        action_editor.setMinimumHeight(80)  # Set a reasonable minimum height for each action
+        try:
+            # Allow the editor to grow vertically based on its content
+            action_editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        except Exception:
+            pass
         
         # Add to layout and widget list
         self.actions_layout.addWidget(action_editor)
         self.action_widgets.append(action_editor)
         
-        # Update the container's minimum height based on number of actions
-        min_height = max(50, len(self.action_widgets) * 80)
-        self.actions_container.setMinimumHeight(min_height)
+        # Ensure the container grows with content so scrollbars appear when needed
+        try:
+            per_item = 150  # Estimated height per action editor including condition group
+            min_height = max(200, len(self.action_widgets) * per_item)
+            self.actions_container.setMinimumHeight(min_height)
+        except Exception:
+            self.actions_container.updateGeometry()
         
         # Ensure the new action is visible
         QTimer.singleShot(50, lambda: self._scroll_widget_into_view(action_editor))
@@ -1769,10 +2232,13 @@ class StepEditor(QGroupBox):
             action_widget.setParent(None)
             action_widget.deleteLater()
 
-            # Update the container's minimum height based on remaining actions
-            min_height = max(50, len(self.action_widgets) * 80)
-            self.actions_container.setMinimumHeight(min_height)
-            self.actions_container.updateGeometry()
+            # Update minimum height based on remaining actions
+            try:
+                per_item = 150
+                min_height = max(200, len(self.action_widgets) * per_item)
+                self.actions_container.setMinimumHeight(min_height)
+            except Exception:
+                self.actions_container.updateGeometry()
 
             # Persist config after removing an action
             try:
@@ -2128,8 +2594,8 @@ class SequenceEditor(QGroupBox):
                 "actions": [{"type": "click"}]
             }, self.templates, self)
         
-        # Set size policy for the step editor
-        step_editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Set size policy for the step editor (allow vertical growth based on content)
+        step_editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         
         # Insert the new step before the stretch at the end
         self.steps_layout.insertWidget(self.steps_layout.count() - 1, step_editor)
@@ -3280,6 +3746,18 @@ class MainWindow(QMainWindow):
             "When disabled, non-required steps will skip immediately if template is not found."
         )
         self.non_required_wait_checkbox.setChecked(False)  # Default to skip immediately
+
+        # Branch debug traces toggle (runtime)
+        self.branch_debug_checkbox = QCheckBox("Branch Debug Traces")
+        self.branch_debug_checkbox.setToolTip(
+            "When enabled, logs which conditional branch runs (ELSE vs IF_NOT) per action.\n"
+            "Runtime toggle; no restart required. Also saved into config when you save."
+        )
+        self.branch_debug_checkbox.setChecked(False)
+        try:
+            self.branch_debug_checkbox.stateChanged.connect(self.on_branch_debug_toggled)
+        except Exception:
+            pass
         
         # Loop control
         loop_control = QHBoxLayout()
@@ -3299,6 +3777,7 @@ class MainWindow(QMainWindow):
         
         # Add widgets to layout
         exec_control.addWidget(self.non_required_wait_checkbox)
+        exec_control.addWidget(self.branch_debug_checkbox)
         exec_control.addLayout(loop_control)
         
         # Run button
@@ -4032,11 +4511,45 @@ class MainWindow(QMainWindow):
     def update_ui_from_config(self):
         """Update UI elements from current config."""
         logger.info("Updating UI from config...")
+        # Enable optional branch debug traces based on config
+        try:
+            branch_debug = bool(
+                (self.config.get('debug', {}) or {}).get('branch_traces', False)
+                or self.config.get('debug_branch_traces', False)
+            )
+            if hasattr(self, 'bot'):
+                self.bot.branch_debug = branch_debug
+            logger.info(f"Branch debug traces {'ENABLED' if branch_debug else 'DISABLED'}")
+            try:
+                if hasattr(self, 'branch_debug_checkbox') and self.branch_debug_checkbox:
+                    self.branch_debug_checkbox.setChecked(branch_debug)
+                
+            except Exception:
+                pass
+        except Exception:
+            pass
         
         # Clear existing templates from the bot
         if hasattr(self, 'bot'):
             logger.info("Clearing existing templates from bot")
             self.bot.templates = {}
+
+    def on_branch_debug_toggled(self, state):
+        try:
+            enabled = state == Qt.CheckState.Checked.value
+        except Exception:
+            enabled = bool(state)
+        try:
+            if hasattr(self, 'bot'):
+                self.bot.branch_debug = enabled
+            # Persist into config so Save writes it out
+            dbg = self.config.get('debug') or {}
+            dbg['branch_traces'] = enabled
+            self.config['debug'] = dbg
+            self.config['debug_branch_traces'] = enabled  # maintain backward compatibility
+            logger.info(f"Branch debug toggle => {'ENABLED' if enabled else 'DISABLED'}")
+        except Exception as e:
+            logger.debug(f"on_branch_debug_toggled failed: {e}")
             
         # Update templates list and load them into the bot
         try:

@@ -37,6 +37,7 @@
       <a href="/static/schedules.html">Schedules</a>
       <a href="/static/templates.html">Templates</a>
       <a href="/static/failsafe.html">Failsafe</a>
+      <a href="/static/debug.html">Debug</a>
     </nav>
     <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
       <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
@@ -89,6 +90,7 @@
           <label style="margin-left:16px">Size
             <select id="grpPreviewSize"><option>640</option><option>800</option><option selected>1024</option><option>1280</option></select>
           </label>
+          <label style="margin-left:16px; display:inline-flex; align-items:center; gap:6px"><input type="checkbox" id="grpPhoneToggle" /> Using Phone</label>
         </div>
         <div id="grpImagePane" style="position:relative; width:100%">
           <img id="grpPreview" alt="Preview" draggable="false" style="width:100%; max-height:60vh; object-fit:contain; background:#111; border:1px solid #3a3a3a; border-radius:6px" />
@@ -112,6 +114,16 @@
 
     function authHeaders() { const tok = tokenEl.value.trim(); return tok ? { 'Authorization': `Bearer ${tok}` } : {}; }
 
+    // Templates list for dropdowns
+    let templates = [];
+    async function fetchTemplates() {
+      try {
+        const res = await fetch(`${apiBase}/api/templates`, { headers: authHeaders() });
+        const data = await res.json();
+        templates = (data.templates || []).map(t => t.name);
+      } catch (e) { templates = []; }
+    }
+
     // Token persistence across pages
     try {
       const remembered = (localStorage.getItem('rememberToken') === 'true');
@@ -121,7 +133,7 @@
     } catch (e) {}
     tokenEl.addEventListener('change', () => {
       try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
-      fetchGroups();
+      fetchTemplates().then(fetchGroups);
     });
     rememberEl.addEventListener('change', () => {
       try {
@@ -148,13 +160,15 @@
         const upBtn = document.createElement('button'); upBtn.textContent = 'Up'; upBtn.onclick = () => reorderStep(groupListEl.value, idx, Math.max(0, idx-1));
         const downBtn = document.createElement('button'); downBtn.textContent = 'Down'; downBtn.onclick = () => reorderStep(groupListEl.value, idx, Math.min(steps.length-1, idx+1));
 
-        const inFind = document.createElement('input'); inFind.type='text'; inFind.placeholder='find'; inFind.value = step.find || '';
+        const inTemplate = document.createElement('select');
+        templates.forEach(name => { const opt = document.createElement('option'); opt.value = name; opt.textContent = name; inTemplate.appendChild(opt); });
+        inTemplate.value = step.find || '';
         const selRequired = document.createElement('input'); selRequired.type='checkbox'; selRequired.checked = !!step.required;
         const inTimeout = document.createElement('input'); inTimeout.type='number'; inTimeout.placeholder='timeout'; inTimeout.value = (step.timeout!=null?step.timeout:'');
-        const lblFind = document.createElement('label'); lblFind.textContent='Find Template '; lblFind.appendChild(inFind);
+        const lblFind = document.createElement('label'); lblFind.textContent='Find Template '; lblFind.appendChild(inTemplate);
         const lblReq = document.createElement('label'); lblReq.textContent='Required '; lblReq.appendChild(selRequired);
         const lblTimeout = document.createElement('label'); lblTimeout.textContent='Timeout (s) '; lblTimeout.appendChild(inTimeout);
-        const saveBtn = document.createElement('button'); saveBtn.textContent='Save'; saveBtn.onclick = async () => { try { const name = groupListEl.value; const updated = { ...step, find: inFind.value || '', required: !!selRequired.checked }; if (inTimeout.value!=='') updated.timeout = parseInt(inTimeout.value,10); const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ step: updated }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = `Status: saved step #${idx}`; } catch (e){ statusEl.textContent = `Status: save failed (${e.message})`; } };
+        const saveBtn = document.createElement('button'); saveBtn.textContent='Save'; saveBtn.onclick = async () => { try { const name = groupListEl.value; const updated = { ...step, find: inTemplate.value || '', required: !!selRequired.checked }; if (inTimeout.value!=='') updated.timeout = parseInt(inTimeout.value,10); const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ step: updated }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = `Status: saved step #${idx}`; } catch (e){ statusEl.textContent = `Status: save failed (${e.message})`; } };
 
         row.appendChild(lblFind); row.appendChild(lblReq); row.appendChild(lblTimeout); row.appendChild(saveBtn); row.appendChild(upBtn); row.appendChild(downBtn); row.appendChild(delBtn);
         div.appendChild(row);
@@ -199,6 +213,186 @@
           const aRandomRegionReadout = document.createElement('small'); const arrr = Array.isArray(act.random_region)?act.random_region:null; aRandomRegionReadout.textContent = arrr?`Random Region: (${arrr[0]}, ${arrr[1]}, ${arrr[2]}x${arrr[3]})`:'Random Region: (none)';
           aRow.appendChild(lblAType); aRow.appendChild(lblBtn); aRow.appendChild(lblClicks); aRow.appendChild(lblX); aRow.appendChild(lblY); aRow.appendChild(lblRand); aRow.appendChild(lblDur); aRow.appendChild(lblSec); aRow.appendChild(lblPix); aRow.appendChild(lblKey); aRow.appendChild(lblMods); aRow.appendChild(aSave); aRow.appendChild(aUseRegion); aRow.appendChild(aUseRandomRegion); aRow.appendChild(aRegionReadout); aRow.appendChild(aRandomRegionReadout); aRow.appendChild(aUp); aRow.appendChild(aDown); aRow.appendChild(aDel);
           aDiv.appendChild(aRow);
+          // Else actions list for this action
+          const elseWrap = document.createElement('div'); elseWrap.className='actions';
+          const elseTitle = document.createElement('small'); elseTitle.textContent='Else Actions:'; elseWrap.appendChild(elseTitle);
+          const elseActions = Array.isArray(act.else_actions) ? act.else_actions : [];
+          elseActions.forEach((ea, eidx) => {
+            const eDiv = document.createElement('div'); eDiv.className='action';
+            const eRow = document.createElement('div'); eRow.className='row';
+            const eType = document.createElement('select'); ['click','wait','type','drag','move','move_to','keypress','scroll','click_and_hold'].forEach(t=>{ const opt=document.createElement('option'); opt.value=t; opt.textContent=t; eType.appendChild(opt); }); eType.value = ea.type || ea.action || 'click';
+            const eButton = document.createElement('select'); ['left','right','middle'].forEach(b=>{ const opt=document.createElement('option'); opt.value=b; opt.textContent=b; eButton.appendChild(opt); }); eButton.value = ea.button || 'left';
+            const eClicks = document.createElement('input'); eClicks.type='number'; eClicks.placeholder='clicks'; eClicks.value=(ea.clicks!=null?ea.clicks:'');
+            const eX = document.createElement('input'); eX.type='number'; eX.placeholder='X'; eX.value=(ea.x!=null?ea.x:'');
+            const eY = document.createElement('input'); eY.type='number'; eY.placeholder='Y'; eY.value=(ea.y!=null?ea.y:'');
+            const eRandom = document.createElement('input'); eRandom.type='checkbox'; eRandom.checked=!!ea.random; eRandom.title='Toggle Random';
+            const eDuration = document.createElement('input'); eDuration.type='number'; eDuration.placeholder='duration'; eDuration.value=(ea.duration!=null?ea.duration:'');
+            const eSeconds = document.createElement('input'); eSeconds.type='number'; eSeconds.placeholder='seconds'; eSeconds.value=(ea.seconds!=null?ea.seconds:'');
+            const ePixels = document.createElement('input'); ePixels.type='number'; ePixels.placeholder='pixels'; ePixels.value=(ea.pixels!=null?ea.pixels:'');
+            const eKey = document.createElement('input'); eKey.type='text'; eKey.placeholder='key'; eKey.value=ea.key||'';
+            const eMods = document.createElement('input'); eMods.type='text'; eMods.placeholder='modifiers'; eMods.value=(Array.isArray(ea.modifiers)?ea.modifiers.join(','):(ea.modifiers||''));
+            function updateElseFields(){ const t=eType.value; eButton.style.display=(t==='click'?'inline-block':'none'); eClicks.style.display=(t==='click'?'inline-block':'none'); const isMove=(t==='move_to'||t==='move'||t==='drag'); eX.style.display=(isMove?'inline-block':'none'); eY.style.display=(isMove?'inline-block':'none'); eRandom.style.display=(isMove?'inline-block':'none'); eDuration.style.display=((t==='move'||t==='drag'||t==='move_to')?'inline-block':'none'); eSeconds.style.display=(t==='wait'?'inline-block':'none'); ePixels.style.display=(t==='scroll'?'inline-block':'none'); eKey.style.display=(t==='keypress'?'inline-block':'none'); eMods.style.display=(t==='keypress'?'inline-block':'none'); }
+            updateElseFields(); eType.addEventListener('change', updateElseFields);
+            const eSave = document.createElement('button'); eSave.textContent='Save Else';
+            eSave.onclick = async () => {
+              try {
+                const name = groupListEl.value; const updated = { ...act };
+                const newEA = { ...ea, type: eType.value };
+                if (eButton.value) newEA.button = eButton.value;
+                if (eClicks.value !== '') newEA.clicks = parseInt(eClicks.value,10);
+                if (eX.value !== '') newEA.x = parseInt(eX.value,10);
+                if (eY.value !== '') newEA.y = parseInt(eY.value,10);
+                newEA.random = !!eRandom.checked;
+                if (eDuration.value !== '') newEA.duration = parseFloat(eDuration.value);
+                if (eSeconds.value !== '') newEA.seconds = parseFloat(eSeconds.value);
+                if (ePixels.value !== '') newEA.pixels = parseInt(ePixels.value,10);
+                if (eKey.value) newEA.key = eKey.value;
+                if (eMods.value) newEA.modifiers = eMods.value.split(',').map(s=>s.trim()).filter(Boolean);
+                const list = Array.isArray(updated.else_actions) ? [...updated.else_actions] : [];
+                list[eidx] = newEA; updated.else_actions = list;
+                const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadGroup(name);
+                statusEl.textContent = `Status: saved else action ${eidx} for #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: save failed (${e.message})`; }
+            };
+            const eDel = document.createElement('button'); eDel.textContent='Delete Else';
+            eDel.onclick = async () => {
+              try {
+                const name = groupListEl.value; const updated = { ...act };
+                const list = Array.isArray(updated.else_actions) ? updated.else_actions.filter((_,i)=>i!==eidx) : [];
+                updated.else_actions = list;
+                const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadGroup(name);
+                statusEl.textContent = `Status: deleted else action ${eidx} for #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: delete failed (${e.message})`; }
+            };
+            eRow.appendChild(eType); eRow.appendChild(eButton); eRow.appendChild(eClicks);
+            eRow.appendChild(eX); eRow.appendChild(eY); eRow.appendChild(eRandom);
+            eRow.appendChild(eDuration); eRow.appendChild(eSeconds); eRow.appendChild(ePixels);
+            eRow.appendChild(eKey); eRow.appendChild(eMods); eRow.appendChild(eSave); eRow.appendChild(eDel);
+            eDiv.appendChild(eRow);
+            elseWrap.appendChild(eDiv);
+          });
+          const addElseRow = document.createElement('div'); addElseRow.className='row';
+          function addElseOfType(t, preset={}){
+            return async () => {
+              try {
+                const name = groupListEl.value; const updated = { ...act };
+                const list = Array.isArray(updated.else_actions) ? [...updated.else_actions] : [];
+                list.push({ type: t, ...preset }); updated.else_actions = list;
+                const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadGroup(name);
+                statusEl.textContent = `Status: added else ${t} to action #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: add else failed (${e.message})`; }
+            };
+          }
+          const elsePalette = [
+            {label:'Add else click', t:'click'},
+            {label:'Add else right_click', t:'click', preset:{button:'right'}},
+            {label:'Add else double_click', t:'click', preset:{clicks:2}},
+            {label:'Add else move', t:'move', preset:{duration:1.0}},
+            {label:'Add else move_to', t:'move_to', preset:{duration:1.0}},
+            {label:'Add else type', t:'type', preset:{text:'', delay:0.0}},
+            {label:'Add else wait', t:'wait', preset:{seconds:0.5}},
+            {label:'Add else scroll', t:'scroll', preset:{pixels:100}},
+            {label:'Add else click_and_hold', t:'click_and_hold', preset:{duration:1.0}}
+          ];
+          elsePalette.forEach(p=>{ const b=document.createElement('button'); b.textContent=p.label; b.onclick=addElseOfType(p.t, p.preset||{}); addElseRow.appendChild(b); });
+          elseWrap.appendChild(addElseRow);
+          aDiv.appendChild(elseWrap);
+          // If-Not actions list for this action
+          const ifNotWrap = document.createElement('div'); ifNotWrap.className='actions';
+          const ifNotTitle = document.createElement('small'); ifNotTitle.textContent='If-Not Actions:'; ifNotWrap.appendChild(ifNotTitle);
+          const ifNotActions = Array.isArray(act.if_not_actions) ? act.if_not_actions : [];
+          ifNotActions.forEach((ina, iidx) => {
+            const iDiv = document.createElement('div'); iDiv.className='action';
+            const iRow = document.createElement('div'); iRow.className='row';
+            const iType = document.createElement('select'); ['click','wait','type','drag','move','move_to','keypress','scroll','click_and_hold'].forEach(t=>{ const opt=document.createElement('option'); opt.value=t; opt.textContent=t; iType.appendChild(opt); }); iType.value = ina.type || ina.action || 'click';
+            const iButton = document.createElement('select'); ['left','right','middle'].forEach(b=>{ const opt=document.createElement('option'); opt.value=b; opt.textContent=b; iButton.appendChild(opt); }); iButton.value = ina.button || 'left';
+            const iClicks = document.createElement('input'); iClicks.type='number'; iClicks.placeholder='clicks'; iClicks.value=(ina.clicks!=null?ina.clicks:'');
+            const iX = document.createElement('input'); iX.type='number'; iX.placeholder='X'; iX.value=(ina.x!=null?ina.x:'');
+            const iY = document.createElement('input'); iY.type='number'; iY.placeholder='Y'; iY.value=(ina.y!=null?ina.y:'');
+            const iRandom = document.createElement('input'); iRandom.type='checkbox'; iRandom.checked=!!ina.random; iRandom.title='Toggle Random';
+            const iDuration = document.createElement('input'); iDuration.type='number'; iDuration.placeholder='duration'; iDuration.value=(ina.duration!=null?ina.duration:'');
+            const iSeconds = document.createElement('input'); iSeconds.type='number'; iSeconds.placeholder='seconds'; iSeconds.value=(ina.seconds!=null?ina.seconds:'');
+            const iPixels = document.createElement('input'); iPixels.type='number'; iPixels.placeholder='pixels'; iPixels.value=(ina.pixels!=null?ina.pixels:'');
+            const iKey = document.createElement('input'); iKey.type='text'; iKey.placeholder='key'; iKey.value=ina.key||'';
+            const iMods = document.createElement('input'); iMods.type='text'; iMods.placeholder='modifiers'; iMods.value=(Array.isArray(ina.modifiers)?ina.modifiers.join(','):(ina.modifiers||''));
+            function updateIfNotFields(){ const t=iType.value; iButton.style.display=(t==='click'?'inline-block':'none'); iClicks.style.display=(t==='click'?'inline-block':'none'); const isMove=(t==='move_to'||t==='move'||t==='drag'); iX.style.display=(isMove?'inline-block':'none'); iY.style.display=(isMove?'inline-block':'none'); iRandom.style.display=(isMove?'inline-block':'none'); iDuration.style.display=((t==='move'||t==='drag'||t==='move_to')?'inline-block':'none'); iSeconds.style.display=(t==='wait'?'inline-block':'none'); iPixels.style.display=(t==='scroll'?'inline-block':'none'); iKey.style.display=(t==='keypress'?'inline-block':'none'); iMods.style.display=(t==='keypress'?'inline-block':'none'); }
+            updateIfNotFields(); iType.addEventListener('change', updateIfNotFields);
+            const iSave = document.createElement('button'); iSave.textContent='Save If-Not';
+            iSave.onclick = async () => {
+              try {
+                const name = groupListEl.value; const updated = { ...act };
+                const newINA = { ...ina, type: iType.value };
+                if (iButton.value) newINA.button = iButton.value;
+                if (iClicks.value !== '') newINA.clicks = parseInt(iClicks.value,10);
+                if (iX.value !== '') newINA.x = parseInt(iX.value,10);
+                if (iY.value !== '') newINA.y = parseInt(iY.value,10);
+                newINA.random = !!iRandom.checked;
+                if (iDuration.value !== '') newINA.duration = parseFloat(iDuration.value);
+                if (iSeconds.value !== '') newINA.seconds = parseFloat(iSeconds.value);
+                if (iPixels.value !== '') newINA.pixels = parseInt(iPixels.value,10);
+                if (iKey.value) newINA.key = iKey.value;
+                if (iMods.value) newINA.modifiers = iMods.value.split(',').map(s=>s.trim()).filter(Boolean);
+                const list = Array.isArray(updated.if_not_actions) ? [...updated.if_not_actions] : [];
+                list[iidx] = newINA; updated.if_not_actions = list;
+                const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadGroup(name);
+                statusEl.textContent = `Status: saved if-not action ${iidx} for #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: save failed (${e.message})`; }
+            };
+            const iDel = document.createElement('button'); iDel.textContent='Delete If-Not';
+            iDel.onclick = async () => {
+              try {
+                const name = groupListEl.value; const updated = { ...act };
+                const list = Array.isArray(updated.if_not_actions) ? updated.if_not_actions.filter((_,i)=>i!==iidx) : [];
+                updated.if_not_actions = list;
+                const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadGroup(name);
+                statusEl.textContent = `Status: deleted if-not action ${iidx} for #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: delete failed (${e.message})`; }
+            };
+            iRow.appendChild(iType); iRow.appendChild(iButton); iRow.appendChild(iClicks);
+            iRow.appendChild(iX); iRow.appendChild(iY); iRow.appendChild(iRandom);
+            iRow.appendChild(iDuration); iRow.appendChild(iSeconds); iRow.appendChild(iPixels);
+            iRow.appendChild(iKey); iRow.appendChild(iMods); iRow.appendChild(iSave); iRow.appendChild(iDel);
+            iDiv.appendChild(iRow);
+            ifNotWrap.appendChild(iDiv);
+          });
+          const addIfNotRow = document.createElement('div'); addIfNotRow.className='row';
+          function addIfNotOfType(t, preset={}){
+            return async () => {
+              try {
+                const name = groupListEl.value; const updated = { ...act };
+                const list = Array.isArray(updated.if_not_actions) ? [...updated.if_not_actions] : [];
+                list.push({ type: t, ...preset }); updated.if_not_actions = list;
+                const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadGroup(name);
+                statusEl.textContent = `Status: added if-not ${t} to action #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: add if-not failed (${e.message})`; }
+            };
+          }
+          const ifNotPalette = [
+            {label:'Add if-not click', t:'click'},
+            {label:'Add if-not right_click', t:'click', preset:{button:'right'}},
+            {label:'Add if-not double_click', t:'click', preset:{clicks:2}},
+            {label:'Add if-not move', t:'move', preset:{duration:1.0}},
+            {label:'Add if-not move_to', t:'move_to', preset:{duration:1.0}},
+            {label:'Add if-not type', t:'type', preset:{text:'', delay:0.0}},
+            {label:'Add if-not wait', t:'wait', preset:{seconds:0.5}},
+            {label:'Add if-not scroll', t:'scroll', preset:{pixels:100}},
+            {label:'Add if-not click_and_hold', t:'click_and_hold', preset:{duration:1.0}}
+          ];
+          ifNotPalette.forEach(p=>{ const b=document.createElement('button'); b.textContent=p.label; b.onclick=addIfNotOfType(p.t, p.preset||{}); addIfNotRow.appendChild(b); });
+          ifNotWrap.appendChild(addIfNotRow);
+          aDiv.appendChild(ifNotWrap);
           actionsWrap.appendChild(aDiv);
         });
         const addActionRow = document.createElement('div'); addActionRow.className='row';
@@ -221,6 +415,18 @@
     async function saveMeta() { const name = groupListEl.value; if (!name) { statusEl.textContent='Status: select a group'; return; } try { const loop = (groupLoopEl.value==='true'); const loop_count = parseInt(groupLoopCountEl.value||'1',10); const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ loop, loop_count }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = 'Status: saved loop settings'; } catch (e){ statusEl.textContent = `Status: save failed (${e.message})`; } }
     async function addStep() { const name = groupListEl.value; if (!name) { statusEl.textContent='Status: select a group'; return; } try { const stepObj = { find:'', required:true, timeout:10, actions:[] }; const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps`, { method:'POST', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ step: stepObj }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); await loadGroup(name); statusEl.textContent = `Status: added step #${data.index}`; } catch (e){ statusEl.textContent = `Status: add failed (${e.message})`; } }
 
+    async function deleteStep(name, index) {
+      if (!name) { statusEl.textContent = 'Status: select a group'; return; }
+      try {
+        const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${index}`,{ method:'DELETE', headers: authHeaders() });
+        const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        await loadGroup(name);
+        statusEl.textContent = `Status: deleted step #${index}`;
+      } catch (e) {
+        statusEl.textContent = `Status: delete failed (${e.message})`;
+      }
+    }
+
     tokenEl.addEventListener('change', () => { fetchGroups(); });
     groupListEl.addEventListener('change', () => loadGroup(groupListEl.value));
     document.getElementById('btnCreate').addEventListener('click', createGroup);
@@ -230,13 +436,14 @@
     document.getElementById('btnAddStep').addEventListener('click', addStep);
 
     const urlTok = new URLSearchParams(location.search).get('token'); if (urlTok) { tokenEl.value = urlTok; }
-    fetchGroups();
+    fetchTemplates().then(fetchGroups);
   </script>
   <script>
     // Groups preview & region selection
     const grpPreview = document.getElementById('grpPreview');
     const grpSel = document.getElementById('grpSel');
     const grpPane = document.getElementById('grpImagePane');
+    const grpPhoneToggle = document.getElementById('grpPhoneToggle');
     let grpMonitors = []; let grpSelectedMonitor = 0; let lastGrpRegion = null; let grpDragStart = null;
     async function fetchGrpMonitors(){ try { const res = await fetch(`${apiBase}/api/monitors`, { headers: authHeaders() }); const data = await res.json(); grpMonitors = data.monitors||[]; const sel=document.getElementById('grpMonitor'); sel.innerHTML=''; for (const m of grpMonitors){ const opt=document.createElement('option'); opt.value=String(m.index); opt.textContent=(m.index===0?`All (${m.width}x${m.height})`:`Monitor ${m.index} (${m.width}x${m.height})`); sel.appendChild(opt);} sel.value=String(grpSelectedMonitor); } catch (e){} }
     function updateGrpPreviewSrc(){ const tok = tokenEl.value.trim(); const q=[`monitor=${encodeURIComponent(String(grpSelectedMonitor))}`]; if (tok) q.push(`token=${encodeURIComponent(tok)}`); grpPreview.src = `${apiBase}/stream.mjpeg?${q.join('&')}`; }
@@ -257,9 +464,21 @@
       return { rect, nw, nh, contentW, contentH, offsetX, offsetY };
     }
     let grpLastDragPos = null;
-    grpPreview.addEventListener('mousedown', (e)=>{ const paneRect=grpPane.getBoundingClientRect(); const info=getGrpImageContentInfo(grpPreview); let ix=e.clientX-info.rect.left-info.offsetX; let iy=e.clientY-info.rect.top-info.offsetY; if (ix<0||iy<0||ix>info.contentW||iy>info.contentH) return; const offX=(info.rect.left-paneRect.left)+info.offsetX; const offY=(info.rect.top-paneRect.top)+info.offsetY; grpDragStart={ x:ix, y:iy, offX, offY }; grpSel.style.display='block'; grpSel.style.left=`${offX+ix}px`; grpSel.style.top=`${offY+iy}px`; grpSel.style.width='0px'; grpSel.style.height='0px'; });
-    grpPreview.addEventListener('mousemove', (e)=>{ if(!grpDragStart) return; const info=getGrpImageContentInfo(grpPreview); let ix=e.clientX-info.rect.left-info.offsetX; let iy=e.clientY-info.rect.top-info.offsetY; ix=Math.max(0, Math.min(info.contentW, ix)); iy=Math.max(0, Math.min(info.contentH, iy)); grpLastDragPos = { x: ix, y: iy }; const left=Math.min(grpDragStart.x, ix)+grpDragStart.offX; const top=Math.min(grpDragStart.y, iy)+grpDragStart.offY; const w=Math.abs(ix-grpDragStart.x); const h=Math.abs(iy-grpDragStart.y); grpSel.style.left=`${left}px`; grpSel.style.top=`${top}px`; grpSel.style.width=`${w}px`; grpSel.style.height=`${h}px`; });
-    window.addEventListener('mouseup', ()=>{ if(!grpDragStart) return; const info=getGrpImageContentInfo(grpPreview); const ix0=Math.min(grpDragStart.x, (grpLastDragPos?grpLastDragPos.x:grpDragStart.x)); const iy0=Math.min(grpDragStart.y, (grpLastDragPos?grpLastDragPos.y:grpDragStart.y)); const iw=Math.abs(((grpLastDragPos?grpLastDragPos.x:grpDragStart.x))-grpDragStart.x); const ih=Math.abs(((grpLastDragPos?grpLastDragPos.y:grpDragStart.y))-grpDragStart.y); const scaleX=info.nw/info.contentW; const scaleY=info.nh/info.contentH; const x0=Math.round(ix0*scaleX); const y0=Math.round(iy0*scaleY); const rw=Math.round(iw*scaleX); const rh=Math.round(ih*scaleY); lastGrpRegion=[x0,y0,rw,rh]; statusEl.textContent=`Status: selected region ${x0},${y0},${rw},${rh}`; grpDragStart=null; grpLastDragPos=null; });
+    function grpStartDrag(clientX, clientY){ const paneRect=grpPane.getBoundingClientRect(); const info=getGrpImageContentInfo(grpPreview); let ix=clientX-info.rect.left-info.offsetX; let iy=clientY-info.rect.top-info.offsetY; if (ix<0||iy<0||ix>info.contentW||iy>info.contentH) return; const offX=(info.rect.left-paneRect.left)+info.offsetX; const offY=(info.rect.top-paneRect.top)+info.offsetY; grpDragStart={ x:ix, y:iy, offX, offY }; grpSel.style.display='block'; grpSel.style.left=`${offX+ix}px`; grpSel.style.top=`${offY+iy}px`; grpSel.style.width='0px'; grpSel.style.height='0px'; }
+    function grpMoveDrag(clientX, clientY){ if(!grpDragStart) return; const info=getGrpImageContentInfo(grpPreview); let ix=clientX-info.rect.left-info.offsetX; let iy=clientY-info.rect.top-info.offsetY; ix=Math.max(0, Math.min(info.contentW, ix)); iy=Math.max(0, Math.min(info.contentH, iy)); grpLastDragPos = { x: ix, y: iy }; const left=Math.min(grpDragStart.x, ix)+grpDragStart.offX; const top=Math.min(grpDragStart.y, iy)+grpDragStart.offY; const w=Math.abs(ix-grpDragStart.x); const h=Math.abs(iy-grpDragStart.y); grpSel.style.left=`${left}px`; grpSel.style.top=`${top}px`; grpSel.style.width=`${w}px`; grpSel.style.height=`${h}px`; }
+    function grpEndDrag(){ if(!grpDragStart) return; const info=getGrpImageContentInfo(grpPreview); const ix0=Math.min(grpDragStart.x, (grpLastDragPos?grpLastDragPos.x:grpDragStart.x)); const iy0=Math.min(grpDragStart.y, (grpLastDragPos?grpLastDragPos.y:grpDragStart.y)); const iw=Math.abs(((grpLastDragPos?grpLastDragPos.x:grpDragStart.x))-grpDragStart.x); const ih=Math.abs(((grpLastDragPos?grpLastDragPos.y:grpDragStart.y))-grpDragStart.y); const scaleX=info.nw/info.contentW; const scaleY=info.nh/info.contentH; const x0=Math.round(ix0*scaleX); const y0=Math.round(iy0*scaleY); const rw=Math.round(iw*scaleX); const rh=Math.round(ih*scaleY); lastGrpRegion=[x0,y0,rw,rh]; statusEl.textContent=`Status: selected region ${x0},${y0},${rw},${rh}`; grpDragStart=null; grpLastDragPos=null; }
+    // Mouse events
+    grpPreview.addEventListener('mousedown', (e)=>{ grpStartDrag(e.clientX, e.clientY); });
+    grpPreview.addEventListener('mousemove', (e)=>{ grpMoveDrag(e.clientX, e.clientY); });
+    window.addEventListener('mouseup', ()=>{ grpEndDrag(); });
+    // Touch events (active when Using Phone is enabled)
+    grpPreview.addEventListener('touchstart', (e)=>{ if (!grpPhoneToggle.checked) return; e.preventDefault(); const t=e.touches[0]; if (t) grpStartDrag(t.clientX, t.clientY); }, { passive: false });
+    grpPreview.addEventListener('touchmove', (e)=>{ if (!grpPhoneToggle.checked || !grpDragStart) return; e.preventDefault(); const t=e.touches[0]; if (t) grpMoveDrag(t.clientX, t.clientY); }, { passive: false });
+    window.addEventListener('touchend', ()=>{ if (!grpPhoneToggle.checked) return; grpEndDrag(); });
+    // Prevent scroll during selection when using phone
+    function updateGrpTouchAction(){ grpPane.style.touchAction = grpPhoneToggle.checked ? 'none' : 'auto'; }
+    grpPhoneToggle.addEventListener('change', updateGrpTouchAction);
+    updateGrpTouchAction();
     tokenEl.addEventListener('change', ()=>{ fetchGrpMonitors().then(()=>{ updateGrpPreviewSrc(); setGrpPreviewSize(); }); });
     fetchGrpMonitors().then(()=>{ updateGrpPreviewSrc(); setGrpPreviewSize(); });
   </script>

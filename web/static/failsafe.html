@@ -36,6 +36,7 @@
       <a href="/static/schedules.html">Schedules</a>
       <a href="/static/templates.html">Templates</a>
       <a href="/static/failsafe.html">Failsafe</a>
+      <a href="/static/debug.html">Debug</a>
     </nav>
     <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
       <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
@@ -88,6 +89,7 @@
           <label style="margin-left:16px">Size
             <select id="fsPreviewSize"><option>640</option><option>800</option><option selected>1024</option><option>1280</option></select>
           </label>
+          <label style="margin-left:16px; display:inline-flex; align-items:center; gap:6px"><input type="checkbox" id="fsPhoneToggle" /> Using Phone</label>
         </div>
         <div id="fsImagePane" style="position:relative; width:100%">
           <img id="fsPreview" alt="Preview" draggable="false" class="no-drag" style="width:100%; max-height:60vh; object-fit:contain; background:#111; border:1px solid #3a3a3a; border-radius:6px" />
@@ -448,6 +450,186 @@
           aRow.appendChild(aKey); aRow.appendChild(aMods);
           aRow.appendChild(aSave); aRow.appendChild(aUseRegion); aRow.appendChild(aUseRandomRegion); aRow.appendChild(aRegionReadout); aRow.appendChild(aRandomRegionReadout); aRow.appendChild(aUp); aRow.appendChild(aDown); aRow.appendChild(aDel);
           aDiv.appendChild(aRow);
+          // Else actions list for this action
+          const elseWrap = document.createElement('div'); elseWrap.className='actions';
+          const elseTitle = document.createElement('small'); elseTitle.textContent='Else Actions:'; elseWrap.appendChild(elseTitle);
+          const elseActions = Array.isArray(act.else_actions) ? act.else_actions : [];
+          elseActions.forEach((ea, eidx) => {
+            const eDiv = document.createElement('div'); eDiv.className='action';
+            const eRow = document.createElement('div'); eRow.className='row';
+            const eType = document.createElement('select'); ['click','wait','type','drag','move','move_to','keypress','scroll','click_and_hold'].forEach(t=>{ const opt=document.createElement('option'); opt.value=t; opt.textContent=t; eType.appendChild(opt); }); eType.value = ea.type || ea.action || 'click';
+            const eButton = document.createElement('select'); ['left','right','middle'].forEach(b=>{ const opt=document.createElement('option'); opt.value=b; opt.textContent=b; eButton.appendChild(opt); }); eButton.value = ea.button || 'left';
+            const eClicks = document.createElement('input'); eClicks.type='number'; eClicks.placeholder='clicks'; eClicks.value=(ea.clicks!=null?ea.clicks:'');
+            const eX = document.createElement('input'); eX.type='number'; eX.placeholder='X'; eX.value=(ea.x!=null?ea.x:'');
+            const eY = document.createElement('input'); eY.type='number'; eY.placeholder='Y'; eY.value=(ea.y!=null?ea.y:'');
+            const eRandom = document.createElement('input'); eRandom.type='checkbox'; eRandom.checked=!!ea.random; eRandom.title='Toggle Random';
+            const eDuration = document.createElement('input'); eDuration.type='number'; eDuration.placeholder='duration'; eDuration.value=(ea.duration!=null?ea.duration:'');
+            const eSeconds = document.createElement('input'); eSeconds.type='number'; eSeconds.placeholder='seconds'; eSeconds.value=(ea.seconds!=null?ea.seconds:'');
+            const ePixels = document.createElement('input'); ePixels.type='number'; ePixels.placeholder='pixels'; ePixels.value=(ea.pixels!=null?ea.pixels:'');
+            const eKey = document.createElement('input'); eKey.type='text'; eKey.placeholder='key'; eKey.value=ea.key||'';
+            const eMods = document.createElement('input'); eMods.type='text'; eMods.placeholder='modifiers'; eMods.value=(Array.isArray(ea.modifiers)?ea.modifiers.join(','):(ea.modifiers||''));
+            function updateElseFields(){ const t=eType.value; eButton.style.display=(t==='click'?'inline-block':'none'); eClicks.style.display=(t==='click'?'inline-block':'none'); const isMove=(t==='move_to'||t==='move'||t==='drag'); eX.style.display=(isMove?'inline-block':'none'); eY.style.display=(isMove?'inline-block':'none'); eRandom.style.display=(isMove?'inline-block':'none'); eDuration.style.display=((t==='move'||t==='drag'||t==='move_to')?'inline-block':'none'); eSeconds.style.display=(t==='wait'?'inline-block':'none'); ePixels.style.display=(t==='scroll'?'inline-block':'none'); eKey.style.display=(t==='keypress'?'inline-block':'none'); eMods.style.display=(t==='keypress'?'inline-block':'none'); }
+            updateElseFields(); eType.addEventListener('change', updateElseFields);
+            const eSave = document.createElement('button'); eSave.textContent='Save Else';
+            eSave.onclick = async () => {
+              try {
+                const updated = { ...act };
+                const newEA = { ...ea, type: eType.value };
+                if (eButton.value) newEA.button = eButton.value;
+                if (eClicks.value !== '') newEA.clicks = parseInt(eClicks.value,10);
+                if (eX.value !== '') newEA.x = parseInt(eX.value,10);
+                if (eY.value !== '') newEA.y = parseInt(eY.value,10);
+                newEA.random = !!eRandom.checked;
+                if (eDuration.value !== '') newEA.duration = parseFloat(eDuration.value);
+                if (eSeconds.value !== '') newEA.seconds = parseFloat(eSeconds.value);
+                if (ePixels.value !== '') newEA.pixels = parseInt(ePixels.value,10);
+                if (eKey.value) newEA.key = eKey.value;
+                if (eMods.value) newEA.modifiers = eMods.value.split(',').map(s=>s.trim()).filter(Boolean);
+                const list = Array.isArray(updated.else_actions) ? [...updated.else_actions] : [];
+                list[eidx] = newEA; updated.else_actions = list;
+                const res = await fetch(`${apiBase}/api/failsafe/sequence/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadFailsafeSteps();
+                statusEl.textContent = `Status: saved else action ${eidx} for #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: save failed (${e.message})`; }
+            };
+            const eDel = document.createElement('button'); eDel.textContent='Delete Else';
+            eDel.onclick = async () => {
+              try {
+                const updated = { ...act };
+                const list = Array.isArray(updated.else_actions) ? updated.else_actions.filter((_,i)=>i!==eidx) : [];
+                updated.else_actions = list;
+                const res = await fetch(`${apiBase}/api/failsafe/sequence/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadFailsafeSteps();
+                statusEl.textContent = `Status: deleted else action ${eidx} for #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: delete failed (${e.message})`; }
+            };
+            eRow.appendChild(eType); eRow.appendChild(eButton); eRow.appendChild(eClicks);
+            eRow.appendChild(eX); eRow.appendChild(eY); eRow.appendChild(eRandom);
+            eRow.appendChild(eDuration); eRow.appendChild(eSeconds); eRow.appendChild(ePixels);
+            eRow.appendChild(eKey); eRow.appendChild(eMods); eRow.appendChild(eSave); eRow.appendChild(eDel);
+            eDiv.appendChild(eRow);
+            elseWrap.appendChild(eDiv);
+          });
+          const addElseRow = document.createElement('div'); addElseRow.className='row';
+          function addElseOfType(t, preset={}){
+            return async () => {
+              try {
+                const updated = { ...act };
+                const list = Array.isArray(updated.else_actions) ? [...updated.else_actions] : [];
+                list.push({ type: t, ...preset }); updated.else_actions = list;
+                const res = await fetch(`${apiBase}/api/failsafe/sequence/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadFailsafeSteps();
+                statusEl.textContent = `Status: added else ${t} to action #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: add else failed (${e.message})`; }
+            };
+          }
+          const elsePalette = [
+            {label:'Add else click', t:'click'},
+            {label:'Add else right_click', t:'click', preset:{button:'right'}},
+            {label:'Add else double_click', t:'click', preset:{clicks:2}},
+            {label:'Add else move', t:'move', preset:{duration:1.0}},
+            {label:'Add else move_to', t:'move_to', preset:{duration:1.0}},
+            {label:'Add else type', t:'type', preset:{text:'', delay:0.0}},
+            {label:'Add else wait', t:'wait', preset:{seconds:0.5}},
+            {label:'Add else scroll', t:'scroll', preset:{pixels:100}},
+            {label:'Add else click_and_hold', t:'click_and_hold', preset:{duration:1.0}}
+          ];
+          elsePalette.forEach(p=>{ const b=document.createElement('button'); b.textContent=p.label; b.onclick=addElseOfType(p.t, p.preset||{}); addElseRow.appendChild(b); });
+          elseWrap.appendChild(addElseRow);
+          aDiv.appendChild(elseWrap);
+          // If-Not actions list for this action
+          const ifNotWrap = document.createElement('div'); ifNotWrap.className='actions';
+          const ifNotTitle = document.createElement('small'); ifNotTitle.textContent='If-Not Actions:'; ifNotWrap.appendChild(ifNotTitle);
+          const ifNotActions = Array.isArray(act.if_not_actions) ? act.if_not_actions : [];
+          ifNotActions.forEach((ina, iidx) => {
+            const iDiv = document.createElement('div'); iDiv.className='action';
+            const iRow = document.createElement('div'); iRow.className='row';
+            const iType = document.createElement('select'); ['click','wait','type','drag','move','move_to','keypress','scroll','click_and_hold'].forEach(t=>{ const opt=document.createElement('option'); opt.value=t; opt.textContent=t; iType.appendChild(opt); }); iType.value = ina.type || ina.action || 'click';
+            const iButton = document.createElement('select'); ['left','right','middle'].forEach(b=>{ const opt=document.createElement('option'); opt.value=b; opt.textContent=b; iButton.appendChild(opt); }); iButton.value = ina.button || 'left';
+            const iClicks = document.createElement('input'); iClicks.type='number'; iClicks.placeholder='clicks'; iClicks.value=(ina.clicks!=null?ina.clicks:'');
+            const iX = document.createElement('input'); iX.type='number'; iX.placeholder='X'; iX.value=(ina.x!=null?ina.x:'');
+            const iY = document.createElement('input'); iY.type='number'; iY.placeholder='Y'; iY.value=(ina.y!=null?ina.y:'');
+            const iRandom = document.createElement('input'); iRandom.type='checkbox'; iRandom.checked=!!ina.random; iRandom.title='Toggle Random';
+            const iDuration = document.createElement('input'); iDuration.type='number'; iDuration.placeholder='duration'; iDuration.value=(ina.duration!=null?ina.duration:'');
+            const iSeconds = document.createElement('input'); iSeconds.type='number'; iSeconds.placeholder='seconds'; iSeconds.value=(ina.seconds!=null?ina.seconds:'');
+            const iPixels = document.createElement('input'); iPixels.type='number'; iPixels.placeholder='pixels'; iPixels.value=(ina.pixels!=null?ina.pixels:'');
+            const iKey = document.createElement('input'); iKey.type='text'; iKey.placeholder='key'; iKey.value=ina.key||'';
+            const iMods = document.createElement('input'); iMods.type='text'; iMods.placeholder='modifiers'; iMods.value=(Array.isArray(ina.modifiers)?ina.modifiers.join(','):(ina.modifiers||''));
+            function updateIfNotFields(){ const t=iType.value; iButton.style.display=(t==='click'?'inline-block':'none'); iClicks.style.display=(t==='click'?'inline-block':'none'); const isMove=(t==='move_to'||t==='move'||t==='drag'); iX.style.display=(isMove?'inline-block':'none'); iY.style.display=(isMove?'inline-block':'none'); iRandom.style.display=(isMove?'inline-block':'none'); iDuration.style.display=((t==='move'||t==='drag'||t==='move_to')?'inline-block':'none'); iSeconds.style.display=(t==='wait'?'inline-block':'none'); iPixels.style.display=(t==='scroll'?'inline-block':'none'); iKey.style.display=(t==='keypress'?'inline-block':'none'); iMods.style.display=(t==='keypress'?'inline-block':'none'); }
+            updateIfNotFields(); iType.addEventListener('change', updateIfNotFields);
+            const iSave = document.createElement('button'); iSave.textContent='Save If-Not';
+            iSave.onclick = async () => {
+              try {
+                const updated = { ...act };
+                const newINA = { ...ina, type: iType.value };
+                if (iButton.value) newINA.button = iButton.value;
+                if (iClicks.value !== '') newINA.clicks = parseInt(iClicks.value,10);
+                if (iX.value !== '') newINA.x = parseInt(iX.value,10);
+                if (iY.value !== '') newINA.y = parseInt(iY.value,10);
+                newINA.random = !!iRandom.checked;
+                if (iDuration.value !== '') newINA.duration = parseFloat(iDuration.value);
+                if (iSeconds.value !== '') newINA.seconds = parseFloat(iSeconds.value);
+                if (iPixels.value !== '') newINA.pixels = parseInt(iPixels.value,10);
+                if (iKey.value) newINA.key = iKey.value;
+                if (iMods.value) newINA.modifiers = iMods.value.split(',').map(s=>s.trim()).filter(Boolean);
+                const list = Array.isArray(updated.if_not_actions) ? [...updated.if_not_actions] : [];
+                list[iidx] = newINA; updated.if_not_actions = list;
+                const res = await fetch(`${apiBase}/api/failsafe/sequence/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadFailsafeSteps();
+                statusEl.textContent = `Status: saved if-not action ${iidx} for #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: save failed (${e.message})`; }
+            };
+            const iDel = document.createElement('button'); iDel.textContent='Delete If-Not';
+            iDel.onclick = async () => {
+              try {
+                const updated = { ...act };
+                const list = Array.isArray(updated.if_not_actions) ? updated.if_not_actions.filter((_,i)=>i!==iidx) : [];
+                updated.if_not_actions = list;
+                const res = await fetch(`${apiBase}/api/failsafe/sequence/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadFailsafeSteps();
+                statusEl.textContent = `Status: deleted if-not action ${iidx} for #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: delete failed (${e.message})`; }
+            };
+            iRow.appendChild(iType); iRow.appendChild(iButton); iRow.appendChild(iClicks);
+            iRow.appendChild(iX); iRow.appendChild(iY); iRow.appendChild(iRandom);
+            iRow.appendChild(iDuration); iRow.appendChild(iSeconds); iRow.appendChild(iPixels);
+            iRow.appendChild(iKey); iRow.appendChild(iMods); iRow.appendChild(iSave); iRow.appendChild(iDel);
+            iDiv.appendChild(iRow);
+            ifNotWrap.appendChild(iDiv);
+          });
+          const addIfNotRow = document.createElement('div'); addIfNotRow.className='row';
+          function addIfNotOfType(t, preset={}){
+            return async () => {
+              try {
+                const updated = { ...act };
+                const list = Array.isArray(updated.if_not_actions) ? [...updated.if_not_actions] : [];
+                list.push({ type: t, ...preset }); updated.if_not_actions = list;
+                const res = await fetch(`${apiBase}/api/failsafe/sequence/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) });
+                const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                await loadFailsafeSteps();
+                statusEl.textContent = `Status: added if-not ${t} to action #${aidx}`;
+              } catch (e) { statusEl.textContent = `Status: add if-not failed (${e.message})`; }
+            };
+          }
+          const ifNotPalette = [
+            {label:'Add if-not click', t:'click'},
+            {label:'Add if-not right_click', t:'click', preset:{button:'right'}},
+            {label:'Add if-not double_click', t:'click', preset:{clicks:2}},
+            {label:'Add if-not move', t:'move', preset:{duration:1.0}},
+            {label:'Add if-not move_to', t:'move_to', preset:{duration:1.0}},
+            {label:'Add if-not type', t:'type', preset:{text:'', delay:0.0}},
+            {label:'Add if-not wait', t:'wait', preset:{seconds:0.5}},
+            {label:'Add if-not scroll', t:'scroll', preset:{pixels:100}},
+            {label:'Add if-not click_and_hold', t:'click_and_hold', preset:{duration:1.0}}
+          ];
+          ifNotPalette.forEach(p=>{ const b=document.createElement('button'); b.textContent=p.label; b.onclick=addIfNotOfType(p.t, p.preset||{}); addIfNotRow.appendChild(b); });
+          ifNotWrap.appendChild(addIfNotRow);
+          aDiv.appendChild(ifNotWrap);
           actionsWrap.appendChild(aDiv);
         });
         const addActionRow = document.createElement('div'); addActionRow.className='row';
@@ -546,6 +728,7 @@
     const fsPreview = document.getElementById('fsPreview');
     const fsSel = document.getElementById('fsSel');
     const fsImgPane = document.getElementById('fsImagePane');
+    const fsPhoneToggle = document.getElementById('fsPhoneToggle');
     let fsMonitors = [];
     let fsSelectedMonitor = 0;
     // Prevent browser dragging the image so region selection works
@@ -594,11 +777,11 @@
       return { rect, nw, nh, contentW, contentH, offsetX, offsetY };
     }
     let fsLastDragPos = null;
-    fsPreview.addEventListener('mousedown', (e) => {
+    function fsStartDrag(clientX, clientY){
       const paneRect = fsImgPane.getBoundingClientRect();
       const info = getFsImageContentInfo(fsPreview);
-      const ix = e.clientX - info.rect.left - info.offsetX;
-      const iy = e.clientY - info.rect.top - info.offsetY;
+      const ix = clientX - info.rect.left - info.offsetX;
+      const iy = clientY - info.rect.top - info.offsetY;
       if (ix < 0 || iy < 0 || ix > info.contentW || iy > info.contentH) return;
       const offX = (info.rect.left - paneRect.left) + info.offsetX;
       const offY = (info.rect.top - paneRect.top) + info.offsetY;
@@ -608,11 +791,11 @@
       fsSel.style.top = `${offY + iy}px`;
       fsSel.style.width = '0px';
       fsSel.style.height = '0px';
-    });
-    fsPreview.addEventListener('mousemove', (e) => {
+    }
+    function fsMoveDrag(clientX, clientY){
       if (!fsDragStart) return;
       const info = getFsImageContentInfo(fsPreview);
-      let ix = e.clientX - info.rect.left - info.offsetX; let iy = e.clientY - info.rect.top - info.offsetY;
+      let ix = clientX - info.rect.left - info.offsetX; let iy = clientY - info.rect.top - info.offsetY;
       ix = Math.max(0, Math.min(info.contentW, ix));
       iy = Math.max(0, Math.min(info.contentH, iy));
       fsLastDragPos = { x: ix, y: iy };
@@ -624,8 +807,8 @@
       fsSel.style.top = `${top}px`;
       fsSel.style.width = `${w}px`;
       fsSel.style.height = `${h}px`;
-    });
-    window.addEventListener('mouseup', () => {
+    }
+    function fsEndDrag(){
       if (!fsDragStart) return;
       const info = getFsImageContentInfo(fsPreview);
       const ix0 = Math.min(fsDragStart.x, (fsLastDragPos ? fsLastDragPos.x : fsDragStart.x));
@@ -642,7 +825,19 @@
       statusEl.textContent = `Status: selected region ${x0},${y0},${rw},${rh}`;
       fsDragStart = null;
       fsLastDragPos = null;
-    });
+    }
+    // Mouse events
+    fsPreview.addEventListener('mousedown', (e) => { fsStartDrag(e.clientX, e.clientY); });
+    fsPreview.addEventListener('mousemove', (e) => { fsMoveDrag(e.clientX, e.clientY); });
+    window.addEventListener('mouseup', () => { fsEndDrag(); });
+    // Touch events when Using Phone is enabled
+    fsPreview.addEventListener('touchstart', (e) => { if (!fsPhoneToggle.checked) return; e.preventDefault(); const t=e.touches[0]; if (t) fsStartDrag(t.clientX, t.clientY); }, { passive: false });
+    fsPreview.addEventListener('touchmove', (e) => { if (!fsPhoneToggle.checked || !fsDragStart) return; e.preventDefault(); const t=e.touches[0]; if (t) fsMoveDrag(t.clientX, t.clientY); }, { passive: false });
+    window.addEventListener('touchend', () => { if (!fsPhoneToggle.checked) return; fsEndDrag(); });
+    // Prevent scroll during selection when using phone
+    function updateFsTouchAction(){ fsImgPane.style.touchAction = fsPhoneToggle.checked ? 'none' : 'auto'; }
+    fsPhoneToggle.addEventListener('change', updateFsTouchAction);
+    updateFsTouchAction();
   </script>
 </body>
 </html>
