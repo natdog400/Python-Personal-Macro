@@ -42,6 +42,8 @@
     <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
       <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
       <input type="text" id="token" placeholder="Access Token" style="width:260px" />
+      <span id="globalLiveDot" title="Server live status" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#555"></span>
+      <small id="globalLiveText">Live: disconnected</small>
     </div>
   </header>
   <main>
@@ -91,11 +93,16 @@
             <select id="grpPreviewSize"><option>640</option><option>800</option><option selected>1024</option><option>1280</option></select>
           </label>
           <label style="margin-left:16px; display:inline-flex; align-items:center; gap:6px"><input type="checkbox" id="grpPhoneToggle" /> Using Phone</label>
+          <label style="margin-left:16px; display:inline-flex; align-items:center; gap:6px"><input type="checkbox" id="grpJpegToggle" /> JPEG</label>
+          <label style="display:inline-flex; align-items:center; gap:6px">Quality <input type="number" id="grpJpegQuality" min="1" max="95" value="75" style="width:70px" /></label>
+  <label style="display:inline-flex; align-items:center; gap:6px">Scale <input type="number" id="grpJpegScale" min="0.25" max="1" step="0.05" value="1" style="width:70px" /></label>
+  <span id="grpFpsText" style="margin-left:16px"><small>FPS: --</small></span>
         </div>
-        <div id="grpImagePane" style="position:relative; width:100%">
-          <img id="grpPreview" alt="Preview" draggable="false" style="width:100%; max-height:60vh; object-fit:contain; background:#111; border:1px solid #3a3a3a; border-radius:6px" />
-          <div id="grpSel" style="position:absolute; border:2px solid #4af; background:rgba(64,160,255,0.2); display:none"></div>
-        </div>
+    <div id="grpImagePane" style="position:relative; width:100%">
+      <img id="grpPreview" alt="Preview" draggable="false" style="width:100%; max-height:60vh; object-fit:contain; background:#111; border:1px solid #3a3a3a; border-radius:6px" />
+      <div id="grpSel" style="position:absolute; border:2px solid #4af; background:rgba(64,160,255,0.2); display:none"></div>
+      <div id="grpClickMarker" style="position:absolute; width:10px; height:10px; border:2px solid #ef4444; border-radius:50%; background:rgba(239,68,68,0.25); display:none"></div>
+    </div>
       </div>
       <small>Click-drag on the preview to select a region; use action buttons to apply.</small>
     </div>
@@ -111,6 +118,9 @@
     const groupLoopCountEl = document.getElementById('groupLoopCount');
     const stepsEl = document.getElementById('steps');
     const newGroupNameEl = document.getElementById('newGroupName');
+    const globalLiveDot = document.getElementById('globalLiveDot');
+    const globalLiveText = document.getElementById('globalLiveText');
+    let sseGlobal = null; let sseGlobalRetryMs = 1000;
 
     function authHeaders() { const tok = tokenEl.value.trim(); return tok ? { 'Authorization': `Bearer ${tok}` } : {}; }
 
@@ -134,6 +144,7 @@
     tokenEl.addEventListener('change', () => {
       try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
       fetchTemplates().then(fetchGroups);
+      startGlobalStatusStream();
     });
     rememberEl.addEventListener('change', () => {
       try {
@@ -141,6 +152,40 @@
         if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
       } catch (e) {}
     });
+
+    function startGlobalStatusStream(){
+      const tok = (tokenEl.value || localStorage.getItem('apiToken') || '').trim();
+      if (!tok) { globalLiveText.textContent = 'Live: enter token'; globalLiveDot.style.background = '#555'; return; }
+      try { if (sseGlobal) { sseGlobal.close(); sseGlobal = null; } } catch {}
+      const url = `${apiBase}/api/status/stream?interval_ms=1000&token=${encodeURIComponent(tok)}`;
+      globalLiveText.textContent = 'Live: connecting...';
+      globalLiveDot.style.background = '#caa';
+      try {
+        sseGlobal = new EventSource(url);
+        sseGlobal.onopen = () => { globalLiveText.textContent = 'Live: connected'; globalLiveDot.style.background = '#3fb950'; sseGlobalRetryMs = 1000; };
+        sseGlobal.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            const ts = Number(msg.heartbeat || Date.now());
+            globalLiveText.textContent = `Live: heartbeat ${ts}`;
+            globalLiveDot.style.background = '#3fb950';
+          } catch (e) {
+            globalLiveText.textContent = 'Live: bad data'; globalLiveDot.style.background = '#f59e0b';
+          }
+        };
+        sseGlobal.onerror = () => {
+          globalLiveText.textContent = 'Live: disconnected, retrying...'; globalLiveDot.style.background = '#555';
+          try { sseGlobal.close(); } catch {}
+          sseGlobal = null;
+          const delay = Math.min(sseGlobalRetryMs, 10000);
+          setTimeout(startGlobalStatusStream, delay);
+          sseGlobalRetryMs = Math.min(sseGlobalRetryMs * 2, 10000);
+        };
+      } catch (e) {
+        globalLiveText.textContent = `Live: error (${e.message})`;
+        globalLiveDot.style.background = '#ef4444';
+      }
+    }
 
     async function fetchGroups() {
       try { const res = await fetch(`${apiBase}/api/groups`, { headers: authHeaders() }); const data = await res.json(); groupListEl.innerHTML=''; for (const name of (data.groups||[])) { const opt=document.createElement('option'); opt.value=name; opt.textContent=name; groupListEl.appendChild(opt); } statusEl.textContent = `Status: loaded ${groupListEl.options.length} group(s)`; } catch (e) { statusEl.textContent = `Status: failed to load groups (${e.message})`; }
@@ -208,10 +253,14 @@
           const aUp = document.createElement('button'); aUp.textContent='Up'; aUp.onclick = async () => { const name=groupListEl.value; await reorderAction(name, idx, aidx, Math.max(0,aidx-1)); };
           const aDown = document.createElement('button'); aDown.textContent='Down'; aDown.onclick = async () => { const name=groupListEl.value; const to = Math.min(actions.length-1,aidx+1); await reorderAction(name, idx, aidx, to); };
           const aUseRegion = document.createElement('button'); aUseRegion.textContent='Select Region'; aUseRegion.onclick = async () => { try { if (!lastGrpRegion) { statusEl.textContent='Status: select a region on the preview first'; return; } const name=groupListEl.value; const updated={ ...act, region: lastGrpRegion }; const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); aRegionReadout.textContent = `Region: (${lastGrpRegion[0]}, ${lastGrpRegion[1]}, ${lastGrpRegion[2]}x${lastGrpRegion[3]})`; await loadGroup(name); statusEl.textContent = `Status: applied action region #${aidx}`; } catch (e){ statusEl.textContent = `Status: apply failed (${e.message})`; } };
-          const aUseRandomRegion = document.createElement('button'); aUseRandomRegion.textContent='Set Random Region'; aUseRandomRegion.onclick = async () => { try { if (!lastGrpRegion) { statusEl.textContent='Status: select a region on the preview first'; return; } const name=groupListEl.value; const updated={ ...act, random_region: lastGrpRegion }; const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); aRandomRegionReadout.textContent = `Random Region: (${lastGrpRegion[0]}, ${lastGrpRegion[1]}, ${lastGrpRegion[2]}x${lastGrpRegion[3]})`; await loadGroup(name); statusEl.textContent = `Status: applied action random_region #${aidx}`; } catch (e){ statusEl.textContent = `Status: apply failed (${e.message})`; } };
+        const aUseRandomRegion = document.createElement('button'); aUseRandomRegion.textContent='Set Random Region'; aUseRandomRegion.onclick = async () => { try { if (!lastGrpRegion) { statusEl.textContent='Status: select a region on the preview first'; return; } const name=groupListEl.value; const updated={ ...act, random_region: lastGrpRegion }; const res = await fetch(`${apiBase}/api/groups/${encodeURIComponent(name)}/steps/${idx}/actions/${aidx}`, { method:'PUT', headers:{ ...authHeaders(), 'Content-Type':'application/json' }, body: JSON.stringify({ action: updated }) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`); aRandomRegionReadout.textContent = `Random Region: (${lastGrpRegion[0]}, ${lastGrpRegion[1]}, ${lastGrpRegion[2]}x${lastGrpRegion[3]})`; await loadGroup(name); statusEl.textContent = `Status: applied action random_region #${aidx}`; } catch (e){ statusEl.textContent = `Status: apply failed (${e.message})`; } };
+        // Show buttons for action overlays
+        const aShowRegion = document.createElement('button'); aShowRegion.textContent='Show Region'; aShowRegion.onclick=()=>{ try { if (Array.isArray(act.region)) grpRenderRegionOverlayFor(act.region); } catch(e){} };
+        const aShowRandomRegion = document.createElement('button'); aShowRandomRegion.textContent='Show Random Region'; aShowRandomRegion.onclick=()=>{ try { if (Array.isArray(act.random_region)) grpRenderRegionOverlayFor(act.random_region); } catch(e){} };
+        const aShowClick = document.createElement('button'); aShowClick.textContent='Show Click'; aShowClick.onclick=()=>{ try { if (act.x!=null && act.y!=null) grpRenderPointOverlay(act.x, act.y); } catch(e){} };
           const aRegionReadout = document.createElement('small'); const arr = Array.isArray(act.region)?act.region:null; aRegionReadout.textContent = arr?`Region: (${arr[0]}, ${arr[1]}, ${arr[2]}x${arr[3]})`:'Region: (none)';
           const aRandomRegionReadout = document.createElement('small'); const arrr = Array.isArray(act.random_region)?act.random_region:null; aRandomRegionReadout.textContent = arrr?`Random Region: (${arrr[0]}, ${arrr[1]}, ${arrr[2]}x${arrr[3]})`:'Random Region: (none)';
-          aRow.appendChild(lblAType); aRow.appendChild(lblBtn); aRow.appendChild(lblClicks); aRow.appendChild(lblX); aRow.appendChild(lblY); aRow.appendChild(lblRand); aRow.appendChild(lblDur); aRow.appendChild(lblSec); aRow.appendChild(lblPix); aRow.appendChild(lblKey); aRow.appendChild(lblMods); aRow.appendChild(aSave); aRow.appendChild(aUseRegion); aRow.appendChild(aUseRandomRegion); aRow.appendChild(aRegionReadout); aRow.appendChild(aRandomRegionReadout); aRow.appendChild(aUp); aRow.appendChild(aDown); aRow.appendChild(aDel);
+        aRow.appendChild(lblAType); aRow.appendChild(lblBtn); aRow.appendChild(lblClicks); aRow.appendChild(lblX); aRow.appendChild(lblY); aRow.appendChild(lblRand); aRow.appendChild(lblDur); aRow.appendChild(lblSec); aRow.appendChild(lblPix); aRow.appendChild(lblKey); aRow.appendChild(lblMods); aRow.appendChild(aSave); aRow.appendChild(aUseRegion); aRow.appendChild(aUseRandomRegion); aRow.appendChild(aShowRegion); aRow.appendChild(aShowRandomRegion); aRow.appendChild(aShowClick); aRow.appendChild(aRegionReadout); aRow.appendChild(aRandomRegionReadout); aRow.appendChild(aUp); aRow.appendChild(aDown); aRow.appendChild(aDel);
           aDiv.appendChild(aRow);
           // Else actions list for this action
           const elseWrap = document.createElement('div'); elseWrap.className='actions';
@@ -437,6 +486,8 @@
 
     const urlTok = new URLSearchParams(location.search).get('token'); if (urlTok) { tokenEl.value = urlTok; }
     fetchTemplates().then(fetchGroups);
+    // Ensure global live indicator starts on initial load
+    startGlobalStatusStream();
   </script>
   <script>
     // Groups preview & region selection
@@ -446,12 +497,27 @@
     const grpPhoneToggle = document.getElementById('grpPhoneToggle');
     let grpMonitors = []; let grpSelectedMonitor = 0; let lastGrpRegion = null; let grpDragStart = null;
     async function fetchGrpMonitors(){ try { const res = await fetch(`${apiBase}/api/monitors`, { headers: authHeaders() }); const data = await res.json(); grpMonitors = data.monitors||[]; const sel=document.getElementById('grpMonitor'); sel.innerHTML=''; for (const m of grpMonitors){ const opt=document.createElement('option'); opt.value=String(m.index); opt.textContent=(m.index===0?`All (${m.width}x${m.height})`:`Monitor ${m.index} (${m.width}x${m.height})`); sel.appendChild(opt);} sel.value=String(grpSelectedMonitor); } catch (e){} }
-    function updateGrpPreviewSrc(){ const tok = tokenEl.value.trim(); const q=[`monitor=${encodeURIComponent(String(grpSelectedMonitor))}`]; if (tok) q.push(`token=${encodeURIComponent(tok)}`); grpPreview.src = `${apiBase}/stream.mjpeg?${q.join('&')}`; }
-    document.getElementById('grpMonitor').addEventListener('change', (e)=>{ grpSelectedMonitor=parseInt(e.target.value,10); updateGrpPreviewSrc(); });
+  function updateGrpPreviewSrc(){ const tok = tokenEl.value.trim(); const q=[`monitor=${encodeURIComponent(String(grpSelectedMonitor))}`]; const useJpeg = !!(document.getElementById('grpJpegToggle')?.checked); const fmt = useJpeg ? 'jpeg' : 'png'; q.push(`format=${fmt}`); const scaleEl=document.getElementById('grpJpegScale'); const qualEl=document.getElementById('grpJpegQuality'); let scaleVal=parseFloat(scaleEl?.value||'1'); if(!isNaN(scaleVal)) { scaleVal=Math.max(0.25, Math.min(1.0, scaleVal)); q.push(`scale=${scaleVal.toFixed(2)}`); } if(useJpeg){ const qualVal=parseInt(qualEl?.value||'75',10); if(!isNaN(qualVal)) q.push(`quality=${Math.max(1, Math.min(95, qualVal))}`); } if (tok) q.push(`token=${encodeURIComponent(tok)}`); grpPreview.src = `${apiBase}/stream.mjpeg?${q.join('&')}`; }
+    document.getElementById('grpMonitor').addEventListener('change', (e)=>{ grpSelectedMonitor=parseInt(e.target.value,10); localStorage.setItem('preview.monitor', String(grpSelectedMonitor)); updateGrpPreviewSrc(); });
+    document.getElementById('grpJpegToggle').addEventListener('change', updateGrpPreviewSrc);
+    document.getElementById('grpJpegQuality').addEventListener('change', updateGrpPreviewSrc);
+    document.getElementById('grpJpegScale').addEventListener('change', updateGrpPreviewSrc);
     grpPreview.addEventListener('dragstart', (e)=>e.preventDefault());
     // Preview resizing
-    function setGrpPreviewSize(){ const val = parseInt(document.getElementById('grpPreviewSize').value||'1024',10); if (!isNaN(val)&&val>0){ grpPreview.style.width = `${val}px`; } }
+    function setGrpPreviewSize(){ const val = parseInt(document.getElementById('grpPreviewSize').value||'1024',10); if (!isNaN(val)&&val>0){ grpPreview.style.width = `${val}px`; } try { grpRenderRegionOverlay(); } catch (e) {} }
     document.getElementById('grpPreviewSize').addEventListener('change', setGrpPreviewSize);
+    // Load persisted preview settings
+  (function loadGrpPreviewPrefs(){ try { const fmt=localStorage.getItem('preview.format'); const qual=localStorage.getItem('preview.quality'); const scale=localStorage.getItem('preview.scale'); const mon=localStorage.getItem('preview.monitor'); const tgl=document.getElementById('grpJpegToggle'); const ql=document.getElementById('grpJpegQuality'); const sc=document.getElementById('grpJpegScale'); if(fmt && tgl) tgl.checked=(fmt==='jpeg'); if(qual && ql){ const v=parseInt(qual,10); if(!isNaN(v)) ql.value=String(v);} if(scale && sc){ let v=parseFloat(scale); if(!isNaN(v)) { v=Math.max(0.25, Math.min(1.0, v)); sc.value=String(v); } } if(mon){ const mv=parseInt(mon,10); if(!isNaN(mv)) grpSelectedMonitor=mv; } } catch(e){} })();
+    // Persist on change
+    document.getElementById('grpJpegToggle').addEventListener('change', ()=>{ const useJpeg=!!document.getElementById('grpJpegToggle').checked; localStorage.setItem('preview.format', useJpeg?'jpeg':'png'); updateGrpPreviewSrc(); });
+    document.getElementById('grpJpegQuality').addEventListener('change', ()=>{ const v=parseInt(document.getElementById('grpJpegQuality').value||'75',10); if(!isNaN(v)) localStorage.setItem('preview.quality', String(v)); updateGrpPreviewSrc(); });
+  document.getElementById('grpJpegScale').addEventListener('change', ()=>{ let v=parseFloat(document.getElementById('grpJpegScale').value||'1'); if(!isNaN(v)) { v=Math.max(0.25, Math.min(1.0, v)); localStorage.setItem('preview.scale', String(v)); } updateGrpPreviewSrc(); });
+    // (replaced) Live FPS meter based on image load events was unreliable; using metrics below.
+    // Capability gating for JPEG controls
+  async function fetchMetrics(){ try { const res=await fetch(`${apiBase}/api/metrics`, { headers: authHeaders() }); const data=await res.json(); const caps=(data&&data.capabilities)?data.capabilities:{}; const jpegOk=!!(caps.pillow_available && caps.jpeg_supported); const tgl=document.getElementById('grpJpegToggle'); const ql=document.getElementById('grpJpegQuality'); const sc=document.getElementById('grpJpegScale'); if(tgl&&ql&&sc){ tgl.disabled=!jpegOk; ql.disabled=!jpegOk; sc.disabled=false; } if(!jpegOk && tgl){ tgl.checked=false; updateGrpPreviewSrc(); } } catch(e){} }
+  // Live FPS meter via metrics
+  (function attachGrpFps(){ const out=document.getElementById('grpFpsText'); let lastFrames=null, lastTime=null; async function poll(){ try{ const res=await fetch(`${apiBase}/api/metrics`, { headers: authHeaders() }); const data=await res.json(); const frames=(data&&data.totals&&typeof data.totals.preview_mjpeg_frames==='number')?data.totals.preview_mjpeg_frames:0; const now=Date.now(); if(lastFrames!==null && lastTime!==null){ const df=frames-lastFrames; const dt=(now-lastTime)/1000; if(dt>0){ const fps=Math.max(0, df/dt); if(out) out.textContent=`FPS: ${fps.toFixed(1)}`; } } lastFrames=frames; lastTime=now; }catch(e){} } setInterval(poll,1000); poll(); })();
+    fetchMetrics();
     // Compute actual drawn image content rect inside the <img> (object-fit: contain)
     function getGrpImageContentInfo(img){
       const rect = img.getBoundingClientRect();
@@ -466,10 +532,17 @@
     let grpLastDragPos = null;
     function grpStartDrag(clientX, clientY){ const paneRect=grpPane.getBoundingClientRect(); const info=getGrpImageContentInfo(grpPreview); let ix=clientX-info.rect.left-info.offsetX; let iy=clientY-info.rect.top-info.offsetY; if (ix<0||iy<0||ix>info.contentW||iy>info.contentH) return; const offX=(info.rect.left-paneRect.left)+info.offsetX; const offY=(info.rect.top-paneRect.top)+info.offsetY; grpDragStart={ x:ix, y:iy, offX, offY }; grpSel.style.display='block'; grpSel.style.left=`${offX+ix}px`; grpSel.style.top=`${offY+iy}px`; grpSel.style.width='0px'; grpSel.style.height='0px'; }
     function grpMoveDrag(clientX, clientY){ if(!grpDragStart) return; const info=getGrpImageContentInfo(grpPreview); let ix=clientX-info.rect.left-info.offsetX; let iy=clientY-info.rect.top-info.offsetY; ix=Math.max(0, Math.min(info.contentW, ix)); iy=Math.max(0, Math.min(info.contentH, iy)); grpLastDragPos = { x: ix, y: iy }; const left=Math.min(grpDragStart.x, ix)+grpDragStart.offX; const top=Math.min(grpDragStart.y, iy)+grpDragStart.offY; const w=Math.abs(ix-grpDragStart.x); const h=Math.abs(iy-grpDragStart.y); grpSel.style.left=`${left}px`; grpSel.style.top=`${top}px`; grpSel.style.width=`${w}px`; grpSel.style.height=`${h}px`; }
-    function grpEndDrag(){ if(!grpDragStart) return; const info=getGrpImageContentInfo(grpPreview); const ix0=Math.min(grpDragStart.x, (grpLastDragPos?grpLastDragPos.x:grpDragStart.x)); const iy0=Math.min(grpDragStart.y, (grpLastDragPos?grpLastDragPos.y:grpDragStart.y)); const iw=Math.abs(((grpLastDragPos?grpLastDragPos.x:grpDragStart.x))-grpDragStart.x); const ih=Math.abs(((grpLastDragPos?grpLastDragPos.y:grpDragStart.y))-grpDragStart.y); const scaleX=info.nw/info.contentW; const scaleY=info.nh/info.contentH; const x0=Math.round(ix0*scaleX); const y0=Math.round(iy0*scaleY); const rw=Math.round(iw*scaleX); const rh=Math.round(ih*scaleY); lastGrpRegion=[x0,y0,rw,rh]; statusEl.textContent=`Status: selected region ${x0},${y0},${rw},${rh}`; grpDragStart=null; grpLastDragPos=null; }
+function grpEndDrag(){ if(!grpDragStart) return; const info=getGrpImageContentInfo(grpPreview); const ix0=Math.min(grpDragStart.x, (grpLastDragPos?grpLastDragPos.x:grpDragStart.x)); const iy0=Math.min(grpDragStart.y, (grpLastDragPos?grpLastDragPos.y:grpDragStart.y)); const iw=Math.abs(((grpLastDragPos?grpLastDragPos.x:grpDragStart.x))-grpDragStart.x); const ih=Math.abs(((grpLastDragPos?grpLastDragPos.y:grpDragStart.y))-grpDragStart.y); const scaleX=info.nw/info.contentW; const scaleY=info.nh/info.contentH; let serverScale=parseFloat((document.getElementById('grpJpegScale').value||'1')); if(isNaN(serverScale)||serverScale<=0) serverScale=1; const x0=Math.round((ix0*scaleX)/serverScale); const y0=Math.round((iy0*scaleY)/serverScale); const rw=Math.round((iw*scaleX)/serverScale); const rh=Math.round((ih*scaleY)/serverScale); lastGrpRegion=[x0,y0,rw,rh]; statusEl.textContent=`Status: selected region ${x0},${y0},${rw},${rh}`; grpDragStart=null; grpLastDragPos=null; }
+// Re-render selection overlay from saved monitor-space region after preview reload/scale change
+function grpRenderRegionOverlay(){ if(!lastGrpRegion) return; const info=getGrpImageContentInfo(grpPreview); const paneRect=grpPane.getBoundingClientRect(); const scaleX=info.nw/info.contentW; const scaleY=info.nh/info.contentH; let serverScale=parseFloat((document.getElementById('grpJpegScale').value||'1')); if(isNaN(serverScale)||serverScale<=0) serverScale=1; const [mx,my,mw,mh]=lastGrpRegion; const ix0=(mx*serverScale)/scaleX; const iy0=(my*serverScale)/scaleY; const iw=(mw*serverScale)/scaleX; const ih=(mh*serverScale)/scaleY; const offX=(info.rect.left-paneRect.left)+info.offsetX; const offY=(info.rect.top-paneRect.top)+info.offsetY; grpSel.style.display='block'; grpSel.style.left=`${offX+ix0}px`; grpSel.style.top=`${offY+iy0}px`; grpSel.style.width=`${iw}px`; grpSel.style.height=`${ih}px`; }
+// Render an arbitrary saved region onto group preview
+function grpRenderRegionOverlayFor(region){ if(!Array.isArray(region)) return; const info=getGrpImageContentInfo(grpPreview); const paneRect=grpPane.getBoundingClientRect(); const scaleX=info.nw/info.contentW; const scaleY=info.nh/info.contentH; let serverScale=parseFloat((document.getElementById('grpJpegScale').value||'1')); if(isNaN(serverScale)||serverScale<=0) serverScale=1; const [mx,my,mw,mh]=region; const ix0=(mx*serverScale)/scaleX; const iy0=(my*serverScale)/scaleY; const iw=(mw*serverScale)/scaleX; const ih=(mh*serverScale)/scaleY; const offX=(info.rect.left-paneRect.left)+info.offsetX; const offY=(info.rect.top-paneRect.top)+info.offsetY; grpSel.style.display='block'; grpSel.style.left=`${offX+ix0}px`; grpSel.style.top=`${offY+iy0}px`; grpSel.style.width=`${iw}px`; grpSel.style.height=`${ih}px`; }
+// Render a saved click point
+function grpRenderPointOverlay(mx,my){ if(mx==null||my==null) return; const info=getGrpImageContentInfo(grpPreview); const paneRect=grpPane.getBoundingClientRect(); const scaleX=info.nw/info.contentW; const scaleY=info.nh/info.contentH; let serverScale=parseFloat((document.getElementById('grpJpegScale').value||'1')); if(isNaN(serverScale)||serverScale<=0) serverScale=1; const ix=(mx*serverScale)/scaleX; const iy=(my*serverScale)/scaleY; const offX=(info.rect.left-paneRect.left)+info.offsetX; const offY=(info.rect.top-paneRect.top)+info.offsetY; const marker=document.getElementById('grpClickMarker'); marker.style.display='block'; marker.style.left=`${offX+ix-5}px`; marker.style.top=`${offY+iy-5}px`; }
     // Mouse events
-    grpPreview.addEventListener('mousedown', (e)=>{ grpStartDrag(e.clientX, e.clientY); });
-    grpPreview.addEventListener('mousemove', (e)=>{ grpMoveDrag(e.clientX, e.clientY); });
+grpPreview.addEventListener('mousedown', (e)=>{ grpStartDrag(e.clientX, e.clientY); });
+grpPreview.addEventListener('mousemove', (e)=>{ grpMoveDrag(e.clientX, e.clientY); });
+grpPreview.addEventListener('load', ()=>{ grpRenderRegionOverlay(); });
     window.addEventListener('mouseup', ()=>{ grpEndDrag(); });
     // Touch events (active when Using Phone is enabled)
     grpPreview.addEventListener('touchstart', (e)=>{ if (!grpPhoneToggle.checked) return; e.preventDefault(); const t=e.touches[0]; if (t) grpStartDrag(t.clientX, t.clientY); }, { passive: false });

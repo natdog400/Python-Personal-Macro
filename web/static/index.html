@@ -31,6 +31,11 @@
       <a href="/static/failsafe.html" style="color:#9bd">Open Failsafe Settings</a>
       <a href="/static/debug.html" style="color:#9bd">Open Debug Logs</a>
     </div>
+    <div style="margin-top:8px; display:flex; justify-content:flex-end; align-items:center; gap:8px">
+      <span id="globalLiveDot" title="Server live status" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#555"></span>
+      <small id="globalLiveText">Live: disconnected</small>
+      <small id="globalTokenBadge" title="Token validity" style="margin-left:6px; color:#999">Token: unknown</small>
+    </div>
   </header>
   <main>
     <div class="panel col">
@@ -46,8 +51,15 @@
         </label>
       </div>
       <div class="row" style="margin-top:8px">
+        <label style="flex:1">
+          Group
+          <select id="group"></select>
+        </label>
+      </div>
+      <div class="row" style="margin-top:8px">
         <button id="btnRun">Run (F5)</button>
         <button id="btnStop">Stop (F8)</button>
+        <button id="btnRunGroup">Run Group</button>
       </div>
       <div style="margin-top:12px">
         <small id="status">Status: idle</small>
@@ -58,6 +70,12 @@
         <label style="flex:0 0 200px">Monitor
           <select id="dashMonitor"></select>
         </label>
+        <div class="row" style="gap:10px; margin-left:12px">
+          <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="jpegToggle" /> Use JPEG</label>
+          <label style="display:flex; align-items:center; gap:6px">Quality <input type="number" id="jpegQuality" min="30" max="95" step="1" value="75" style="width:70px" /></label>
+          <label style="display:flex; align-items:center; gap:6px">Scale <input type="number" id="jpegScale" min="0.25" max="1.0" step="0.05" value="1.0" style="width:70px" /></label>
+          <span id="fpsText" style="margin-left:16px"><small>FPS: --</small></span>
+        </div>
       </div>
       <img id="preview" alt="Preview" />
       <div style="margin-top:8px"><small>Live preview (PNG frames over multipart stream)</small></div>
@@ -69,13 +87,64 @@
     const tokenEl = document.getElementById('token');
     const rememberEl = document.getElementById('rememberToken');
     const seqEl = document.getElementById('sequence');
+    const grpEl = document.getElementById('group');
     const statusEl = document.getElementById('status');
     const previewEl = document.getElementById('preview');
     const dashMonitorEl = document.getElementById('dashMonitor');
+    const jpegToggleEl = document.getElementById('jpegToggle');
+    const jpegQualityEl = document.getElementById('jpegQuality');
+    const jpegScaleEl = document.getElementById('jpegScale');
+    let pillowAvailable = false;
+    let jpegSupported = false;
     let monitors = [];
     let selectedMonitor = 0;
     const btnRun = document.getElementById('btnRun');
     const btnStop = document.getElementById('btnStop');
+    const btnRunGroup = document.getElementById('btnRunGroup');
+    const globalLiveDot = document.getElementById('globalLiveDot');
+    const globalLiveText = document.getElementById('globalLiveText');
+    const globalTokenBadge = document.getElementById('globalTokenBadge');
+    // Update status when preview connects or disconnects
+    previewEl.addEventListener('load', () => { statusEl.textContent = 'Status: Preview Connected'; });
+    previewEl.addEventListener('error', () => { statusEl.textContent = 'Status: Preview Lost/Disconnected'; });
+    // Load persisted preview settings
+    (function loadPreviewPrefs(){
+      try {
+        const fmt = localStorage.getItem('preview.format');
+        const qual = localStorage.getItem('preview.quality');
+        const scale = localStorage.getItem('preview.scale');
+        const mon = localStorage.getItem('preview.monitor');
+        if (fmt) jpegToggleEl.checked = (fmt === 'jpeg');
+        if (qual) { const v = Number(qual); if (!isNaN(v)) jpegQualityEl.value = String(v); }
+        if (scale) { const v = Number(scale); if (!isNaN(v)) jpegScaleEl.value = String(v); }
+        if (mon) { const mv = parseInt(mon,10); if (!isNaN(mv)) selectedMonitor = mv; }
+      } catch (e) {}
+    })();
+    // Live status elements
+    const liveWrap = (function(){
+      // Inject a simple live status area below the existing status row
+      const panel = document.querySelector('.panel.col');
+      const live = document.createElement('div');
+      live.style.marginTop = '8px';
+      live.innerHTML = `
+        <div class="row" style="gap:6px; align-items:center">
+          <span id="hbDot" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#555"></span>
+          <small id="hbText">Live: disconnected</small>
+        </div>
+        <small id="lastRunText">Last run: idle</small>
+        <small id="metricsText" style="display:block; margin-top:4px">Metrics: loading...</small>
+        <small id="latencyText" style="display:block; margin-top:4px">Latency: measuring...</small>
+      `;
+      panel.appendChild(live);
+      return live;
+    })();
+    const hbDot = document.getElementById('hbDot');
+    const hbText = document.getElementById('hbText');
+    const lastRunText = document.getElementById('lastRunText');
+    let sse = null;
+    let sseRetryMs = 1000;
+    let metricsTimer = null;
+    let latencyTimer = null;
 
     async function fetchSequences() {
       const tok = tokenEl.value.trim();
@@ -97,6 +166,22 @@
       } catch (e) {
         statusEl.textContent = `Status: failed to load sequences (${e.message})`;
       }
+    }
+
+    async function fetchGroups() {
+      const tok = tokenEl.value.trim();
+      if (!tok) return;
+      try {
+        const res = await fetch(`${apiBase}/api/groups`, { headers: { 'Authorization': `Bearer ${tok}` } });
+        const data = await res.json();
+        const list = data.groups || [];
+        grpEl.innerHTML = '';
+        for (const name of list) {
+          const opt = document.createElement('option');
+          opt.value = name; opt.textContent = name;
+          grpEl.appendChild(opt);
+        }
+      } catch {}
     }
 
     async function runSequence() {
@@ -131,6 +216,26 @@
       } catch (e) { statusEl.textContent = `Status: stop error (${e.message})`; }
     }
 
+    async function runGroup() {
+      const tok = tokenEl.value.trim();
+      if (!tok) { statusEl.textContent = 'Status: enter token'; return; }
+      const group = grpEl.value || null;
+      if (!group) { statusEl.textContent = 'Status: choose a group'; return; }
+      try {
+        const res = await fetch(`${apiBase}/api/run-group`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${tok}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ group })
+        });
+        const data = await res.json();
+        if (res.ok) statusEl.textContent = `Status: run-group requested (${group})`;
+        else statusEl.textContent = `Status: run-group failed (${data.error})`;
+      } catch (e) { statusEl.textContent = `Status: run-group error (${e.message})`; }
+    }
+
     async function fetchMonitors() {
       const tok = tokenEl.value.trim();
       if (!tok) return;
@@ -153,9 +258,158 @@
       const tok = tokenEl.value.trim();
       if (!tok) { statusEl.textContent = 'Status: enter token'; return; }
       // Pass token via query param for img src
+      const useJpeg = pillowAvailable && jpegSupported && !!jpegToggleEl.checked;
       const q = [`monitor=${encodeURIComponent(String(selectedMonitor))}`, `token=${encodeURIComponent(tok)}`];
+      if (useJpeg) {
+        const qv = Math.max(30, Math.min(95, Number(jpegQualityEl.value || 75)));
+        const sv = Math.max(0.25, Math.min(1.0, Number(jpegScaleEl.value || 1.0)));
+        q.push('format=jpeg');
+        q.push(`quality=${encodeURIComponent(String(qv))}`);
+        q.push(`scale=${encodeURIComponent(String(sv))}`);
+      } else {
+        q.push('format=png');
+      }
       previewEl.src = `/stream.mjpeg?${q.join('&')}`;
-      statusEl.textContent = 'Status: preview connecting...';
+      // Fallback: if MJPEG fails to load, switch to single-frame snapshot
+      previewEl.onerror = () => {
+        const snap = `/api/snapshot.png?${q.join('&')}`;
+        previewEl.src = snap;
+        statusEl.textContent = 'Status: Preview Snapshot Fallback';
+      };
+      statusEl.textContent = 'Status: Preview Connecting';
+    }
+    // Persist preview settings on change
+    jpegToggleEl.addEventListener('change', () => { localStorage.setItem('preview.format', jpegToggleEl.checked ? 'jpeg' : 'png'); startPreview(); });
+    jpegQualityEl.addEventListener('change', () => { const v = Number(jpegQualityEl.value||75); if (!isNaN(v)) localStorage.setItem('preview.quality', String(v)); startPreview(); });
+    jpegScaleEl.addEventListener('change', () => { const v = Number(jpegScaleEl.value||1.0); if (!isNaN(v)) localStorage.setItem('preview.scale', String(v)); startPreview(); });
+
+    async function fetchMetrics(){
+      try {
+        const tok = tokenEl.value.trim();
+        if (!tok) { document.getElementById('metricsText').textContent = 'Metrics: enter token'; return; }
+        const res = await fetch(`/api/metrics`, { headers: { 'Authorization': `Bearer ${tok}` } });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const c = data.connections || {};
+        const uptime = Number(data.uptime || 0);
+        const fmtUptime = `${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m ${Math.floor(uptime%60)}s`;
+        const app = data.app || null;
+        const caps = data.capabilities || {};
+        pillowAvailable = !!caps.pillow_available;
+        jpegSupported = !!caps.jpeg_supported;
+        // Enable/disable JPEG controls based on capability
+        const canUseJpeg = pillowAvailable && jpegSupported;
+        if (jpegToggleEl) jpegToggleEl.disabled = !canUseJpeg;
+        if (jpegQualityEl) jpegQualityEl.disabled = !canUseJpeg || !jpegToggleEl.checked;
+        if (jpegScaleEl) jpegScaleEl.disabled = !canUseJpeg || !jpegToggleEl.checked;
+        const cpu = app ? (app.cpu_percent ?? 0) : null;
+        const memBytes = app ? (app.mem_rss_bytes ?? 0) : null;
+        const memMB = memBytes != null ? Math.round(memBytes/1024/1024) : null;
+        const procs = app ? (app.process_count ?? 1) : null;
+        const appPart = app ? `; CPU ${cpu}% ; Mem ${memMB}MB ; Proc ${procs}` : '';
+        document.getElementById('metricsText').textContent = `Metrics: uptime ${fmtUptime}; SSE ${c.status_sse||0}; MJPEG ${c.preview_mjpeg||0}; Log ${c.log_sse||0}${appPart}`;
+      } catch (e) {
+        document.getElementById('metricsText').textContent = `Metrics: error (${e.message})`;
+      }
+    }
+
+    // React to control changes by restarting preview
+    [jpegToggleEl, jpegQualityEl, jpegScaleEl, dashMonitorEl].forEach(el => {
+      if (!el) return;
+      el.addEventListener('change', () => {
+        const canUseJpeg = pillowAvailable && jpegSupported;
+        if (jpegQualityEl) jpegQualityEl.disabled = !canUseJpeg || !jpegToggleEl.checked;
+        if (jpegScaleEl) jpegScaleEl.disabled = !canUseJpeg || !jpegToggleEl.checked;
+        startPreview();
+      });
+    });
+
+    async function measureLatency(){
+      try {
+        const tok = tokenEl.value.trim();
+        const el = document.getElementById('latencyText');
+        if (!tok) { el.textContent = 'Latency: enter token'; return; }
+        const t0 = performance.now();
+        const res = await fetch(`/api/ping`, { headers: { 'Authorization': `Bearer ${tok}` } });
+        await res.json();
+        const t1 = performance.now();
+        const rtt = Math.round(t1 - t0);
+        el.textContent = `Latency: ${rtt} ms`;
+      } catch (e) {
+        const el = document.getElementById('latencyText');
+        el.textContent = `Latency: error (${e.message})`;
+      }
+    }
+
+    async function updateTokenBadge() {
+      try {
+        const tok = tokenEl.value.trim();
+        if (!tok) { globalTokenBadge.textContent = 'Token: missing'; globalTokenBadge.style.color = '#999'; return; }
+        const res = await fetch(`/api/status/check`, { headers: { 'Authorization': `Bearer ${tok}` } });
+        const data = await res.json();
+        if (data && data.valid) { globalTokenBadge.textContent = 'Token: valid'; globalTokenBadge.style.color = '#3fb950'; }
+        else { globalTokenBadge.textContent = 'Token: invalid'; globalTokenBadge.style.color = '#ef4444'; }
+      } catch (e) {
+        globalTokenBadge.textContent = 'Token: error'; globalTokenBadge.style.color = '#f59e0b';
+      }
+    }
+
+    function startStatusStream(){
+      const tok = tokenEl.value.trim();
+      if (!tok) {
+        hbText.textContent = 'Live: enter token'; hbDot.style.background = '#555';
+        if (globalLiveText) globalLiveText.textContent = 'Live: enter token';
+        if (globalLiveDot) globalLiveDot.style.background = '#555';
+        return;
+      }
+      try { if (sse) { sse.close(); sse = null; } } catch {}
+      const url = `/api/status/stream?interval_ms=1000&token=${encodeURIComponent(tok)}`;
+      hbText.textContent = 'Live: connecting...'; hbDot.style.background = '#caa';
+      if (globalLiveText) globalLiveText.textContent = 'Live: connecting...';
+      if (globalLiveDot) globalLiveDot.style.background = '#caa';
+      try {
+        sse = new EventSource(url);
+        sse.onopen = () => {
+          hbText.textContent = 'Live: connected'; hbDot.style.background = '#3fb950'; sseRetryMs = 1000;
+          if (globalLiveText) globalLiveText.textContent = 'Live: connected';
+          if (globalLiveDot) globalLiveDot.style.background = '#3fb950';
+        };
+        sse.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            const ts = Number(msg.heartbeat || Date.now());
+            hbText.textContent = `Live: heartbeat ${ts}`; hbDot.style.background = '#3fb950';
+            if (globalLiveText) globalLiveText.textContent = `Live: heartbeat ${ts}`;
+            if (globalLiveDot) globalLiveDot.style.background = '#3fb950';
+            const lr = msg.last_run || {};
+            const status = lr.status || 'idle';
+            const seq = lr.sequence || null;
+            const grp = lr.group || null;
+            let text = `Last run: ${status}`;
+            if (grp) text += ` (group: ${grp})`;
+            if (seq && !grp) text += ` (sequence: ${seq})`;
+            lastRunText.textContent = text;
+          } catch (e) {
+            hbText.textContent = 'Live: bad data'; hbDot.style.background = '#f59e0b';
+            if (globalLiveText) globalLiveText.textContent = 'Live: bad data';
+            if (globalLiveDot) globalLiveDot.style.background = '#f59e0b';
+          }
+        };
+        sse.onerror = () => {
+          hbText.textContent = 'Live: disconnected, retrying...'; hbDot.style.background = '#555';
+          if (globalLiveText) globalLiveText.textContent = 'Live: disconnected, retrying...';
+          if (globalLiveDot) globalLiveDot.style.background = '#555';
+          try { sse.close(); } catch {}
+          sse = null;
+          const delay = Math.min(sseRetryMs, 10000);
+          setTimeout(startStatusStream, delay);
+          sseRetryMs = Math.min(sseRetryMs * 2, 10000);
+        };
+      } catch (e) {
+        hbText.textContent = `Live: error (${e.message})`; hbDot.style.background = '#ef4444';
+        if (globalLiveText) globalLiveText.textContent = `Live: error (${e.message})`;
+        if (globalLiveDot) globalLiveDot.style.background = '#ef4444';
+      }
     }
 
     // Token persistence across pages
@@ -167,7 +421,30 @@
     } catch (e) {}
     tokenEl.addEventListener('change', () => {
       try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
-      fetchSequences(); fetchMonitors().then(startPreview);
+    fetchSequences(); fetchGroups(); fetchMonitors().then(startPreview); startStatusStream(); updateTokenBadge();
+    // Live FPS meter via /api/metrics
+    (function attachFps(){
+      const out = document.getElementById('fpsText');
+      let lastFrames = null; let lastTime = null;
+      async function poll(){
+        try {
+          const res = await fetch(`/api/metrics`, { headers: { 'Authorization': `Bearer ${tokenEl.value.trim()}` } });
+          const data = await res.json();
+          const frames = (data && data.totals && typeof data.totals.preview_mjpeg_frames === 'number') ? data.totals.preview_mjpeg_frames : 0;
+          const now = Date.now();
+          if (lastFrames !== null && lastTime !== null) {
+            const df = frames - lastFrames; const dt = (now - lastTime) / 1000;
+            if (dt > 0) { const fps = Math.max(0, df / dt); if (out) out.textContent = `FPS: ${fps.toFixed(1)}`; }
+          }
+          lastFrames = frames; lastTime = now;
+        } catch (e) { /* ignore */ }
+      }
+      setInterval(poll, 1000); poll();
+    })();
+      if (metricsTimer) { clearInterval(metricsTimer); metricsTimer = null; }
+      fetchMetrics(); metricsTimer = setInterval(fetchMetrics, 5000);
+      if (latencyTimer) { clearInterval(latencyTimer); latencyTimer = null; }
+      measureLatency(); latencyTimer = setInterval(measureLatency, 5000);
     });
     rememberEl.addEventListener('change', () => {
       try {
@@ -175,15 +452,21 @@
         if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
       } catch (e) {}
     });
-    dashMonitorEl.addEventListener('change', (e) => { selectedMonitor = parseInt(e.target.value, 10); startPreview(); });
+    dashMonitorEl.addEventListener('change', (e) => { selectedMonitor = parseInt(e.target.value, 10); localStorage.setItem('preview.monitor', String(selectedMonitor)); startPreview(); });
     btnRun.addEventListener('click', runSequence);
     btnStop.addEventListener('click', stopSequence);
+    btnRunGroup.addEventListener('click', runGroup);
 
     // Auto-init if token present in URL
     const urlTok = new URLSearchParams(location.search).get('token');
     if (urlTok) { tokenEl.value = urlTok; }
     fetchSequences();
+    fetchGroups();
+    updateTokenBadge();
     fetchMonitors().then(startPreview);
+    startStatusStream();
+    fetchMetrics(); metricsTimer = setInterval(fetchMetrics, 5000);
+    measureLatency(); latencyTimer = setInterval(measureLatency, 5000);
   </script>
 </body>
 </html>

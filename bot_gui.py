@@ -725,6 +725,91 @@ class ScreenCaptureDialog(QDialog):
                 return rect
         return None
 
+class OverlayPreviewWindow(QDialog):
+    """Non-interactive transparent overlay to preview a region or a click point.
+    Covers either a target monitor geometry or the combined desktop, draws a red
+    rectangle or crosshair marker, and auto-closes after a short duration.
+    """
+    def __init__(self, parent=None, rect: QRect | None = None, point: QPoint | None = None, target_geometry: QRect | None = None, duration_ms: int = 1200, message: str | None = None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowOpacity(0.3)
+        self._rect = rect if (isinstance(rect, QRect) and rect.isValid()) else None
+        self._point = point
+        self._message = message
+
+        # Determine coverage geometry
+        screens = QGuiApplication.screens()
+        combined = QRect()
+        for sc in screens:
+            combined = combined.united(sc.geometry())
+        if isinstance(target_geometry, QRect) and target_geometry.isValid():
+            self._coverage = target_geometry
+        else:
+            self._coverage = combined
+        self.setGeometry(self._coverage)
+        self.move(self._coverage.topLeft())
+
+        # Auto-close shortly
+        try:
+            self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        except Exception:
+            pass
+        QTimer.singleShot(max(300, int(duration_ms)), self.close)
+
+    def paintEvent(self, event):
+        try:
+            painter = QPainter(self)
+            # Dim background
+            painter.setBrush(QColor(0, 0, 0, 100))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRect(self.rect())
+
+            origin = self.geometry().topLeft()
+
+            # Draw rectangle preview
+            if self._rect and self._rect.isValid():
+                local_rect = QRect(self._rect.topLeft() - origin, self._rect.size())
+                painter.setPen(QPen(Qt.GlobalColor.red, 2, Qt.PenStyle.SolidLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(local_rect)
+                # Size text box
+                size_text = f"{self._rect.width()} x {self._rect.height()}"
+                text_rect = painter.fontMetrics().boundingRect(size_text)
+                text_rect.moveBottomLeft(local_rect.bottomLeft() + QPoint(0, 5))
+                text_rect.adjust(-5, -2, 5, 2)
+                painter.fillRect(text_rect, QColor(0, 0, 0, 180))
+                painter.setPen(Qt.GlobalColor.white)
+                painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, size_text)
+
+            # Draw click point preview
+            if isinstance(self._point, QPoint):
+                local_pt = self._point - origin
+                painter.setPen(QPen(Qt.GlobalColor.green, 2, Qt.PenStyle.SolidLine))
+                # Crosshair
+                painter.drawLine(local_pt + QPoint(-10, 0), local_pt + QPoint(10, 0))
+                painter.drawLine(local_pt + QPoint(0, -10), local_pt + QPoint(0, 10))
+                painter.setBrush(QColor(0, 255, 0, 120))
+                painter.drawEllipse(local_pt, 6, 6)
+
+            # Optional message centered
+            if isinstance(self._message, str) and self._message:
+                painter.setPen(Qt.GlobalColor.white)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._message)
+            painter.end()
+        except Exception:
+            try:
+                if painter.isActive():
+                    painter.end()
+            except Exception:
+                pass
+
 class MonitorInfoDialog(QDialog):
     """Dialog to display monitor geometries and DPI, with quick capture preview per monitor."""
     def __init__(self, parent=None):
@@ -1195,6 +1280,12 @@ class ActionEditor(QWidget):
             y_spin.valueChanged.connect(
                 lambda value, key="y": self.update_action_param(key, value))
             main_layout.addWidget(y_spin)
+
+            # Show click preview
+            show_click_btn = QPushButton("Show Click")
+            show_click_btn.setToolTip("Preview the click/move point on screen")
+            show_click_btn.clicked.connect(self.show_click_overlay)
+            main_layout.addWidget(show_click_btn)
             
             # Toggle random checkbox
             self.random_checkbox = QCheckBox("Toggle Random")
@@ -1210,6 +1301,11 @@ class ActionEditor(QWidget):
                 self.random_region_label = QLabel()
                 main_layout.addWidget(self.random_region_label)
                 self.update_random_region_label()
+                # Show random region preview
+                show_rr_btn = QPushButton("Show Region")
+                show_rr_btn.setToolTip("Preview the random move region")
+                show_rr_btn.clicked.connect(self.show_random_region_overlay)
+                main_layout.addWidget(show_rr_btn)
             else:
                 # Show info
                 info_label = QLabel("Moves to center of detected template")
@@ -1293,6 +1389,11 @@ class ActionEditor(QWidget):
             clear_if_btn.setToolTip("Clear IF search region")
             clear_if_btn.clicked.connect(lambda: (self.action_data.pop('if_region', None), self.update_if_region_label()))
             if_region_row.addWidget(clear_if_btn)
+            # Optional: show IF region overlay
+            show_if_btn = QPushButton("Show IF Region")
+            show_if_btn.setToolTip("Preview the IF template search region")
+            show_if_btn.clicked.connect(self.show_if_region_overlay)
+            if_region_row.addWidget(show_if_btn)
             cond_layout.addLayout(if_region_row)
 
             # Compact Else Actions header only (count + pop-out button)
@@ -1611,6 +1712,55 @@ class ActionEditor(QWidget):
         except Exception:
             pass
 
+    def show_random_region_overlay(self):
+        """Preview the random_region for move/move_to actions in this editor."""
+        try:
+            rr = self.action_data.get('random_region')
+            rect = None
+            if isinstance(rr, (list, tuple)) and len(rr) == 4:
+                x, y, w, h = rr
+                rect = QRect(int(x), int(y), int(w), int(h))
+            dlg = OverlayPreviewWindow(self, rect=rect, point=None, target_geometry=None, duration_ms=1200, message="Random Region")
+            try:
+                self._overlay_preview = dlg
+            except Exception:
+                pass
+            dlg.show()
+        except Exception:
+            pass
+
+    def show_click_overlay(self):
+        """Preview the click/move point based on X/Y coordinates in this editor."""
+        try:
+            x = int(self.action_data.get('x', 0))
+            y = int(self.action_data.get('y', 0))
+            pt = QPoint(x, y)
+            dlg = OverlayPreviewWindow(self, rect=None, point=pt, target_geometry=None, duration_ms=1200, message="Click Point")
+            try:
+                self._overlay_preview = dlg
+            except Exception:
+                pass
+            dlg.show()
+        except Exception:
+            pass
+
+    def show_if_region_overlay(self):
+        """Preview the IF condition region if configured for this action."""
+        try:
+            rr = self.action_data.get('if_region')
+            rect = None
+            if isinstance(rr, (list, tuple)) and len(rr) == 4:
+                x, y, w, h = rr
+                rect = QRect(int(x), int(y), int(w), int(h))
+            dlg = OverlayPreviewWindow(self, rect=rect, point=None, target_geometry=None, duration_ms=1200, message="IF Region")
+            try:
+                self._overlay_preview = dlg
+            except Exception:
+                pass
+            dlg.show()
+        except Exception:
+            pass
+
 class MiniActionEditor(QWidget):
     """Minimal nested action editor used for else_actions lists."""
     def __init__(self, action_data: Optional[dict] = None, parent=None):
@@ -1761,6 +1911,55 @@ class MiniActionEditor(QWidget):
         except Exception:
             pass
 
+    def show_random_region_overlay(self):
+        """Preview the random_region for move_to actions."""
+        try:
+            rr = self.action_data.get('random_region')
+            rect = None
+            if isinstance(rr, (list, tuple)) and len(rr) == 4:
+                x, y, w, h = rr
+                rect = QRect(int(x), int(y), int(w), int(h))
+            dlg = OverlayPreviewWindow(self, rect=rect, point=None, target_geometry=None, duration_ms=1200, message="Random Region")
+            try:
+                self._overlay_preview = dlg
+            except Exception:
+                pass
+            dlg.show()
+        except Exception:
+            pass
+
+    def show_click_overlay(self):
+        """Preview the click/move point for actions with X/Y coordinates."""
+        try:
+            x = int(self.action_data.get('x', 0))
+            y = int(self.action_data.get('y', 0))
+            pt = QPoint(x, y)
+            dlg = OverlayPreviewWindow(self, rect=None, point=pt, target_geometry=None, duration_ms=1200, message="Click Point")
+            try:
+                self._overlay_preview = dlg
+            except Exception:
+                pass
+            dlg.show()
+        except Exception:
+            pass
+
+    def show_if_region_overlay(self):
+        """Preview the IF condition region if set."""
+        try:
+            rr = self.action_data.get('if_region')
+            rect = None
+            if isinstance(rr, (list, tuple)) and len(rr) == 4:
+                x, y, w, h = rr
+                rect = QRect(int(x), int(y), int(w), int(h))
+            dlg = OverlayPreviewWindow(self, rect=rect, point=None, target_geometry=None, duration_ms=1200, message="IF Region")
+            try:
+                self._overlay_preview = dlg
+            except Exception:
+                pass
+            dlg.show()
+        except Exception:
+            pass
+
 class StepEditor(QGroupBox):
     """Widget to edit a single step in a sequence."""
     def __init__(self, step_data: Optional[dict] = None, templates: List[str] = None, parent=None):
@@ -1865,12 +2064,17 @@ class StepEditor(QGroupBox):
         # Add region selection button
         self.select_region_btn = QPushButton("Select Search Region")
         self.select_region_btn.clicked.connect(self.select_search_region)
+        # Show region preview button
+        self.show_region_btn = QPushButton("Show Region")
+        self.show_region_btn.setToolTip("Preview the current search region on screen")
+        self.show_region_btn.clicked.connect(self.show_search_region_overlay)
         
         template_select_layout.addWidget(QLabel("Find:"))
         template_select_layout.addWidget(self.template_combo, 1)  # Allow combo box to expand
         template_select_layout.addWidget(QLabel("Monitor:"))
         template_select_layout.addWidget(self.monitor_combo)
         template_select_layout.addWidget(self.select_region_btn)
+        template_select_layout.addWidget(self.show_region_btn)
         
         # Region status label
         self.region_status = QLabel("Region: Full Screen")
@@ -2300,6 +2504,41 @@ class StepEditor(QGroupBox):
             self.region_status.setText(f"Search Region: ({x}, {y}, {w}x{h})")
         else:
             self.region_status.setText("Search Region: Full Screen")
+
+    def show_search_region_overlay(self):
+        """Show a transparent overlay previewing the current search region."""
+        try:
+            # Determine monitor coverage
+            target_geometry = None
+            try:
+                data = self.monitor_combo.currentData() if hasattr(self, 'monitor_combo') else None
+                if isinstance(data, tuple) and len(data) == 4:
+                    x, y, w, h = data
+                    target_geometry = QRect(x, y, w, h)
+                elif data == 'ALL':
+                    target_geometry = None  # Full desktop
+            except Exception:
+                pass
+
+            rect = None
+            if getattr(self, 'search_region', None):
+                try:
+                    x, y, w, h = self.search_region
+                    rect = QRect(int(x), int(y), int(w), int(h))
+                except Exception:
+                    rect = None
+            else:
+                # If no specific region, draw the selected monitor bounds if available
+                rect = target_geometry if isinstance(target_geometry, QRect) and target_geometry.isValid() else None
+
+            dlg = OverlayPreviewWindow(self, rect=rect, point=None, target_geometry=target_geometry, duration_ms=1200, message="Search Region")
+            try:
+                self._overlay_preview = dlg
+            except Exception:
+                pass
+            dlg.show()
+        except Exception:
+            pass
     
     def get_step_data(self) -> dict:
         step_data = {
@@ -3927,9 +4166,15 @@ class MainWindow(QMainWindow):
         self.failsafe_region_label = QLabel("Region: Full Screen")
         fs_region_layout.addWidget(self.failsafe_region_btn)
         fs_region_layout.addWidget(self.failsafe_region_label)
+        # Show region preview button
+        self.failsafe_show_region_btn = QPushButton("Show Region")
+        self.failsafe_show_region_btn.setToolTip("Preview the current failsafe search region on screen")
+        self.failsafe_show_region_btn.setEnabled(False)
+        fs_region_layout.addWidget(self.failsafe_show_region_btn)
         # Wire region selection
         try:
             self.failsafe_region_btn.clicked.connect(self.select_failsafe_region)
+            self.failsafe_show_region_btn.clicked.connect(self.show_failsafe_region_overlay)
         except Exception:
             pass
         fs_region_layout.addStretch()
@@ -4301,12 +4546,9 @@ class MainWindow(QMainWindow):
         )
         
         if file_path:
+            # Reuse the robust loader so paths are normalized and templates resolved
             try:
-                with open(file_path, 'r') as f:
-                    self.config = json.load(f)
-                self.config_path = file_path
-                self.update_ui_from_config()
-                self.statusBar().showMessage(f"Loaded configuration from {file_path}")
+                self.load_config(file_path)
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load configuration: {str(e)}")
     
@@ -4529,10 +4771,18 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
-        # Clear existing templates from the bot
-        if hasattr(self, 'bot'):
-            logger.info("Clearing existing templates from bot")
-            self.bot.templates = {}
+        # Safely reload templates into the bot without wiping on UI errors
+        templates = self.config.get('templates', {})
+        logger.info(f"Found {len(templates)} templates in config")
+        prev_templates = {}
+        try:
+            if hasattr(self, 'bot'):
+                # Preserve current templates in case reloading fails midway
+                prev_templates = dict(getattr(self.bot, 'templates', {}) or {})
+                logger.info("Clearing existing templates from bot before reload")
+                self.bot.templates = {}
+        except Exception as e:
+            logger.debug(f"Failed to snapshot existing templates: {e}")
 
     def on_branch_debug_toggled(self, state):
         try:
@@ -4552,35 +4802,41 @@ class MainWindow(QMainWindow):
             logger.debug(f"on_branch_debug_toggled failed: {e}")
             
         # Update templates list and load them into the bot
+        # Always repopulate the UI list first, then try loading each template into the bot
+        templates = self.config.get('templates', {})
         try:
             if hasattr(self, 'templates_list'):
                 self.templates_list.clear()
         except Exception:
             pass
-        templates = self.config.get('templates', {})
-        logger.info(f"Found {len(templates)} templates in config")
-        
-        for name, path in templates.items():
-            logger.info(f"Processing template: {name} -> {path}")
-            
-            # Add to UI
-            try:
+
+        # Repopulate UI list regardless of any bot loading issues
+        try:
+            for name, path in templates.items():
+                logger.info(f"Processing template: {name} -> {path}")
                 if hasattr(self, 'templates_list'):
-                    self.templates_list.addItem(name)
-            except Exception:
-                pass
-            
-            # Load into bot if the file exists
-            if hasattr(self, 'bot'):
-                if os.path.exists(path):
-                    logger.info(f"Loading template '{name}' from {path}")
-                    success = self.bot.load_template(name, path)
-                    if success:
-                        logger.info(f"Successfully loaded template '{name}'")
+                    try:
+                        self.templates_list.addItem(name)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug(f"Failed repopulating templates list: {e}")
+
+        # Load templates into bot individually to avoid aborting the whole UI refresh
+        if hasattr(self, 'bot'):
+            for name, path in templates.items():
+                try:
+                    if os.path.exists(path):
+                        logger.info(f"Loading template '{name}' from {path}")
+                        success = self.bot.load_template(name, path)
+                        if success:
+                            logger.info(f"Successfully loaded template '{name}'")
+                        else:
+                            logger.error(f"Failed to load template '{name}' from {path}")
                     else:
-                        logger.error(f"Failed to load template '{name}' from {path}")
-                else:
-                    logger.error(f"Template file not found: {path}")
+                        logger.error(f"Template file not found: {path}")
+                except Exception as e:
+                    logger.error(f"Error loading template '{name}' from {path}: {e}")
         
         # Update sequences list
         try:
@@ -5961,6 +6217,40 @@ class MainWindow(QMainWindow):
             if not step.get('actions') or not isinstance(step['actions'], list):
                 QMessageBox.warning(self, "Error", f"Step {i} in sequence '{sequence_name}' has no actions")
                 return
+
+        # Proactively ensure all referenced templates are loaded in the bot
+        try:
+            needed_names = set(
+                step.get('find')
+                for step in sequence.get('steps', [])
+                if isinstance(step, dict) and step.get('find') and str(step.get('find')).lower() != 'none'
+            )
+            loaded_names = set(getattr(self.bot, 'templates', {}).keys()) if hasattr(self, 'bot') else set()
+            missing = list(needed_names - loaded_names)
+            if missing and hasattr(self, 'bot'):
+                logger.info(f"Loading {len(missing)} missing templates before run: {missing}")
+                for name in missing:
+                    path = self.config.get('templates', {}).get(name)
+                    if not path:
+                        continue
+                    # Resolve to absolute path similar to load_config
+                    abs_path = path if os.path.isabs(path) else os.path.normpath(os.path.join(os.path.dirname(self.config_path), path))
+                    if not os.path.exists(abs_path):
+                        alt1 = os.path.join(self.script_dir, path)
+                        alt2 = os.path.join(self.images_dir, os.path.basename(path))
+                        for p in (abs_path, alt1, alt2):
+                            if os.path.exists(p):
+                                abs_path = p
+                                break
+                    if os.path.exists(abs_path):
+                        try:
+                            self.bot.load_template(name, abs_path)
+                        except Exception as e:
+                            logger.error(f"Failed to load template '{name}' at run start: {e}")
+                    else:
+                        logger.warning(f"Template file for '{name}' not found before run: {path}")
+        except Exception as e:
+            logger.debug(f"Pre-run template load skipped due to error: {e}")
         
         # --- Ensure failsafe is only present if enabled ---
         if hasattr(self, 'sequence_editor_widget') and hasattr(self.sequence_editor_widget, 'failsafe_enable_checkbox'):
@@ -6677,6 +6967,8 @@ class MainWindow(QMainWindow):
         self.failsafe_conf_spin.setEnabled(enabled)
         self.failsafe_region_btn.setEnabled(enabled)
         self.test_failsafe_btn.setEnabled(enabled)
+        if hasattr(self, 'failsafe_show_region_btn'):
+            self.failsafe_show_region_btn.setEnabled(enabled)
         # Enable/disable new capture/select and name/preview controls
         if hasattr(self, 'fs_capture_btn'):
             self.fs_capture_btn.setEnabled(enabled)
@@ -6734,6 +7026,26 @@ class MainWindow(QMainWindow):
             else:
                 self.failsafe_region = None
                 self.failsafe_region_label.setText("Region: Full Screen")
+
+    def show_failsafe_region_overlay(self):
+        """Preview the current failsafe search region on screen."""
+        try:
+            rect = None
+            if hasattr(self, 'failsafe_region') and self.failsafe_region:
+                try:
+                    x, y, w, h = self.failsafe_region
+                    rect = QRect(int(x), int(y), int(w), int(h))
+                except Exception:
+                    rect = None
+            # No per-monitor selection for failsafe; cover full desktop
+            dlg = OverlayPreviewWindow(self, rect=rect, point=None, target_geometry=None, duration_ms=1200, message="Failsafe Region")
+            try:
+                self._overlay_preview = dlg
+            except Exception:
+                pass
+            dlg.show()
+        except Exception:
+            pass
     
     def test_failsafe_sequence(self):
         """Test the failsafe sequence execution."""

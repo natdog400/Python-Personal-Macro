@@ -18,7 +18,14 @@ from PyInstaller.building.datastruct import Tree
 
 # Common analysis options
 _pathex = [proj_root]
-_hiddenimports = []  # Add modules if PyInstaller misses any
+_hiddenimports = [
+    'PIL',
+    'PIL.Image',
+    'PIL.ImageFile',
+    'PIL.PngImagePlugin',
+    'PIL.JpegImagePlugin',
+    'PIL.features',
+]  # Ensure Pillow JPEG/PNG plugins and features are bundled
 
 # GUI EXE (bot_gui.py)
 a1 = Analysis(

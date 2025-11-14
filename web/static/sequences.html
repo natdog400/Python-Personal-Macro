@@ -44,6 +44,8 @@
     <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
       <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
       <input type="text" id="token" placeholder="Access Token" style="width:260px" />
+      <span id="globalLiveDot" title="Server live status" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#555"></span>
+      <small id="globalLiveText">Live: disconnected</small>
     </div>
   </header>
   <main>
@@ -105,10 +107,15 @@
             <select id="seqPreviewSize"><option>640</option><option>800</option><option selected>1024</option><option>1280</option></select>
           </label>
           <label style="margin-left:16px; display:inline-flex; align-items:center; gap:6px"><input type="checkbox" id="seqPhoneToggle" /> Using Phone</label>
+          <label style="margin-left:16px; display:inline-flex; align-items:center; gap:6px"><input type="checkbox" id="seqJpegToggle" /> JPEG</label>
+          <label style="display:inline-flex; align-items:center; gap:6px">Quality <input type="number" id="seqJpegQuality" min="1" max="95" value="75" style="width:70px" /></label>
+          <label style="display:inline-flex; align-items:center; gap:6px">Scale <input type="number" id="seqJpegScale" min="0.25" max="1" step="0.05" value="1" style="width:70px" /></label>
+          <span id="seqFpsText" style="margin-left:16px"><small>FPS: --</small></span>
         </div>
         <div id="seqImagePane" style="position:relative; width:100%">
           <img id="seqPreview" alt="Preview" draggable="false" class="no-drag" style="width:100%; max-height:60vh; object-fit:contain; background:#111; border:1px solid #3a3a3a; border-radius:6px" />
           <div id="seqSel" style="position:absolute; border:2px solid #4af; background:rgba(64,160,255,0.2); display:none"></div>
+          <div id="seqClickMarker" style="position:absolute; width:10px; height:10px; border:2px solid #ef4444; border-radius:50%; background:rgba(239,68,68,0.25); display:none"></div>
         </div>
       </div>
       <small>Click-drag on the preview to select a region; then use "Use Preview Region" on a step to apply.</small>
@@ -120,6 +127,9 @@
     const rememberEl = document.getElementById('rememberToken');
     const seqListEl = document.getElementById('seqList');
     const statusEl = document.getElementById('status');
+    const globalLiveDot = document.getElementById('globalLiveDot');
+    const globalLiveText = document.getElementById('globalLiveText');
+    let sseGlobal = null; let sseGlobalRetryMs = 1000;
     let templates = [];
     let lastRegion = null;
 
@@ -145,6 +155,7 @@
     tokenEl.addEventListener('change', () => {
       try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
       fetchTemplates().then(fetchSequences); fetchGroups().then(()=>{}); fetchMonitors().then(updatePreviewSrc);
+      startGlobalStatusStream();
     });
     rememberEl.addEventListener('change', () => {
       try {
@@ -152,6 +163,40 @@
         if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
       } catch (e) {}
     });
+
+    function startGlobalStatusStream(){
+      const tok = (tokenEl.value || localStorage.getItem('apiToken') || '').trim();
+      if (!tok) { globalLiveText.textContent = 'Live: enter token'; globalLiveDot.style.background = '#555'; return; }
+      try { if (sseGlobal) { sseGlobal.close(); sseGlobal = null; } } catch {}
+      const url = `${apiBase}/api/status/stream?interval_ms=1000&token=${encodeURIComponent(tok)}`;
+      globalLiveText.textContent = 'Live: connecting...';
+      globalLiveDot.style.background = '#caa';
+      try {
+        sseGlobal = new EventSource(url);
+        sseGlobal.onopen = () => { globalLiveText.textContent = 'Live: connected'; globalLiveDot.style.background = '#3fb950'; sseGlobalRetryMs = 1000; };
+        sseGlobal.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            const ts = Number(msg.heartbeat || Date.now());
+            globalLiveText.textContent = `Live: heartbeat ${ts}`;
+            globalLiveDot.style.background = '#3fb950';
+          } catch (e) {
+            globalLiveText.textContent = 'Live: bad data'; globalLiveDot.style.background = '#f59e0b';
+          }
+        };
+        sseGlobal.onerror = () => {
+          globalLiveText.textContent = 'Live: disconnected, retrying...'; globalLiveDot.style.background = '#555';
+          try { sseGlobal.close(); } catch {}
+          sseGlobal = null;
+          const delay = Math.min(sseGlobalRetryMs, 10000);
+          setTimeout(startGlobalStatusStream, delay);
+          sseGlobalRetryMs = Math.min(sseGlobalRetryMs * 2, 10000);
+        };
+      } catch (e) {
+        globalLiveText.textContent = `Live: error (${e.message})`;
+        globalLiveDot.style.background = '#ef4444';
+      }
+    }
 
     async function fetchSequences() {
       try {
@@ -269,6 +314,13 @@
         const sr = Array.isArray(step.search_region) ? step.search_region : null;
         regionInfo.textContent = sr ? `Search Region: (${sr[0]}, ${sr[1]}, ${sr[2]}x${sr[3]})` : 'Search Region: (none)';
         form.appendChild(regionInfo);
+        // Show buttons for saved regions
+        const showSearchBtn = document.createElement('button'); showSearchBtn.textContent = 'Show Search Region';
+        showSearchBtn.onclick = () => { try { if (Array.isArray(step.search_region)) renderRegionOverlayFor(step.search_region); } catch (e) {} };
+        const showStepRegionBtn = document.createElement('button'); showStepRegionBtn.textContent = 'Show Step Region';
+        showStepRegionBtn.onclick = () => { try { if (Array.isArray(step.region)) renderRegionOverlayFor(step.region); } catch (e) {} };
+        form.appendChild(showSearchBtn);
+        form.appendChild(showStepRegionBtn);
         // Special case: Group Call step
         if (step.call_group) {
           const row = document.createElement('div'); row.className='row';
@@ -433,6 +485,13 @@
           const randomRegionReadout = document.createElement('small');
           const rrr = Array.isArray(act.random_region) ? act.random_region : null;
           randomRegionReadout.textContent = rrr ? `Random Region: (${rrr[0]}, ${rrr[1]}, ${rrr[2]}x${rrr[3]})` : 'Random Region: (none)';
+          // Show buttons for action overlays
+          const aShowRegion = document.createElement('button'); aShowRegion.textContent = 'Show Region';
+          aShowRegion.onclick = () => { try { if (Array.isArray(act.region)) renderRegionOverlayFor(act.region); } catch (e) {} };
+          const aShowRandomRegion = document.createElement('button'); aShowRandomRegion.textContent = 'Show Random Region';
+          aShowRandomRegion.onclick = () => { try { if (Array.isArray(act.random_region)) renderRegionOverlayFor(act.random_region); } catch (e) {} };
+          const aShowClick = document.createElement('button'); aShowClick.textContent = 'Show Click';
+          aShowClick.onclick = () => { try { if (act.x!=null && act.y!=null) renderPointOverlay(act.x, act.y); } catch (e) {} };
           const aSeconds = document.createElement('input'); aSeconds.type='number'; aSeconds.placeholder='seconds'; aSeconds.value=(act.seconds!=null?act.seconds:'');
           const aPixels = document.createElement('input'); aPixels.type='number'; aPixels.placeholder='pixels'; aPixels.value=(act.pixels!=null?act.pixels:'');
           const aKey = document.createElement('input'); aKey.type='text'; aKey.placeholder='key'; aKey.value=act.key||'';
@@ -447,6 +506,9 @@
             aRandom.style.display = ((t==='move_to'||t==='move'||t==='drag') ? 'inline-block' : 'none');
             aUseRegion.style.display = ((t==='move_to'||t==='move'||t==='drag') ? 'inline-block' : 'none');
             aUseRandomRegion.style.display = ((t==='move_to'||t==='move'||t==='drag') ? 'inline-block' : 'none');
+            aShowRegion.style.display = ((t==='move_to'||t==='move'||t==='drag') ? 'inline-block' : 'none');
+            aShowRandomRegion.style.display = ((t==='move_to'||t==='move'||t==='drag') ? 'inline-block' : 'none');
+            aShowClick.style.display = (t==='click' ? 'inline-block' : 'none');
             aDuration.style.display = ((t==='move'||t==='drag'||t==='move_to') ? 'inline-block' : 'none');
             aSeconds.style.display = (t==='wait' ? 'inline-block' : 'none');
             aPixels.style.display = (t==='scroll' ? 'inline-block' : 'none');
@@ -759,6 +821,9 @@
           aRow.appendChild(aSave);
           aRow.appendChild(aUseRegion);
           aRow.appendChild(aUseRandomRegion);
+          aRow.appendChild(aShowRegion);
+          aRow.appendChild(aShowRandomRegion);
+          aRow.appendChild(aShowClick);
           aRow.appendChild(regionReadout);
           aRow.appendChild(randomRegionReadout);
           aRow.appendChild(aUp);
@@ -958,6 +1023,8 @@
     const urlTok = new URLSearchParams(location.search).get('token');
     if (urlTok) { tokenEl.value = urlTok; }
     fetchTemplates().then(fetchSequences).then(fetchGroups).then(fetchMonitors).then(()=>{ updatePreviewSrc(); setSeqPreviewSize(); });
+    // Ensure global live indicator starts on initial load
+    startGlobalStatusStream();
 
     // Preview setup
     const seqPreview = document.getElementById('seqPreview');
@@ -972,6 +1039,8 @@
     function setSeqPreviewSize(){
       const val = parseInt(document.getElementById('seqPreviewSize').value||'1024',10);
       if (!isNaN(val) && val>0) { seqPreview.style.width = `${val}px`; }
+      // Reproject existing selection overlay to new preview size
+      try { renderRegionOverlay(); } catch (e) {}
     }
     document.getElementById('seqPreviewSize').addEventListener('change', setSeqPreviewSize);
     async function fetchMonitors() {
@@ -990,16 +1059,67 @@
         sel.value = String(selectedMonitor);
       } catch (e) { /* ignore */ }
     }
+    // Load persisted preview settings
+    (function loadSeqPreviewPrefs(){
+      try {
+        const fmt = localStorage.getItem('preview.format');
+        const qual = localStorage.getItem('preview.quality');
+        const scale = localStorage.getItem('preview.scale');
+        const mon = localStorage.getItem('preview.monitor');
+        const tgl = document.getElementById('seqJpegToggle');
+        const ql = document.getElementById('seqJpegQuality');
+        const sc = document.getElementById('seqJpegScale');
+        if (fmt) { if (tgl) tgl.checked = (fmt === 'jpeg'); }
+        if (qual && ql) { const v = parseInt(qual,10); if(!isNaN(v)) ql.value = String(v); }
+        if (scale && sc) { let v = parseFloat(scale); if(!isNaN(v)) { v = Math.max(0.25, Math.min(1.0, v)); sc.value = String(v); } }
+        if (mon) { const mv = parseInt(mon,10); if(!isNaN(mv)) selectedMonitor = mv; }
+      } catch (e) {}
+    })();
     function updatePreviewSrc() {
       const tok = tokenEl.value.trim();
       const monParam = `monitor=${encodeURIComponent(String(selectedMonitor))}`;
       const q = [monParam];
+      // Format and encoding params
+      const useJpeg = !!(document.getElementById('seqJpegToggle')?.checked);
+      const fmt = useJpeg ? 'jpeg' : 'png';
+      q.push(`format=${fmt}`);
+      const scaleEl = document.getElementById('seqJpegScale');
+      const qualEl = document.getElementById('seqJpegQuality');
+      let scaleVal = parseFloat(scaleEl?.value||'1');
+      if (!isNaN(scaleVal)) { scaleVal = Math.max(0.25, Math.min(1.0, scaleVal)); q.push(`scale=${scaleVal.toFixed(2)}`); }
+      if (useJpeg) {
+        const qualVal = parseInt(qualEl?.value||'75', 10);
+        if (!isNaN(qualVal)) q.push(`quality=${Math.max(1, Math.min(95, qualVal))}`);
+      }
       if (tok) q.push(`token=${encodeURIComponent(tok)}`);
       seqPreview.src = `${apiBase}/stream.mjpeg?${q.join('&')}`;
     }
     tokenEl.addEventListener('change', updatePreviewSrc);
-    document.getElementById('seqMonitor').addEventListener('change', (e) => { selectedMonitor = parseInt(e.target.value, 10); updatePreviewSrc(); });
+    document.getElementById('seqMonitor').addEventListener('change', (e) => { selectedMonitor = parseInt(e.target.value, 10); localStorage.setItem('preview.monitor', String(selectedMonitor)); updatePreviewSrc(); });
+    // React to format control changes
+    document.getElementById('seqJpegToggle').addEventListener('change', () => { const useJpeg = !!document.getElementById('seqJpegToggle').checked; localStorage.setItem('preview.format', useJpeg ? 'jpeg' : 'png'); updatePreviewSrc(); });
+    document.getElementById('seqJpegQuality').addEventListener('change', () => { const v = parseInt(document.getElementById('seqJpegQuality').value||'75',10); if(!isNaN(v)) localStorage.setItem('preview.quality', String(v)); updatePreviewSrc(); });
+    document.getElementById('seqJpegScale').addEventListener('change', () => { let v = parseFloat(document.getElementById('seqJpegScale').value||'1'); if(!isNaN(v)) { v = Math.max(0.25, Math.min(1.0, v)); localStorage.setItem('preview.scale', String(v)); } updatePreviewSrc(); });
     updatePreviewSrc();
+    // Live FPS meter via /api/metrics frame totals
+    (function attachSeqFps(){
+      const out = document.getElementById('seqFpsText');
+      let lastFrames = null; let lastTime = null;
+      async function poll(){
+        try {
+          const res = await fetch(`${apiBase}/api/metrics`, { headers: authHeaders() });
+          const data = await res.json();
+          const frames = (data && data.totals && typeof data.totals.preview_mjpeg_frames === 'number') ? data.totals.preview_mjpeg_frames : 0;
+          const now = Date.now();
+          if (lastFrames !== null && lastTime !== null) {
+            const df = frames - lastFrames; const dt = (now - lastTime) / 1000;
+            if (dt > 0 && isFinite(df)) { const fps = Math.max(0, df / dt); if (out) out.textContent = `FPS: ${fps.toFixed(1)}`; }
+          }
+          lastFrames = frames; lastTime = now;
+        } catch (e) { /* ignore */ }
+      }
+      setInterval(poll, 1000); poll();
+    })();
     let dragStart = null;
     // Compute actual drawn image content rect inside the <img> (object-fit: contain)
     function getImageContentInfo(img){
@@ -1058,18 +1178,84 @@
       const ih = Math.abs(((lastDragPos ? lastDragPos.y : dragStart.y)) - dragStart.y);
       const scaleX = info.nw / info.contentW;
       const scaleY = info.nh / info.contentH;
-      const x0 = Math.round(ix0 * scaleX);
-      const y0 = Math.round(iy0 * scaleY);
-      const rw = Math.round(iw * scaleX);
-      const rh = Math.round(ih * scaleY);
+      // Compensate for server-side preview scale
+      let serverScale = parseFloat((document.getElementById('seqJpegScale').value||'1'));
+      if (isNaN(serverScale) || serverScale <= 0) serverScale = 1;
+      const x0 = Math.round((ix0 * scaleX) / serverScale);
+      const y0 = Math.round((iy0 * scaleY) / serverScale);
+      const rw = Math.round((iw * scaleX) / serverScale);
+      const rh = Math.round((ih * scaleY) / serverScale);
       lastRegion = [x0, y0, rw, rh];
       statusEl.textContent = `Status: selected region ${x0},${y0},${rw},${rh}`;
       dragStart = null;
       lastDragPos = null;
     }
+    // Re-render selection overlay from saved monitor-space region after preview reload/scale change
+    function renderRegionOverlay(){
+      if (!lastRegion) return;
+      const info = getImageContentInfo(seqPreview);
+      const paneRect = imgPane.getBoundingClientRect();
+      const scaleX = info.nw / info.contentW;
+      const scaleY = info.nh / info.contentH;
+      let serverScale = parseFloat((document.getElementById('seqJpegScale').value||'1'));
+      if (isNaN(serverScale) || serverScale <= 0) serverScale = 1;
+      const [mx, my, mw, mh] = lastRegion;
+      const ix0 = (mx * serverScale) / scaleX;
+      const iy0 = (my * serverScale) / scaleY;
+      const iw = (mw * serverScale) / scaleX;
+      const ih = (mh * serverScale) / scaleY;
+      const offX = (info.rect.left - paneRect.left) + info.offsetX;
+      const offY = (info.rect.top - paneRect.top) + info.offsetY;
+      selBox.style.display = 'block';
+      selBox.style.left = `${offX + ix0}px`;
+      selBox.style.top = `${offY + iy0}px`;
+      selBox.style.width = `${iw}px`;
+      selBox.style.height = `${ih}px`;
+    }
+    // Render an arbitrary saved region array onto the preview
+    function renderRegionOverlayFor(region){
+      if (!Array.isArray(region)) return;
+      const info = getImageContentInfo(seqPreview);
+      const paneRect = imgPane.getBoundingClientRect();
+      const scaleX = info.nw / info.contentW;
+      const scaleY = info.nh / info.contentH;
+      let serverScale = parseFloat((document.getElementById('seqJpegScale').value||'1'));
+      if (isNaN(serverScale) || serverScale <= 0) serverScale = 1;
+      const [mx, my, mw, mh] = region;
+      const ix0 = (mx * serverScale) / scaleX;
+      const iy0 = (my * serverScale) / scaleY;
+      const iw = (mw * serverScale) / scaleX;
+      const ih = (mh * serverScale) / scaleY;
+      const offX = (info.rect.left - paneRect.left) + info.offsetX;
+      const offY = (info.rect.top - paneRect.top) + info.offsetY;
+      selBox.style.display = 'block';
+      selBox.style.left = `${offX + ix0}px`;
+      selBox.style.top = `${offY + iy0}px`;
+      selBox.style.width = `${iw}px`;
+      selBox.style.height = `${ih}px`;
+    }
+    // Render a saved click/point in monitor coordinates onto the preview
+    function renderPointOverlay(mx, my){
+      if (mx == null || my == null) return;
+      const info = getImageContentInfo(seqPreview);
+      const paneRect = imgPane.getBoundingClientRect();
+      const scaleX = info.nw / info.contentW;
+      const scaleY = info.nh / info.contentH;
+      let serverScale = parseFloat((document.getElementById('seqJpegScale').value||'1'));
+      if (isNaN(serverScale) || serverScale <= 0) serverScale = 1;
+      const ix = (mx * serverScale) / scaleX;
+      const iy = (my * serverScale) / scaleY;
+      const offX = (info.rect.left - paneRect.left) + info.offsetX;
+      const offY = (info.rect.top - paneRect.top) + info.offsetY;
+      const marker = document.getElementById('seqClickMarker');
+      marker.style.display = 'block';
+      marker.style.left = `${offX + ix - 5}px`;
+      marker.style.top = `${offY + iy - 5}px`;
+    }
     // Mouse events
     seqPreview.addEventListener('mousedown', (e) => { seqStartDrag(e.clientX, e.clientY); });
     seqPreview.addEventListener('mousemove', (e) => { seqMoveDrag(e.clientX, e.clientY); });
+    seqPreview.addEventListener('load', () => { renderRegionOverlay(); });
     window.addEventListener('mouseup', () => { seqEndDrag(); });
     // Touch events when Using Phone is enabled
     seqPreview.addEventListener('touchstart', (e) => { if (!seqPhoneToggle.checked) return; e.preventDefault(); const t=e.touches[0]; if (t) seqStartDrag(t.clientX, t.clientY); }, { passive: false });
@@ -1079,6 +1265,28 @@
     function updateSeqTouchAction(){ imgPane.style.touchAction = seqPhoneToggle.checked ? 'none' : 'auto'; }
     seqPhoneToggle.addEventListener('change', updateSeqTouchAction);
     updateSeqTouchAction();
+    // Capability gating: enable JPEG controls only if supported
+    async function fetchMetrics(){
+      try {
+        const res = await fetch(`${apiBase}/api/metrics`, { headers: authHeaders() });
+        const data = await res.json();
+        const caps = (data && data.capabilities) ? data.capabilities : {};
+        const jpegOk = !!(caps.pillow_available && caps.jpeg_supported);
+        const tgl = document.getElementById('seqJpegToggle');
+        const ql = document.getElementById('seqJpegQuality');
+        const sc = document.getElementById('seqJpegScale');
+        if (tgl && ql && sc) {
+          tgl.disabled = !jpegOk;
+          ql.disabled = !jpegOk;
+          // Scale is useful for both PNG and JPEG; keep it enabled
+          sc.disabled = false;
+        }
+        // If not supported, force PNG
+        if (!jpegOk && tgl) { tgl.checked = false; updatePreviewSrc(); }
+      } catch (e) { /* ignore */ }
+    }
+    // Initial metrics fetch
+    fetchMetrics();
   </script>
 </body>
 </html>

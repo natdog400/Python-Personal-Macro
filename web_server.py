@@ -4,8 +4,10 @@ import json
 import time
 import threading
 import urllib.parse
+import base64
 from http import HTTPStatus
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from io import BytesIO
 
 # Optional dependencies used if available
 try:
@@ -18,6 +20,19 @@ try:
     import pyautogui
 except Exception:
     pyautogui = None
+
+# Optional system process metrics
+try:
+    import psutil
+except Exception:
+    psutil = None
+
+# Optional Pillow for JPEG/WebP encoding
+try:
+    from PIL import Image, features as PIL_features
+except Exception:
+    Image = None
+    PIL_features = None
 
 # Resolve project root for both source and frozen builds
 try:
@@ -212,6 +227,25 @@ class WebHandler(BaseHTTPRequestHandler):
         if path.startswith('/static/'):
             return self._serve_static_file(path[len('/static/'):])
 
+        # Token validation (no auth required): quickly check whether provided token matches server config
+        if path == '/api/status/check':
+            try:
+                expected = self._cfg().get('token') or ''
+                # Prefer header token; fallback to query param
+                auth = self.headers.get('Authorization') or ''
+                tok = ''
+                if auth.startswith('Bearer '):
+                    tok = auth.split(' ', 1)[1].strip()
+                else:
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    tok = (qs.get('token') or [''])[0]
+                return self._write_json({
+                    "valid": bool(tok) and (tok == expected),
+                    "time": int(time.time())
+                })
+            except Exception as e:
+                return self._write_json({"valid": False, "error": str(e)}, HTTPStatus.OK)
+
         # Auth-required endpoints
         if path == '/api/config':
             if not self._check_auth():
@@ -272,8 +306,173 @@ class WebHandler(BaseHTTPRequestHandler):
         if path == '/api/status':
             if not self._check_auth():
                 return self._write_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
-            # Minimal status for now
-            return self._write_json({"status": "ok", "time": int(time.time())})
+            # Enriched status including uptime and last-run snapshot
+            uptime = 0
+            try:
+                uptime = int(time.time() - (getattr(self.server, '_start_ts', time.time())))
+            except Exception:
+                uptime = 0
+            return self._write_json({
+                "status": "ok",
+                "time": int(time.time()),
+                "uptime": uptime,
+                "last_run": getattr(self.server, '_last_run', {
+                    "status": "idle",
+                    "sequence": None,
+                    "group": None,
+                    "last_event_ts": None
+                })
+            })
+
+        # Lightweight ping for latency measurement
+        if path == '/api/ping':
+            if not self._check_auth():
+                return self._write_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+            qs = urllib.parse.parse_qs(parsed.query)
+            echo = (qs.get('echo') or [''])[0]
+            return self._write_json({"time": int(time.time()), "echo": echo})
+
+        # Metrics endpoint: basic server/process metrics and connection counts
+        if path == '/api/metrics':
+            if not self._check_auth():
+                return self._write_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+            try:
+                now = int(time.time())
+                uptime = int(now - (getattr(self.server, '_start_ts', now)))
+                # Aggregate app-only stats: current process + descendants
+                app_stats = None
+                try:
+                    if psutil is not None:
+                        proc = getattr(self.server, '_proc', None)
+                        if proc is None:
+                            proc = psutil.Process(os.getpid())
+                        # Non-blocking snapshot; values stabilize over time
+                        cpu_main = float(proc.cpu_percent(interval=None) or 0.0)
+                        mem_main = int(proc.memory_info().rss or 0)
+                        children = proc.children(recursive=True)
+                        cpu_children = 0.0
+                        mem_children = 0
+                        for ch in children:
+                            try:
+                                cpu_children += float(ch.cpu_percent(interval=None) or 0.0)
+                                mem_children += int(ch.memory_info().rss or 0)
+                            except Exception:
+                                continue
+                        app_stats = {
+                            "cpu_percent": round(cpu_main + cpu_children, 1),
+                            "mem_rss_bytes": int(mem_main + mem_children),
+                            "process_count": int(1 + len(children)),
+                            # Optional breakdown
+                            "cpu_main_percent": round(cpu_main, 1),
+                            "cpu_children_percent": round(cpu_children, 1),
+                            "mem_main_rss_bytes": int(mem_main),
+                            "mem_children_rss_bytes": int(mem_children),
+                        }
+                except Exception:
+                    app_stats = None
+                data = {
+                    "time": now,
+                    "uptime": uptime,
+                    "connections": {
+                        "status_sse": int(getattr(self.server, '_sse_clients', 0)),
+                        "preview_mjpeg": int(getattr(self.server, '_mjpeg_clients', 0)),
+                        "log_sse": int(getattr(self.server, '_log_clients', 0)),
+                    },
+                    "totals": {
+                        "status_sse_messages": int(getattr(self.server, '_sse_messages_total', 0)),
+                        "preview_mjpeg_frames": int(getattr(self.server, '_mjpeg_frames_total', 0)),
+                        "log_sse_messages": int(getattr(self.server, '_log_messages_total', 0)),
+                    },
+                    "app": app_stats,
+                    "capabilities": {
+                        "mss_available": bool(mss is not None),
+                        "pyautogui_available": bool(pyautogui is not None),
+                        "pillow_available": bool('Image' in globals() and Image is not None),
+                        "jpeg_supported": bool('PIL_features' in globals() and PIL_features is not None and (
+                            bool(PIL_features.check('jpg')) or bool(PIL_features.check('jpeg'))
+                        )),
+                        "psutil_available": bool(psutil is not None),
+                    },
+                    "last_run": getattr(self.server, '_last_run', {
+                        "status": "idle",
+                        "sequence": None,
+                        "group": None,
+                        "last_event_ts": None
+                    })
+                }
+                return self._write_json(data)
+            except Exception as e:
+                return self._write_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+        # Server-Sent Events: live status stream (heartbeat + last-run info)
+        if path == '/api/status/stream':
+            if not self._check_auth():
+                self.send_error(HTTPStatus.UNAUTHORIZED)
+                return
+            # Interval control via query param (milliseconds)
+            qs = urllib.parse.parse_qs(parsed.query)
+            try:
+                interval_ms = int((qs.get('interval_ms') or ['1000'])[0])
+            except Exception:
+                interval_ms = 1000
+            interval_ms = max(250, min(interval_ms, 10000))
+            counted = False
+            try:
+                try:
+                    self.server._sse_clients = int(getattr(self.server, '_sse_clients', 0)) + 1
+                    counted = True
+                except Exception:
+                    pass
+                self.send_response(HTTPStatus.OK)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Connection', 'keep-alive')
+                self.end_headers()
+                # Stream loop
+                while True:
+                    try:
+                        uptime = int(time.time() - (getattr(self.server, '_start_ts', time.time())))
+                    except Exception:
+                        uptime = 0
+                    payload = {
+                        "heartbeat": int(time.time()),
+                        "uptime": uptime,
+                        "last_run": getattr(self.server, '_last_run', {
+                            "status": "idle",
+                            "sequence": None,
+                            "group": None,
+                            "last_event_ts": None
+                        })
+                    }
+                    data = json.dumps(payload)
+                    try:
+                        self.wfile.write(b'data: ' + data.encode('utf-8') + b'\n\n')
+                        # Attempt to flush to client
+                        try:
+                            self.wfile.flush()
+                        except Exception:
+                            pass
+                        try:
+                            self.server._sse_messages_total = int(getattr(self.server, '_sse_messages_total', 0)) + 1
+                        except Exception:
+                            pass
+                    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+                        # Client disconnected
+                        try:
+                            self.close_connection = True
+                        except Exception:
+                            pass
+                        return
+                    time.sleep(interval_ms / 1000.0)
+            except Exception:
+                # Any other error: stop streaming silently
+                return
+            finally:
+                if counted:
+                    try:
+                        self.server._sse_clients = int(getattr(self.server, '_sse_clients', 1)) - 1
+                    except Exception:
+                        pass
 
         # Debug log tail
         if path == '/api/debug-log':
@@ -302,6 +501,84 @@ class WebHandler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 return self._write_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+        # Debug log SSE stream: periodically send tail lines
+        if path == '/api/debug-log/stream':
+            if not self._check_auth():
+                self.send_error(HTTPStatus.UNAUTHORIZED)
+                return
+            qs = urllib.parse.parse_qs(parsed.query)
+            try:
+                interval_ms = int((qs.get('interval_ms') or ['1000'])[0])
+            except Exception:
+                interval_ms = 1000
+            interval_ms = max(250, min(interval_ms, 10000))
+            try:
+                max_lines = int((qs.get('lines') or ['500'])[0])
+            except Exception:
+                max_lines = 500
+            max_lines = max(1, min(max_lines, 5000))
+            log_path = os.path.join(PROJECT_ROOT, 'bot_debug.log')
+            counted = False
+            try:
+                try:
+                    self.server._log_clients = int(getattr(self.server, '_log_clients', 0)) + 1
+                    counted = True
+                except Exception:
+                    pass
+                self.send_response(HTTPStatus.OK)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Connection', 'keep-alive')
+                self.end_headers()
+                while True:
+                    exists = os.path.exists(log_path)
+                    lines = []
+                    total = 0
+                    if exists:
+                        try:
+                            with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                content = f.read()
+                            lines = content.splitlines()
+                            total = len(lines)
+                            lines = lines[-max_lines:]
+                        except Exception:
+                            exists = False
+                            lines = []
+                            total = 0
+                    payload = {
+                        "time": int(time.time()),
+                        "exists": bool(exists),
+                        "count": len(lines),
+                        "total": int(total),
+                        "lines": lines,
+                    }
+                    data = json.dumps(payload)
+                    try:
+                        self.wfile.write(b'data: ' + data.encode('utf-8') + b'\n\n')
+                        try:
+                            self.wfile.flush()
+                        except Exception:
+                            pass
+                        try:
+                            self.server._log_messages_total = int(getattr(self.server, '_log_messages_total', 0)) + 1
+                        except Exception:
+                            pass
+                    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+                        try:
+                            self.close_connection = True
+                        except Exception:
+                            pass
+                        return
+                    time.sleep(interval_ms / 1000.0)
+            except Exception:
+                return
+            finally:
+                if counted:
+                    try:
+                        self.server._log_clients = int(getattr(self.server, '_log_clients', 1)) - 1
+                    except Exception:
+                        pass
 
         # Scheduled sequences
         if path == '/api/schedules':
@@ -440,13 +717,25 @@ class WebHandler(BaseHTTPRequestHandler):
             if mss is None:
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "mss not available")
                 return
-            fps = max(1, int(self._cfg().get('mjpeg_fps', 6)))
+            # FPS target (allow override via query ?fps=<int>, else use config)
+            qs_for_fps = urllib.parse.parse_qs(parsed.query)
+            try:
+                fps_override = int((qs_for_fps.get('fps') or [str(self._cfg().get('mjpeg_fps', 6))])[0])
+            except Exception:
+                fps_override = int(self._cfg().get('mjpeg_fps', 6))
+            fps = max(1, min(fps_override, 60))
             delay = 1.0 / float(fps)
             boundary = 'frameboundary'
             self.send_response(HTTPStatus.OK)
             self.send_header('Content-Type', f'multipart/x-mixed-replace; boundary={boundary}')
             self.end_headers()
+            counted = False
             try:
+                try:
+                    self.server._mjpeg_clients = int(getattr(self.server, '_mjpeg_clients', 0)) + 1
+                    counted = True
+                except Exception:
+                    pass
                 with mss.mss() as sct:
                     # monitor index via query param ?monitor=<int>, default 0 (All)
                     qs = urllib.parse.parse_qs(parsed.query)
@@ -458,20 +747,108 @@ class WebHandler(BaseHTTPRequestHandler):
                     if mon_idx < 0 or mon_idx >= len(sct.monitors):
                         mon_idx = 0
                     monitor = sct.monitors[mon_idx]
+                    # Quality and scale options
+                    try:
+                        quality = int((qs.get('quality') or ['70'])[0])
+                    except Exception:
+                        quality = 70
+                    # Allow lower qualities for speed; clamp to [10, 95]
+                    quality = max(10, min(quality, 95))
+                    try:
+                        scale = float((qs.get('scale') or ['1.0'])[0])
+                    except Exception:
+                        scale = 1.0
+                    scale = max(0.25, min(scale, 1.0))
                     while True:
+                        frame_start = time.time()
                         img = sct.grab(monitor)
-                        # Encode as JPEG
-                        jpg = mss.tools.to_png(img.rgb, img.size)
-                        # PNG by default; convert to JPEG-like stream by letting browser accept PNG frames
-                        # Some browsers accept PNG in MJPEG streams; if not, consider Pillow for JPEG.
+                        # Select output format via query (?format=jpeg|png); default PNG for compatibility
+                        fmt = (qs.get('format') or ['png'])[0].lower()
+                        frame_bytes = None
+                        ctype = 'image/png'
+                        if fmt == 'jpeg' and Image is not None:
+                            try:
+                                pil = Image.frombytes('RGB', img.size, img.rgb)
+                                if scale != 1.0:
+                                    new_w = max(1, int(pil.width * scale))
+                                    new_h = max(1, int(pil.height * scale))
+                                    pil = pil.resize((new_w, new_h), Image.BILINEAR)
+                                buf = BytesIO()
+                                # Use faster save settings for higher throughput
+                                pil.save(buf, format='JPEG', quality=quality, optimize=False, subsampling='2')
+                                frame_bytes = buf.getvalue()
+                                ctype = 'image/jpeg'
+                            except Exception:
+                                frame_bytes = None
+                        if frame_bytes is None:
+                            # PNG fallback (optionally scaled via Pillow)
+                            if scale != 1.0 and Image is not None:
+                                try:
+                                    pil = Image.frombytes('RGB', img.size, img.rgb)
+                                    new_w = max(1, int(pil.width * scale))
+                                    new_h = max(1, int(pil.height * scale))
+                                    pil = pil.resize((new_w, new_h), Image.BILINEAR)
+                                    buf = BytesIO()
+                                    # Avoid optimize for speed; default compression is sufficient
+                                    pil.save(buf, format='PNG', optimize=False)
+                                    frame_bytes = buf.getvalue()
+                                except Exception:
+                                    frame_bytes = None
+                            if frame_bytes is None:
+                                frame_bytes = mss.tools.to_png(img.rgb, img.size)
                         self.wfile.write(bytes(f'--{boundary}\r\n', 'utf-8'))
-                        self.wfile.write(b'Content-Type: image/png\r\n')
-                        self.wfile.write(bytes(f'Content-Length: {len(jpg)}\r\n\r\n', 'utf-8'))
-                        self.wfile.write(jpg)
+                        self.wfile.write(bytes(f'Content-Type: {ctype}\r\n', 'utf-8'))
+                        self.wfile.write(bytes(f'Content-Length: {len(frame_bytes)}\r\n\r\n', 'utf-8'))
+                        self.wfile.write(frame_bytes)
                         self.wfile.write(b'\r\n')
-                        time.sleep(delay)
+                        try:
+                            self.server._mjpeg_frames_total = int(getattr(self.server, '_mjpeg_frames_total', 0)) + 1
+                        except Exception:
+                            pass
+                        # Sleep only the remaining time to hit target FPS; don't slow below encode time
+                        elapsed = time.time() - frame_start
+                        remaining = max(0.0, delay - elapsed)
+                        time.sleep(remaining)
             except Exception:
                 # client closed or error
+                return
+            finally:
+                if counted:
+                    try:
+                        self.server._mjpeg_clients = int(getattr(self.server, '_mjpeg_clients', 1)) - 1
+                    except Exception:
+                        pass
+
+        # Single-frame snapshot fallback
+        if path == '/api/snapshot.png':
+            if not self._check_auth():
+                self.send_error(HTTPStatus.UNAUTHORIZED)
+                return
+            if mss is None:
+                self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "mss not available")
+                return
+            try:
+                qs = urllib.parse.parse_qs(parsed.query)
+                mon_idx = 0
+                try:
+                    mon_idx = int((qs.get('monitor') or ['0'])[0])
+                except Exception:
+                    mon_idx = 0
+                with mss.mss() as sct:
+                    if mon_idx < 0 or mon_idx >= len(sct.monitors):
+                        mon_idx = 0
+                    monitor = sct.monitors[mon_idx]
+                    img = sct.grab(monitor)
+                    png = mss.tools.to_png(img.rgb, img.size)
+                self.send_response(HTTPStatus.OK)
+                self.send_header('Content-Type', 'image/png')
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Content-Length', str(len(png)))
+                self.end_headers()
+                self.wfile.write(png)
+                return
+            except Exception:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
 
         self.send_error(HTTPStatus.NOT_FOUND)
@@ -902,6 +1279,56 @@ class WebHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._write_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+        # Upload a template image via base64 and map it in config
+        if path == '/api/templates/upload':
+            try:
+                payload = json.loads(body.decode('utf-8')) if body else {}
+                name = (payload.get('name') or '').strip()
+                data_b64 = (payload.get('image_base64') or '').strip()
+                ext = (payload.get('ext') or 'png').lower().strip()
+                if not name:
+                    return self._write_json({"error": "name required"}, HTTPStatus.BAD_REQUEST)
+                if not data_b64:
+                    return self._write_json({"error": "image_base64 required"}, HTTPStatus.BAD_REQUEST)
+                if ext in ('jpeg',):
+                    ext = 'jpg'
+                if ext not in ('png', 'jpg'):
+                    return self._write_json({"error": "ext must be png or jpg"}, HTTPStatus.BAD_REQUEST)
+                # Allow data URL prefix
+                if data_b64.startswith('data:'):
+                    try:
+                        data_b64 = data_b64.split(',', 1)[1]
+                    except Exception:
+                        pass
+                try:
+                    raw = base64.b64decode(data_b64, validate=True)
+                except Exception:
+                    return self._write_json({"error": "invalid base64"}, HTTPStatus.BAD_REQUEST)
+                # Determine output path: images/<safe>.ext
+                safe = ''.join([c if (c.isalnum() or c in ('-', '_')) else '_' for c in name])
+                if not safe:
+                    safe = f"tpl_{int(time.time())}"
+                out_rel = f"images/{safe}.{ext}"
+                out_full = os.path.join(PROJECT_ROOT, out_rel) if not os.path.isabs(out_rel) else out_rel
+                os.makedirs(os.path.dirname(out_full), exist_ok=True)
+                with open(out_full, 'wb') as f:
+                    f.write(raw)
+                # Update config mapping
+                cfg = read_config_json()
+                tpl_map = cfg.get('templates', {}) or {}
+                tpl_map[name] = out_rel.replace('\\', '/')
+                cfg['templates'] = tpl_map
+                write_config_json(cfg)
+                try:
+                    trigger_reload_config_ipc()
+                except Exception:
+                    pass
+                return self._write_json({"ok": True, "path": tpl_map[name]})
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+                return
+            except Exception as e:
+                return self._write_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
         # Append a step to a sequence
         if path.endswith('/steps') and path.startswith('/api/sequences/'):
             try:
@@ -953,6 +1380,16 @@ class WebHandler(BaseHTTPRequestHandler):
                 cmd_path = os.path.join(PROJECT_ROOT, 'ipc_command.json')
                 with open(cmd_path, 'w', encoding='utf-8') as f:
                     json.dump({"command": "run", "sequence_name": seq_name}, f)
+                # Update last-run info for SSE consumers
+                try:
+                    self.server._last_run = {
+                        "status": "run_requested",
+                        "sequence": seq_name,
+                        "group": None,
+                        "last_event_ts": int(time.time())
+                    }
+                except Exception:
+                    pass
                 return self._write_json({"ok": True, "mode": "ipc", "sequence": seq_name})
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
                 return
@@ -988,6 +1425,16 @@ class WebHandler(BaseHTTPRequestHandler):
                 cmd_path = os.path.join(PROJECT_ROOT, 'ipc_command.json')
                 with open(cmd_path, 'w', encoding='utf-8') as f:
                     json.dump({"command": "run", "sequence_name": run_seq_name}, f)
+                # Update last-run info for SSE consumers
+                try:
+                    self.server._last_run = {
+                        "status": "run_group_requested",
+                        "sequence": run_seq_name,
+                        "group": group_name,
+                        "last_event_ts": int(time.time())
+                    }
+                except Exception:
+                    pass
                 return self._write_json({"ok": True, "mode": "ipc", "sequence": run_seq_name, "group": group_name})
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
                 return
@@ -999,6 +1446,16 @@ class WebHandler(BaseHTTPRequestHandler):
                 cmd_path = os.path.join(PROJECT_ROOT, 'ipc_command.json')
                 with open(cmd_path, 'w', encoding='utf-8') as f:
                     json.dump({"command": "stop"}, f)
+                # Update last-run info for SSE consumers
+                try:
+                    self.server._last_run = {
+                        "status": "stop_requested",
+                        "sequence": (getattr(self.server, '_last_run', {}) or {}).get('sequence'),
+                        "group": (getattr(self.server, '_last_run', {}) or {}).get('group'),
+                        "last_event_ts": int(time.time())
+                    }
+                except Exception:
+                    pass
                 return self._write_json({"ok": True, "mode": "ipc"})
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
                 return
@@ -1016,6 +1473,78 @@ class WebHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length)
         if not self._check_auth():
             return self._write_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+
+        # Rename a template and update all references across config
+        if path == '/api/templates/rename':
+            try:
+                payload = {}
+                if body:
+                    payload = json.loads(body.decode('utf-8'))
+                old_name = payload.get('old_name')
+                new_name = payload.get('new_name')
+                if not old_name or not new_name:
+                    return self._write_json({"error": "old_name and new_name required"}, HTTPStatus.BAD_REQUEST)
+                if old_name == new_name:
+                    return self._write_json({"error": "names must differ"}, HTTPStatus.BAD_REQUEST)
+                cfg = read_config_json()
+                tpl_map = cfg.get('templates', {}) or {}
+                if old_name not in tpl_map:
+                    return self._write_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                if new_name in tpl_map:
+                    return self._write_json({"error": "target exists"}, HTTPStatus.CONFLICT)
+
+                # Move template mapping
+                path_value = tpl_map.get(old_name)
+                del tpl_map[old_name]
+                tpl_map[new_name] = path_value
+                cfg['templates'] = tpl_map
+
+                def _rename_in_step(step_obj: dict):
+                    try:
+                        if step_obj.get('find') == old_name:
+                            step_obj['find'] = new_name
+                        actions = step_obj.get('actions') or []
+                        for a in actions:
+                            if a.get('template') == old_name:
+                                a['template'] = new_name
+                            if a.get('if_template') == old_name:
+                                a['if_template'] = new_name
+                    except Exception:
+                        # Be permissive; continue renaming other references
+                        pass
+
+                # Sequences
+                for seq in cfg.get('sequences', []) or []:
+                    for st in seq.get('steps', []) or []:
+                        _rename_in_step(st)
+
+                # Failsafe settings and sequence
+                fs = cfg.get('failsafe', {}) or {}
+                if fs.get('template') == old_name:
+                    fs['template'] = new_name
+                for st in fs.get('steps', []) or []:
+                    _rename_in_step(st)
+                cfg['failsafe'] = fs
+
+                # Groups
+                grps = cfg.get('groups', {}) or {}
+                for _, g in grps.items():
+                    for st in g.get('steps', []) or []:
+                        _rename_in_step(st)
+                cfg['groups'] = grps
+
+                # Persist and notify GUI to reload
+                write_config_json(cfg)
+                try:
+                    trigger_reload_config_ipc()
+                except Exception:
+                    # IPC optional; GUI may not be running
+                    pass
+                return self._write_json({"ok": True, "renamed": {"from": old_name, "to": new_name}})
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+                return
+            except Exception as e:
+                return self._write_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         try:
             payload = json.loads(body.decode('utf-8')) if body else {}
         except Exception:
@@ -1635,6 +2164,34 @@ def run_server():
     cfg = load_server_config()
     server = ThreadingHTTPServer((cfg['bind'], cfg['port']), WebHandler)
     server._cfg = cfg
+    # Server start timestamp for uptime calculations
+    try:
+        server._start_ts = time.time()
+    except Exception:
+        pass
+    # Connection counters for monitoring
+    try:
+        # Attach psutil Process reference when available
+        if psutil is not None:
+            server._proc = psutil.Process(os.getpid())
+        server._sse_clients = 0
+        server._mjpeg_clients = 0
+        server._log_clients = 0
+        server._sse_messages_total = 0
+        server._mjpeg_frames_total = 0
+        server._log_messages_total = 0
+    except Exception:
+        pass
+    # Initialize last-run info for SSE heartbeat consumers
+    try:
+        server._last_run = {
+            "status": "idle",
+            "sequence": None,
+            "group": None,
+            "last_event_ts": None
+        }
+    except Exception:
+        pass
     print(f"[web] Serving on http://{cfg['bind']}:{cfg['port']} (token required)")
     try:
         server.serve_forever()

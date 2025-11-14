@@ -38,6 +38,8 @@
     <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
       <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
       <input type="text" id="token" placeholder="Access Token" style="width:260px" />
+      <span id="globalLiveDot" title="Server live status" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#555"></span>
+      <small id="globalLiveText">Live: disconnected</small>
     </div>
   </header>
   <main>
@@ -52,9 +54,15 @@
         <button id="btnAdd">Add</button>
       </div>
       <div class="row">
+        <input type="text" id="uploadName" placeholder="Upload name (maps to template)" />
+        <input type="file" id="uploadFile" accept="image/png, image/jpeg" />
+        <button id="btnUpload">Upload</button>
+      </div>
+      <div class="row">
         <button id="btnDelete">Delete Selected</button>
       </div>
       <div style="margin-top:8px"><small id="statusA">Status: idle</small></div>
+      <div style="margin-top:4px"><small id="statusU">Upload: idle</small></div>
     </div>
     <div class="panel">
       <div class="row">
@@ -82,6 +90,10 @@
             <select id="tplPreviewSize"><option>640</option><option>800</option><option selected>1024</option><option>1280</option></select>
           </label>
           <label style="margin-left:16px; display:inline-flex; align-items:center; gap:6px"><input type="checkbox" id="tplPhoneToggle" /> Using Phone</label>
+          <label style="margin-left:16px; display:inline-flex; align-items:center; gap:6px"><input type="checkbox" id="tplJpegToggle" /> JPEG</label>
+          <label style="display:inline-flex; align-items:center; gap:6px">Quality <input type="number" id="tplJpegQuality" min="1" max="95" value="75" style="width:70px" /></label>
+          <label style="display:inline-flex; align-items:center; gap:6px">Scale <input type="number" id="tplJpegScale" min="0.25" max="1" step="0.05" value="1" style="width:70px" /></label>
+          <span id="tplFpsText" style="margin-left:16px"><small>FPS: --</small></span>
         </div>
         <div id="tplImagePane" style="position:relative; width:100%">
           <img id="tplPreview" alt="Preview" draggable="false" class="no-drag" style="width:100%; max-height:60vh; object-fit:contain; background:#111; border:1px solid #3a3a3a; border-radius:6px" />
@@ -106,6 +118,9 @@
     const statusA = document.getElementById('statusA');
     const statusB = document.getElementById('statusB');
     const tplPhoneToggle = document.getElementById('tplPhoneToggle');
+    const globalLiveDot = document.getElementById('globalLiveDot');
+    const globalLiveText = document.getElementById('globalLiveText');
+    let sseGlobal = null; let sseGlobalRetryMs = 1000;
     // Live preview elements
     const tplPreview = document.getElementById('tplPreview');
     const tplImagePane = document.getElementById('tplImagePane');
@@ -126,7 +141,7 @@
     } catch (e) {}
     tokenEl.addEventListener('change', () => {
       try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
-      fetchTemplates();
+      fetchTemplates(); startGlobalStatusStream();
     });
     rememberEl.addEventListener('change', () => {
       try {
@@ -140,12 +155,48 @@
     function setTplPreviewSize(){
       const val = parseInt(document.getElementById('tplPreviewSize').value||'1024',10);
       if (!isNaN(val) && val>0) { tplPreview.style.width = `${val}px`; }
+      // Reproject existing selection overlay to new preview size
+      try { tplRenderRegionOverlay(); } catch (e) {}
     }
     document.getElementById('tplPreviewSize').addEventListener('change', setTplPreviewSize);
+    // Load persisted preview settings
+    (function loadTplPreviewPrefs(){
+      try {
+        const fmt = localStorage.getItem('preview.format');
+        const qual = localStorage.getItem('preview.quality');
+        const scale = localStorage.getItem('preview.scale');
+        const mon = localStorage.getItem('preview.monitor');
+        const tgl = document.getElementById('tplJpegToggle');
+        const ql = document.getElementById('tplJpegQuality');
+        const sc = document.getElementById('tplJpegScale');
+        if (fmt && tgl) tgl.checked = (fmt === 'jpeg');
+        if (qual && ql) { const v = parseInt(qual,10); if(!isNaN(v)) ql.value = String(v); }
+        if (scale && sc) { let v = parseFloat(scale); if(!isNaN(v)) { v = Math.max(0.25, Math.min(1.0, v)); sc.value = String(v); } }
+        if (mon) { const mv = parseInt(mon,10); if(!isNaN(mv)) tplSelectedMonitor = mv; }
+      } catch (e) {}
+    })();
     function updateTplPreviewSrc(){
       const tok = tokenEl.value.trim();
-      tplPreview.src = `${apiBase}/stream.mjpeg?monitor=${encodeURIComponent(tplSelectedMonitor)}${tok ? `&token=${encodeURIComponent(tok)}` : ''}`;
+      const useJpeg = !!(document.getElementById('tplJpegToggle')?.checked);
+      const fmt = useJpeg ? 'jpeg' : 'png';
+      const scaleEl = document.getElementById('tplJpegScale');
+      const qualEl = document.getElementById('tplJpegQuality');
+      const q = [
+        `monitor=${encodeURIComponent(tplSelectedMonitor)}`,
+        `format=${fmt}`
+      ];
+      let scaleVal = parseFloat(scaleEl?.value||'1');
+      if (!isNaN(scaleVal)) { scaleVal = Math.max(0.25, Math.min(1.0, scaleVal)); q.push(`scale=${scaleVal.toFixed(2)}`); }
+      if (useJpeg) {
+        const qualVal = parseInt(qualEl?.value||'75', 10);
+        if (!isNaN(qualVal)) q.push(`quality=${Math.max(1, Math.min(95, qualVal))}`);
+      }
+      if (tok) q.push(`token=${encodeURIComponent(tok)}`);
+      tplPreview.src = `${apiBase}/stream.mjpeg?${q.join('&')}`;
     }
+    document.getElementById('tplJpegToggle').addEventListener('change', ()=>{ const useJpeg = !!document.getElementById('tplJpegToggle').checked; localStorage.setItem('preview.format', useJpeg ? 'jpeg' : 'png'); updateTplPreviewSrc(); });
+    document.getElementById('tplJpegQuality').addEventListener('change', ()=>{ const v = parseInt(document.getElementById('tplJpegQuality').value||'75',10); if(!isNaN(v)) localStorage.setItem('preview.quality', String(v)); updateTplPreviewSrc(); });
+    document.getElementById('tplJpegScale').addEventListener('change', ()=>{ let v = parseFloat(document.getElementById('tplJpegScale').value||'1'); if(!isNaN(v)) { v = Math.max(0.25, Math.min(1.0, v)); localStorage.setItem('preview.scale', String(v)); } updateTplPreviewSrc(); });
     async function fetchTplMonitors(){
       try {
         const res = await fetch(`${apiBase}/api/monitors`, { headers: authHeaders() });
@@ -160,7 +211,7 @@
           sel.appendChild(opt);
         }
         sel.value = String(tplSelectedMonitor);
-        sel.addEventListener('change', (e)=>{ tplSelectedMonitor = parseInt(e.target.value||'0',10)||0; updateTplPreviewSrc(); });
+        sel.addEventListener('change', (e)=>{ tplSelectedMonitor = parseInt(e.target.value||'0',10)||0; localStorage.setItem('preview.monitor', String(tplSelectedMonitor)); updateTplPreviewSrc(); });
       } catch (e) { /* ignore */ }
     }
 
@@ -247,11 +298,71 @@
       } catch (e) { statusA.textContent = `Status: delete failed (${e.message})`; }
     }
 
+    async function uploadTemplate() {
+      const name = document.getElementById('uploadName').value.trim();
+      const fileEl = document.getElementById('uploadFile');
+      const statusU = document.getElementById('statusU');
+      if (!name) { statusU.textContent = 'Upload: enter name'; return; }
+      if (!fileEl.files || fileEl.files.length === 0) { statusU.textContent = 'Upload: choose file'; return; }
+      const file = fileEl.files[0];
+      const mime = (file.type || '').toLowerCase();
+      let ext = 'png';
+      if (mime.includes('jpeg')) ext = 'jpg';
+      else if (mime.includes('png')) ext = 'png';
+      statusU.textContent = 'Upload: reading file...';
+      try {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onerror = () => reject(new Error('file read error'));
+          reader.onload = () => resolve(reader.result);
+          reader.readAsDataURL(file);
+        });
+        statusU.textContent = 'Upload: sending...';
+        const res = await fetch(`${apiBase}/api/templates/upload`, {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, image_base64: String(dataUrl), ext })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        statusU.textContent = `Upload: ok (${data.path || 'saved'})`;
+        // Reset inputs and refresh list
+        document.getElementById('uploadName').value = '';
+        document.getElementById('uploadFile').value = '';
+        await fetchTemplates();
+        // Select and load the uploaded template
+        tplListEl.value = name;
+        await loadTemplate(name);
+      } catch (e) {
+        statusU.textContent = `Upload: failed (${e.message})`;
+      }
+    }
+
     tplListEl.addEventListener('change', () => loadTemplate(tplListEl.value));
     document.getElementById('btnSave').addEventListener('click', savePath);
     document.getElementById('btnAdd').addEventListener('click', addTemplate);
     document.getElementById('btnDelete').addEventListener('click', deleteTemplate);
+    document.getElementById('btnUpload').addEventListener('click', uploadTemplate);
     tokenEl.addEventListener('change', () => { fetchTemplates(); fetchTplMonitors().then(()=>{ updateTplPreviewSrc(); setTplPreviewSize(); }); });
+    // Capability gating: enable JPEG controls only if supported
+    async function fetchMetrics(){
+      try {
+        const res = await fetch(`${apiBase}/api/metrics`, { headers: authHeaders() });
+        const data = await res.json();
+        const caps = (data && data.capabilities) ? data.capabilities : {};
+        const jpegOk = !!(caps.pillow_available && caps.jpeg_supported);
+        const tgl = document.getElementById('tplJpegToggle');
+        const ql = document.getElementById('tplJpegQuality');
+        const sc = document.getElementById('tplJpegScale');
+        if (tgl && ql && sc) {
+          tgl.disabled = !jpegOk;
+          ql.disabled = !jpegOk;
+          sc.disabled = false; // scale works for both
+        }
+        if (!jpegOk && tgl) { tgl.checked = false; updateTplPreviewSrc(); }
+      } catch (e) { /* ignore */ }
+    }
+    fetchMetrics();
 
     // Prevent default image drag which interferes on touch devices
     previewEl.addEventListener('dragstart', (e) => e.preventDefault());
@@ -323,18 +434,44 @@
       const ih = Math.abs(((tplLastDragPos ? tplLastDragPos.y : tplDragStart.y)) - tplDragStart.y);
       const scaleX = info.nw / info.contentW;
       const scaleY = info.nh / info.contentH;
-      const x0 = Math.round(ix0 * scaleX);
-      const y0 = Math.round(iy0 * scaleY);
-      const rw = Math.round(iw * scaleX);
-      const rh = Math.round(ih * scaleY);
+      // Compensate for server-side image scale so region is in monitor coordinates
+      let serverScale = parseFloat((document.getElementById('tplJpegScale').value||'1'));
+      if (isNaN(serverScale) || serverScale <= 0) serverScale = 1;
+      const x0 = Math.round((ix0 * scaleX) / serverScale);
+      const y0 = Math.round((iy0 * scaleY) / serverScale);
+      const rw = Math.round((iw * scaleX) / serverScale);
+      const rh = Math.round((ih * scaleY) / serverScale);
       tplLastRegion = [x0, y0, rw, rh];
       statusC.textContent = `Status: selected region ${x0},${y0},${rw},${rh}`;
       tplDragStart = null;
       tplLastDragPos = null;
     }
+    // Re-render selection overlay from saved monitor-space region after preview reload/scale change
+    function tplRenderRegionOverlay(){
+      if (!tplLastRegion) return;
+      const info = getTplImageContentInfo(tplPreview);
+      const paneRect = tplImagePane.getBoundingClientRect();
+      const scaleX = info.nw / info.contentW;
+      const scaleY = info.nh / info.contentH;
+      let serverScale = parseFloat((document.getElementById('tplJpegScale').value||'1'));
+      if (isNaN(serverScale) || serverScale <= 0) serverScale = 1;
+      const [mx, my, mw, mh] = tplLastRegion;
+      const ix0 = (mx * serverScale) / scaleX;
+      const iy0 = (my * serverScale) / scaleY;
+      const iw = (mw * serverScale) / scaleX;
+      const ih = (mh * serverScale) / scaleY;
+      const offX = (info.rect.left - paneRect.left) + info.offsetX;
+      const offY = (info.rect.top - paneRect.top) + info.offsetY;
+      tplSelBox.style.display = 'block';
+      tplSelBox.style.left = `${offX + ix0}px`;
+      tplSelBox.style.top = `${offY + iy0}px`;
+      tplSelBox.style.width = `${iw}px`;
+      tplSelBox.style.height = `${ih}px`;
+    }
     // Mouse events
     tplPreview.addEventListener('mousedown', (e) => { tplStartDrag(e.clientX, e.clientY); });
     tplPreview.addEventListener('mousemove', (e) => { tplMoveDrag(e.clientX, e.clientY); });
+    tplPreview.addEventListener('load', () => { tplRenderRegionOverlay(); });
     window.addEventListener('mouseup', () => { tplEndDrag(); });
     // Touch events gated by Using Phone
     tplPreview.addEventListener('touchstart', (e) => { if (!tplPhoneToggle.checked) return; e.preventDefault(); const t=e.touches[0]; if (t) tplStartDrag(t.clientX, t.clientY); }, { passive: false });
@@ -378,6 +515,60 @@
     if (urlTok) { tokenEl.value = urlTok; }
     fetchTemplates();
     fetchTplMonitors().then(()=>{ updateTplPreviewSrc(); setTplPreviewSize(); });
+    // Live FPS meter via /api/metrics
+    (function attachTplFps(){
+      const out = document.getElementById('tplFpsText');
+      let lastFrames = null; let lastTime = null;
+      async function poll(){
+        try {
+          const res = await fetch(`${apiBase}/api/metrics`, { headers: authHeaders() });
+          const data = await res.json();
+          const frames = (data && data.totals && typeof data.totals.preview_mjpeg_frames === 'number') ? data.totals.preview_mjpeg_frames : 0;
+          const now = Date.now();
+          if (lastFrames !== null && lastTime !== null) {
+            const df = frames - lastFrames; const dt = (now - lastTime) / 1000;
+            if (dt > 0) { const fps = Math.max(0, df / dt); if (out) out.textContent = `FPS: ${fps.toFixed(1)}`; }
+          }
+          lastFrames = frames; lastTime = now;
+        } catch (e) { /* ignore */ }
+      }
+      setInterval(poll, 1000); poll();
+    })();
+    startGlobalStatusStream();
+
+    function startGlobalStatusStream(){
+      const tok = (tokenEl.value || localStorage.getItem('apiToken') || '').trim();
+      if (!tok) { globalLiveText.textContent = 'Live: enter token'; globalLiveDot.style.background = '#555'; return; }
+      try { if (sseGlobal) { sseGlobal.close(); sseGlobal = null; } } catch {}
+      const url = `${apiBase}/api/status/stream?interval_ms=1000&token=${encodeURIComponent(tok)}`;
+      globalLiveText.textContent = 'Live: connecting...';
+      globalLiveDot.style.background = '#caa';
+      try {
+        sseGlobal = new EventSource(url);
+        sseGlobal.onopen = () => { globalLiveText.textContent = 'Live: connected'; globalLiveDot.style.background = '#3fb950'; sseGlobalRetryMs = 1000; };
+        sseGlobal.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            const ts = Number(msg.heartbeat || Date.now());
+            globalLiveText.textContent = `Live: heartbeat ${ts}`;
+            globalLiveDot.style.background = '#3fb950';
+          } catch (e) {
+            globalLiveText.textContent = 'Live: bad data'; globalLiveDot.style.background = '#f59e0b';
+          }
+        };
+        sseGlobal.onerror = () => {
+          globalLiveText.textContent = 'Live: disconnected, retrying...'; globalLiveDot.style.background = '#555';
+          try { sseGlobal.close(); } catch {}
+          sseGlobal = null;
+          const delay = Math.min(sseGlobalRetryMs, 10000);
+          setTimeout(startGlobalStatusStream, delay);
+          sseGlobalRetryMs = Math.min(sseGlobalRetryMs * 2, 10000);
+        };
+      } catch (e) {
+        globalLiveText.textContent = `Live: error (${e.message})`;
+        globalLiveDot.style.background = '#ef4444';
+      }
+    }
   </script>
 </body>
 </html>

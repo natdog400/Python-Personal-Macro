@@ -14,6 +14,7 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
   - Move-To actions can use a selected region with optional random movement
 - **Failsafe System**: Enable a template-based trigger, define a separate sequence, and test it with a button
 - **Template Tester**: Live preview of template matching with confidence meter and optional search region
+- **Overlay Previews**: One-click visual overlays to preview current search regions and click points (`Show Region`, `Show Click` buttons across editors).
 - **Hotkeys & Status**: F8 to stop; status bar updates; mouse position tracker
 - **Config Persistence**: Reads/writes `config.json` and keeps template paths relative when possible
 - **Break Settings**: Set a maximum runtime cap (hours/minutes/seconds); live timer shows `Elapsed / Max`; cap overrides loop settings
@@ -28,6 +29,15 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
 - Assets: `images/`, `failsafe_images/`, `web/static/`.
 
 ## Recent Updates (Web + GUI)
+
+- Overlay previews in the GUI
+  - Added a transparent, non-interactive overlay window used to preview coordinates.
+  - New buttons: `Show Region` in Step Editor, Action Editor, and Failsafe sidebar; `Show Click` in Action Editor.
+  - Previews draw a red rectangle for regions and a crosshair marker for click points; overlays auto-close after a short timeout.
+
+- Template reload robustness and debug toggle fix
+  - Template list is repopulated in the UI first; each template loads into the bot with per-item error handling. UI no longer clears if a single template fails.
+  - Fixed a NameError when toggling branch debug by reading templates from `self.config` within the handler; the toggle no longer disrupts UI refresh.
 
 - Configuration safety and startup stability
   - Guarded auto‑save during startup with a suppression flag to prevent writing an empty `config.json` while UI constructs.
@@ -174,12 +184,14 @@ This outputs `dist/ImageDetectionBotConsole.exe`, which launches the GUI and sho
   - Add actions like Click, Move, Move-To, Type, Key Press, Wait, Scroll
   - For Click: optionally select a region to click randomly inside
   - For Move-To: optionally enable random and select a region to move within
+  - Use `Show Region` or `Show Click` to quickly visualize the current settings before running.
   - Run the selected sequence; press F8 to stop
 - Template Tester tab:
   - Pick a template, optionally select region, start live preview to see confidence value
 - Failsafe tab:
   - Enable failsafe, choose a template and confidence, optionally set a search region
   - Build a separate “failsafe sequence” of steps
+  - Use `Show Region` to preview the configured failsafe region overlay.
   - Click Test Failsafe to run only the failsafe sequence
 
 ## Screenshots
@@ -586,3 +598,7 @@ This project is for personal use; choose an appropriate license before public re
   - Web editors save `random` and `random_region`; compiled GUI honors random move_to and random-region clicks.
 - MJPEG preview shows `net::ERR_ABORTED` occasionally:
   - That’s a reconnect artifact; it does not affect saving, IPC, or UI updates.
+- Templates list appears but bot fails to load a template:
+  - The UI is designed to stay populated even if individual templates fail to load into the bot.
+  - Check `bot_debug.log` for the failing template path; ensure the image exists at the resolved absolute path.
+  - Use the Templates tab to update the path or re-capture and save the template.

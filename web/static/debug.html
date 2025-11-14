@@ -36,6 +36,8 @@
       <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
         <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
         <input type="text" id="token" placeholder="Access Token" style="width:260px" />
+        <span id="globalLiveDot" title="Server live status" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#555"></span>
+        <small id="globalLiveText">Live: disconnected</small>
       </div>
     </header>
     <main>
@@ -45,11 +47,13 @@
             <input type="number" id="tailLines" min="10" max="5000" value="500" />
           </label>
           <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="autoRefresh" /> Auto-refresh</label>
+          <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="liveStream" /> Live stream (SSE)</label>
           <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="autoScroll" checked /> Auto-scroll</label>
           <button id="btnRefresh">Refresh</button>
         </div>
         <div id="logView">Loading...</div>
         <div style="margin-top:8px"><small id="status">Status: idle</small></div>
+        <div style="margin-top:4px"><small id="statusSSE">Live: idle</small></div>
       </div>
       <div class="panel">
         <h3>Debug Options</h3>
@@ -71,12 +75,18 @@
       const statusOptEl = document.getElementById('statusOpt');
       const tailLinesEl = document.getElementById('tailLines');
       const autoRefreshEl = document.getElementById('autoRefresh');
+      const liveStreamEl = document.getElementById('liveStream');
       const autoScrollEl = document.getElementById('autoScroll');
       const logViewEl = document.getElementById('logView');
       const btnRefresh = document.getElementById('btnRefresh');
       const branchTracesEl = document.getElementById('branchTraces');
       const btnSaveDebug = document.getElementById('btnSaveDebug');
       let timer = null;
+      const globalLiveDot = document.getElementById('globalLiveDot');
+      const globalLiveText = document.getElementById('globalLiveText');
+      let sseGlobal = null; let sseGlobalRetryMs = 1000;
+      let sseLogs = null; let sseLogsRetryMs = 1000;
+      const statusSSEEl = document.getElementById('statusSSE');
 
       function authHeaders() {
         const tok = tokenEl.value.trim();
@@ -140,6 +150,41 @@
         }
       }
 
+      function startLogsStream(){
+        const tok = (tokenEl.value || localStorage.getItem('apiToken') || '').trim();
+        if (!tok) { statusSSEEl.textContent = 'Live: enter token'; return; }
+        try { if (sseLogs) { sseLogs.close(); sseLogs = null; } } catch {}
+        const n = parseInt(tailLinesEl.value || '500', 10);
+        const url = `${apiBase}/api/debug-log/stream?interval_ms=1000&lines=${encodeURIComponent(String(n))}&token=${encodeURIComponent(tok)}`;
+        statusSSEEl.textContent = 'Live: connecting...';
+        try {
+          sseLogs = new EventSource(url);
+          sseLogs.onopen = () => { statusSSEEl.textContent = 'Live: connected'; sseLogsRetryMs = 1000; };
+          sseLogs.onmessage = (evt) => {
+            try {
+              const msg = JSON.parse(evt.data);
+              const lines = msg.lines || [];
+              logViewEl.textContent = lines.join('\n');
+              if (autoScrollEl.checked) { logViewEl.scrollTop = logViewEl.scrollHeight; }
+              statusEl.textContent = `Status: loaded ${lines.length} line(s)`;
+              statusSSEEl.textContent = `Live: last update ${new Date(msg.time*1000).toLocaleTimeString()}`;
+            } catch (e) {
+              statusSSEEl.textContent = 'Live: bad data';
+            }
+          };
+          sseLogs.onerror = () => {
+            statusSSEEl.textContent = 'Live: disconnected, retrying...';
+            try { sseLogs.close(); } catch {}
+            sseLogs = null;
+            const delay = Math.min(sseLogsRetryMs, 10000);
+            setTimeout(() => { if (liveStreamEl.checked) startLogsStream(); }, delay);
+            sseLogsRetryMs = Math.min(sseLogsRetryMs * 2, 10000);
+          };
+        } catch (e) {
+          statusSSEEl.textContent = `Live: error (${e.message})`;
+        }
+      }
+
       // Token persistence across pages
       try {
         const remembered = (localStorage.getItem('rememberToken') === 'true');
@@ -149,7 +194,8 @@
       } catch (e) {}
       tokenEl.addEventListener('change', () => {
         try { if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim()); } catch (e) {}
-        fetchLogs(); loadDebugOptions();
+        if (liveStreamEl.checked) startLogsStream(); else fetchLogs();
+        loadDebugOptions(); startGlobalStatusStream();
       });
       rememberEl.addEventListener('change', () => {
         try {
@@ -158,6 +204,10 @@
         } catch (e) {}
       });
       autoRefreshEl.addEventListener('change', startAuto);
+      liveStreamEl.addEventListener('change', () => {
+        try { if (sseLogs) { sseLogs.close(); sseLogs = null; } } catch {}
+        if (liveStreamEl.checked) { startLogsStream(); } else { statusSSEEl.textContent = 'Live: stopped'; }
+      });
       btnRefresh.addEventListener('click', fetchLogs);
       btnSaveDebug.addEventListener('click', saveDebugOptions);
 
@@ -165,6 +215,41 @@
       fetchLogs();
       loadDebugOptions();
       startAuto();
+      if (liveStreamEl.checked) startLogsStream();
+      function startGlobalStatusStream(){
+        const tok = (tokenEl.value || localStorage.getItem('apiToken') || '').trim();
+        if (!tok) { globalLiveText.textContent = 'Live: enter token'; globalLiveDot.style.background = '#555'; return; }
+        try { if (sseGlobal) { sseGlobal.close(); sseGlobal = null; } } catch {}
+        const url = `${apiBase}/api/status/stream?interval_ms=1000&token=${encodeURIComponent(tok)}`;
+        globalLiveText.textContent = 'Live: connecting...';
+        globalLiveDot.style.background = '#caa';
+        try {
+          sseGlobal = new EventSource(url);
+          sseGlobal.onopen = () => { globalLiveText.textContent = 'Live: connected'; globalLiveDot.style.background = '#3fb950'; sseGlobalRetryMs = 1000; };
+          sseGlobal.onmessage = (evt) => {
+            try {
+              const msg = JSON.parse(evt.data);
+              const ts = Number(msg.heartbeat || Date.now());
+              globalLiveText.textContent = `Live: heartbeat ${ts}`;
+              globalLiveDot.style.background = '#3fb950';
+            } catch (e) {
+              globalLiveText.textContent = 'Live: bad data'; globalLiveDot.style.background = '#f59e0b';
+            }
+          };
+          sseGlobal.onerror = () => {
+            globalLiveText.textContent = 'Live: disconnected, retrying...'; globalLiveDot.style.background = '#555';
+            try { sseGlobal.close(); } catch {}
+            sseGlobal = null;
+            const delay = Math.min(sseGlobalRetryMs, 10000);
+            setTimeout(startGlobalStatusStream, delay);
+            sseGlobalRetryMs = Math.min(sseGlobalRetryMs * 2, 10000);
+          };
+        } catch (e) {
+          globalLiveText.textContent = `Live: error (${e.message})`;
+          globalLiveDot.style.background = '#ef4444';
+        }
+      }
+      startGlobalStatusStream();
     </script>
   </body>
 </html>

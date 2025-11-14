@@ -35,6 +35,8 @@
     <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
       <label style="display:flex; align-items:center; gap:6px"><input type="checkbox" id="rememberToken" /> Remember token</label>
       <input type="text" id="token" placeholder="Access Token" style="width:260px" />
+      <span id="globalLiveDot" title="Server live status" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#555"></span>
+      <small id="globalLiveText">Live: disconnected</small>
     </div>
   </header>
   <main>
@@ -108,6 +110,9 @@
     const rememberEl = document.getElementById('rememberToken');
     const statusA = document.getElementById('statusA');
     const statusB = document.getElementById('statusB');
+    const globalLiveDot = document.getElementById('globalLiveDot');
+    const globalLiveText = document.getElementById('globalLiveText');
+    let sseGlobal = null; let sseGlobalRetryMs = 1000;
 
     function authHeaders() {
       const tok = tokenEl.value.trim();
@@ -132,6 +137,40 @@
         if (rememberEl.checked) localStorage.setItem('apiToken', tokenEl.value.trim());
       } catch (e) {}
     });
+
+    function startGlobalStatusStream(){
+      const tok = (tokenEl.value || localStorage.getItem('apiToken') || '').trim();
+      if (!tok) { globalLiveText.textContent = 'Live: enter token'; globalLiveDot.style.background = '#555'; return; }
+      try { if (sseGlobal) { sseGlobal.close(); sseGlobal = null; } } catch {}
+      const url = `${apiBase}/api/status/stream?interval_ms=1000&token=${encodeURIComponent(tok)}`;
+      globalLiveText.textContent = 'Live: connecting...';
+      globalLiveDot.style.background = '#caa';
+      try {
+        sseGlobal = new EventSource(url);
+        sseGlobal.onopen = () => { globalLiveText.textContent = 'Live: connected'; globalLiveDot.style.background = '#3fb950'; sseGlobalRetryMs = 1000; };
+        sseGlobal.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            const ts = Number(msg.heartbeat || Date.now());
+            globalLiveText.textContent = `Live: heartbeat ${ts}`;
+            globalLiveDot.style.background = '#3fb950';
+          } catch (e) {
+            globalLiveText.textContent = 'Live: bad data'; globalLiveDot.style.background = '#f59e0b';
+          }
+        };
+        sseGlobal.onerror = () => {
+          globalLiveText.textContent = 'Live: disconnected, retrying...'; globalLiveDot.style.background = '#555';
+          try { sseGlobal.close(); } catch {}
+          sseGlobal = null;
+          const delay = Math.min(sseGlobalRetryMs, 10000);
+          setTimeout(startGlobalStatusStream, delay);
+          sseGlobalRetryMs = Math.min(sseGlobalRetryMs * 2, 10000);
+        };
+      } catch (e) {
+        globalLiveText.textContent = `Live: error (${e.message})`;
+        globalLiveDot.style.background = '#ef4444';
+      }
+    }
 
     async function loadSequencesInto(selectEl) {
       try {
@@ -252,7 +291,7 @@
     document.getElementById('btnStop').addEventListener('click', stopSeq);
     document.getElementById('btnSaveBreak').addEventListener('click', saveBreakSettings);
 
-    tokenEl.addEventListener('change', () => { loadSequencesInto(document.getElementById('runSequence')); loadGroupsInto(document.getElementById('runGroup')); loadBreakSettings(); });
+    tokenEl.addEventListener('change', () => { loadSequencesInto(document.getElementById('runSequence')); loadGroupsInto(document.getElementById('runGroup')); loadBreakSettings(); startGlobalStatusStream(); });
 
     const urlTok = new URLSearchParams(location.search).get('token');
     if (urlTok) { tokenEl.value = urlTok; }
@@ -260,6 +299,7 @@
     loadGroupsInto(document.getElementById('runGroup'));
     loadSequencesInto(document.getElementById('breakFinalSeq'));
     loadBreakSettings();
+    startGlobalStatusStream();
   </script>
 </body>
 </html>
