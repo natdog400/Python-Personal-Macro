@@ -1245,12 +1245,28 @@ class ActionEditor(QWidget):
             main_layout.addWidget(clicks_spin)
             
         elif action_type in ["type", "key_press"]:
-            param_name = "text" if action_type == "type" else "key"
-            main_layout.addWidget(QLabel(f"{param_name.title()}: "))
-            text_edit = QLineEdit(self.action_data.get(param_name, ""))
-            text_edit.textChanged.connect(
-                lambda text, key=param_name: self.update_action_param(key, text))
-            main_layout.addWidget(text_edit)
+            if action_type == "type":
+                main_layout.addWidget(QLabel("Text: "))
+                text_edit = QLineEdit(self.action_data.get("text", ""))
+                text_edit.textChanged.connect(
+                    lambda text, key="text": self.update_action_param(key, text))
+                main_layout.addWidget(text_edit)
+            else:
+                main_layout.addWidget(QLabel("Key:"))
+                key_combo = QComboBox()
+                try:
+                    keys = list(pyautogui.KEYBOARD_KEYS)
+                except Exception:
+                    keys = []
+                key_combo.addItems(keys)
+                saved_key = self.action_data.get("key", "")
+                if saved_key and saved_key not in keys:
+                    key_combo.addItem(saved_key)
+                if saved_key:
+                    key_combo.setCurrentText(saved_key)
+                key_combo.currentTextChanged.connect(
+                    lambda text, key="key": self.update_action_param(key, text))
+                main_layout.addWidget(key_combo)
             
         elif action_type == "wait":
             main_layout.addWidget(QLabel("Seconds:"))
@@ -1874,7 +1890,24 @@ class MiniActionEditor(QWidget):
         elif t == 'scroll':
             add_spin('Pixels:', 'pixels', (-1000,1000), self.action_data.get('pixels',0))
         elif t in ('type','key_press'):
-            add_text('Text:' if t=='type' else 'Key:', 'text' if t=='type' else 'key', self.action_data.get('text' if t=='type' else 'key',''))
+            if t == 'type':
+                add_text('Text:', 'text', self.action_data.get('text',''))
+            else:
+                add_label('Key:')
+                w = QComboBox()
+                try:
+                    keys = list(pyautogui.KEYBOARD_KEYS)
+                except Exception:
+                    keys = []
+                w.addItems(keys)
+                saved = self.action_data.get('key','')
+                if saved and saved not in keys:
+                    w.addItem(saved)
+                if saved:
+                    w.setCurrentText(saved)
+                w.currentTextChanged.connect(lambda tt: self.update_param('key', tt))
+                self.params['key'] = w
+                self.params_layout.addWidget(w)
         else:
             # No extra params for right_click/double_click/click_and_hold here
             pass
