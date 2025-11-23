@@ -5,6 +5,7 @@ import time
 import os
 import json
 import sys
+import math
 from typing import Optional, Tuple, List, Dict, Any, Union
 import argparse
 import logging
@@ -40,6 +41,7 @@ class ActionType(Enum):
     WAIT = "wait"
     SCROLL = "scroll"
     CLICK_AND_HOLD = "click_and_hold"
+    PLAY_RECORDING = "play_recording"
 
 @dataclass
 class Action:
@@ -62,6 +64,9 @@ class Action:
     if_timeout: float = 0.5
     else_actions: Optional[List[Any]] = None
     if_not_actions: Optional[List[Any]] = None
+    recording_path: Optional[str] = None
+    recording_speed: float = 1.0
+    start_transition: float = 0.0
 
 class ImageDetectionBot:
     def __init__(self, confidence: float = 0.8):
@@ -99,6 +104,8 @@ class ImageDetectionBot:
             self.sift = None
             self.bf_sift = None
         self.current_position: Optional[Tuple[int, int]] = None
+        self.variables: Dict[str, Any] = {}
+        self.action_metrics: List[Dict[str, Any]] = []
         
     def load_template(self, name: str, image_path: str) -> bool:
         """
@@ -724,6 +731,122 @@ class ImageDetectionBot:
             logger.info(f"Pressed key: {key}")
         except Exception as e:
             logger.error(f"Error pressing key {key}: {str(e)}")
+
+    def play_recording(self, recording_path: str, speed: float = 1.0, transition: float = 0.0) -> bool:
+        try:
+            if not recording_path or not os.path.exists(recording_path):
+                logger.error(f"Recording file not found: {recording_path}")
+                return False
+            with open(recording_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            events = list(data.get('events', []) or [])
+            if not events:
+                logger.warning("Recording has no events")
+                return False
+            first_x = None; first_y = None
+            for ev0 in events:
+                try:
+                    if str(ev0.get('type','')) == 'move':
+                        first_x = int(ev0.get('x', 0)); first_y = int(ev0.get('y', 0))
+                        break
+                except Exception:
+                    pass
+            start = float(events[0].get('t', 0.0))
+            try:
+                if first_x is not None and first_y is not None:
+                    cx, cy = pyautogui.position()
+                    dx = float(first_x - cx); dy = float(first_y - cy)
+                    dist = math.hypot(dx, dy)
+                    sp = float(speed) if speed and float(speed) > 0 else 1.0
+                    td = float(transition) if transition is not None else 0.0
+                    if td and td > 0:
+                        pre_dur = float(td)
+                    else:
+                        pre_dur = max(0.05, min(0.75, (dist / 1000.0) / max(sp, 0.001)))
+                    pyautogui.moveTo(first_x, first_y, duration=pre_dur)
+                    self.current_position = (first_x, first_y)
+            except Exception:
+                pass
+            base = time.perf_counter()
+            try:
+                logger.info(f"Playing recording '{recording_path}' at speed {float(speed)}x")
+            except Exception:
+                pass
+            prev_pause = None
+            try:
+                prev_pause = getattr(pyautogui, 'PAUSE', None)
+                pyautogui.PAUSE = 0.0
+            except Exception:
+                prev_pause = None
+            # Use per-interval scheduling to ensure speed scaling applies consistently
+            prev_t = 0.0
+            last_tick = base
+            sp = 1.0
+            try:
+                sp = float(speed) if speed and float(speed) > 0 else 1.0
+            except Exception:
+                sp = 1.0
+            try:
+                for idx, ev in enumerate(events):
+                    try:
+                        t_rel = float(ev.get('t', 0.0)) - start
+                    except Exception:
+                        t_rel = 0.0
+                    # Compute the intended interval since previous event and scale by speed
+                    interval = max(0.0, (t_rel - prev_t) / sp)
+                    if interval > 0.0:
+                        deadline = last_tick + interval
+                        # Sleep until reaching the scaled deadline
+                        while time.perf_counter() < deadline:
+                            time.sleep(0.005)
+                        last_tick = deadline
+                    prev_t = t_rel
+                    typ = str(ev.get('type', ''))
+                    if typ == 'move':
+                        x = int(ev.get('x', 0)); y = int(ev.get('y', 0))
+                        pyautogui.moveTo(x, y, duration=0.0)
+                        self.current_position = (x, y)
+                    elif typ in ('mouse_down', 'mouse_up'):
+                        btn = ev.get('button', 'left')
+                        if typ == 'mouse_down':
+                            pyautogui.mouseDown(button=btn)
+                        else:
+                            pyautogui.mouseUp(button=btn)
+                    elif typ == 'scroll':
+                        dy = int(ev.get('dy', 0))
+                        pyautogui.scroll(dy)
+                    elif typ in ('key_down', 'key_up'):
+                        k = str(ev.get('key', ''))
+                        try:
+                            if typ == 'key_down':
+                                pyautogui.keyDown(k)
+                            else:
+                                pyautogui.keyUp(k)
+                        except Exception:
+                            try:
+                                pyautogui.press(k)
+                            except Exception:
+                                pass
+            finally:
+                try:
+                    if prev_pause is not None:
+                        pyautogui.PAUSE = prev_pause
+                except Exception:
+                    pass
+            return True
+        except Exception as e:
+            logger.error(f"Failed to play recording: {e}")
+            return False
+
+    def _resolve(self, v: Any) -> Any:
+        try:
+            if isinstance(v, str):
+                if v.startswith('${') and v.endswith('}'):
+                    key = v[2:-1]
+                    return self.variables.get(key, v)
+            return v
+        except Exception:
+            return v
             
     def wait(self, seconds: float) -> None:
         """Wait for the specified number of seconds."""
@@ -812,23 +935,31 @@ class ImageDetectionBot:
         
         try:
             if action.type == ActionType.CLICK:
-                self.click_at(x, y, button=action.button, clicks=action.clicks)
+                self.click_at(x, y, button=self._resolve(getattr(action, 'button', 'left')), clicks=int(self._resolve(getattr(action, 'clicks', 1))))
             elif action.type == ActionType.MOVE:
-                self.move_to(x, y, duration=action.duration)
+                self.move_to(x, y, duration=float(self._resolve(getattr(action, 'duration', 0.0))))
             elif action.type == ActionType.MOVE_TO:
-                self.move_to(x, y, duration=action.duration)
+                self.move_to(x, y, duration=float(self._resolve(getattr(action, 'duration', 0.0))))
             elif action.type == ActionType.RIGHT_CLICK:
                 self.right_click_at(x, y)
             elif action.type == ActionType.DOUBLE_CLICK:
                 self.double_click_at(x, y)
             elif action.type == ActionType.TYPE and action.text:
-                self.type_text(action.text)
+                self.type_text(str(self._resolve(getattr(action, 'text', ''))))
             elif action.type == ActionType.KEY_PRESS and action.key:
-                self.press_key(action.key)
+                self.press_key(str(self._resolve(getattr(action, 'key', ''))))
+            elif action.type == ActionType.PLAY_RECORDING:
+                rp = self._resolve(getattr(action, 'recording_path', None))
+                if not rp:
+                    logger.error("No recording_path set for PLAY_RECORDING")
+                    return False
+                speed = float(self._resolve(getattr(action, 'recording_speed', 1.0)))
+                transition = float(self._resolve(getattr(action, 'start_transition', 0.0)))
+                return bool(self.play_recording(str(rp), speed=speed, transition=transition))
             elif action.type == ActionType.WAIT:
-                self.wait(action.seconds)
+                self.wait(float(self._resolve(getattr(action, 'seconds', 1.0))))
             elif action.type == ActionType.SCROLL:
-                self.scroll(action.pixels)
+                self.scroll(int(self._resolve(getattr(action, 'pixels', 0))))
             elif action.type == ActionType.CLICK_AND_HOLD:
                 try:
                     if self.current_position is None:
@@ -842,8 +973,8 @@ class ImageDetectionBot:
                     self.move_to(x, y, duration=0.1)
                     
                     # Perform the click and hold
-                    pyautogui.mouseDown(button=action.button)
-                    time.sleep(action.duration)
+                    pyautogui.mouseDown(button=self._resolve(getattr(action, 'button', 'left')))
+                    time.sleep(float(self._resolve(getattr(action, 'duration', 1.0))))
                     pyautogui.mouseUp(button=action.button)
                     
                     return True
@@ -1080,9 +1211,45 @@ class ImageDetectionBot:
             bool: True if all actions were executed successfully, False otherwise
         """
         for action in actions:
-            if not self.execute_action(action):
+            start_time = time.perf_counter()
+            ok = self.execute_action(action)
+            try:
+                self._record_action_metric(action, ok, start_time)
+            except Exception:
+                pass
+            if not ok:
                 return False
         return True
+
+    def _record_action_metric(self, action: Action, success: bool, start_time: float) -> None:
+        try:
+            elapsed = max(0.0, float(time.perf_counter() - start_time))
+            entry = {
+                'type': getattr(action.type, 'value', str(action.type)),
+                'success': bool(success),
+                'elapsed_sec': elapsed,
+                'timestamp': time.time()
+            }
+            try:
+                if hasattr(action, 'x') and hasattr(action, 'y'):
+                    if action.x is not None and action.y is not None:
+                        entry['x'] = int(action.x)
+                        entry['y'] = int(action.y)
+            except Exception:
+                pass
+            try:
+                if getattr(action, 'type', None) == ActionType.PLAY_RECORDING:
+                    entry['recording_path'] = getattr(action, 'recording_path', None)
+                    entry['recording_speed'] = float(getattr(action, 'recording_speed', 1.0))
+                    entry['start_transition'] = float(getattr(action, 'start_transition', 0.0))
+            except Exception:
+                pass
+            self.action_metrics.append(entry)
+            if len(self.action_metrics) > 1000:
+                self.action_metrics = self.action_metrics[-1000:]
+            logger.info(f"Action metric: {entry}")
+        except Exception:
+            pass
     
     def scroll(self, pixels: int) -> None:
         """Scroll the mouse wheel.

@@ -817,74 +817,608 @@ class MonitorInfoDialog(QDialog):
         self.setWindowTitle("Monitor Info")
         self.setMinimumSize(500, 300)
         layout = QVBoxLayout(self)
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["Index", "X", "Y", "Size", "DPI Ratio"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table)
-        btns = QHBoxLayout()
-        self.capture_btn = QPushButton("Capture All")
-        self.capture_btn.clicked.connect(self.capture_all)
-        btns.addWidget(self.capture_btn)
-        btns.addStretch()
-        layout.addLayout(btns)
-        self.preview_label = QLabel()
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setMinimumHeight(150)
-        layout.addWidget(self.preview_label)
-        self.populate()
 
-    def populate(self):
-        screens = QGuiApplication.screens()
-        self.table.setRowCount(len(screens))
-        for idx, sc in enumerate(screens):
-            g = sc.geometry()
-            dpr = sc.devicePixelRatio()
-            self.table.setItem(idx, 0, QTableWidgetItem(str(idx + 1)))
-            self.table.setItem(idx, 1, QTableWidgetItem(str(g.x())))
-            self.table.setItem(idx, 2, QTableWidgetItem(str(g.y())))
-            self.table.setItem(idx, 3, QTableWidgetItem(f"{g.width()}x{g.height()}"))
-            self.table.setItem(idx, 4, QTableWidgetItem(f"{dpr:.2f}"))
-
-    def capture_all(self):
+class RecorderWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.events = []
+        self._recording = False
+        self._start_time = None
+        self._mouse_listener = None
+        self._key_listener = None
+        self._lock = None
+        self._paused = False
+        self._paused_at = None
         try:
-            screens = QGuiApplication.screens()
-            if not screens:
+            import threading
+            self._lock = threading.Lock()
+        except Exception:
+            self._lock = None
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        try:
+            import os
+            self.recordings_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+            os.makedirs(self.recordings_dir, exist_ok=True)
+        except Exception:
+            self.recordings_dir = None
+        controls = QHBoxLayout()
+        self.start_btn = QPushButton("Start Recording")
+        self.stop_btn = QPushButton("Stop")
+        self.pause_btn = QPushButton("Pause")
+        self.clear_btn = QPushButton("Clear")
+        self.marker_btn = QPushButton("Add Marker")
+        self.delete_btn = QPushButton("Delete Selected")
+        self.save_btn = QPushButton("Save…")
+        self.load_btn = QPushButton("Load…")
+        self.play_btn = QPushButton("Playback")
+        self.preview_btn = QPushButton("Preview Overlay")
+        self.stop_btn.setEnabled(False)
+        self.pause_btn.setEnabled(False)
+        controls.addWidget(self.start_btn)
+        controls.addWidget(self.stop_btn)
+        controls.addWidget(self.pause_btn)
+        controls.addWidget(self.clear_btn)
+        controls.addWidget(self.marker_btn)
+        controls.addWidget(self.delete_btn)
+        controls.addWidget(self.save_btn)
+        controls.addWidget(self.load_btn)
+        controls.addWidget(self.play_btn)
+        controls.addWidget(self.preview_btn)
+        controls.addStretch()
+        lay.addLayout(controls)
+
+        lib = QHBoxLayout()
+        lib.addWidget(QLabel("Library:"))
+        self.library_combo = QComboBox()
+        lib.addWidget(self.library_combo, 1)
+        self.library_refresh_btn = QPushButton("Refresh")
+        self.library_open_btn = QPushButton("Open")
+        self.library_play_btn = QPushButton("Play")
+        self.library_rename_btn = QPushButton("Rename")
+        self.library_delete_btn = QPushButton("Delete")
+        lib.addWidget(self.library_refresh_btn)
+        lib.addWidget(self.library_open_btn)
+        lib.addWidget(self.library_play_btn)
+        lib.addWidget(self.library_rename_btn)
+        lib.addWidget(self.library_delete_btn)
+        lay.addLayout(lib)
+
+        opts = QHBoxLayout()
+        self.record_moves_chk = QCheckBox("Record mouse moves")
+        self.record_moves_chk.setChecked(True)
+        opts.addWidget(self.record_moves_chk)
+        opts.addWidget(QLabel("Move sampling (ms):"))
+        self.move_sample_spin = QSpinBox(); self.move_sample_spin.setRange(5, 200); self.move_sample_spin.setValue(25)
+        opts.addWidget(self.move_sample_spin)
+        opts.addStretch()
+        lay.addLayout(opts)
+
+        self.events_table = QTableWidget(0, 5)
+        self.events_table.setHorizontalHeaderLabels(["time(s)", "type", "x", "y", "info"])
+        try:
+            self.events_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.events_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        except Exception:
+            pass
+        try:
+            self.events_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        except Exception:
+            pass
+        lay.addWidget(self.events_table)
+
+        self.start_btn.clicked.connect(self.start_recording)
+        self.stop_btn.clicked.connect(self.stop_recording)
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        self.clear_btn.clicked.connect(self.clear_events)
+        self.delete_btn.clicked.connect(self.remove_selected_events)
+        self.save_btn.clicked.connect(self.save_events)
+        self.load_btn.clicked.connect(self.load_events)
+        self.play_btn.clicked.connect(self.playback_events)
+        self.preview_btn.clicked.connect(self.preview_overlay)
+        self.marker_btn.clicked.connect(self.add_marker)
+        self.library_refresh_btn.clicked.connect(self.refresh_library)
+        self.library_open_btn.clicked.connect(self.open_selected_recording)
+        self.library_play_btn.clicked.connect(self.play_selected_recording)
+        self.library_rename_btn.clicked.connect(self.rename_selected_recording)
+        self.library_delete_btn.clicked.connect(self.delete_selected_recording)
+        try:
+            del_shortcut = QShortcut(QKeySequence("Delete"), self.events_table)
+            del_shortcut.activated.connect(self.remove_selected_events)
+        except Exception:
+            pass
+        try:
+            self.refresh_library()
+        except Exception:
+            pass
+
+    def _now(self):
+        try:
+            import time
+            return time.perf_counter()
+        except Exception:
+            import time
+            return time.time()
+
+    def _dt(self):
+        if self._start_time is None:
+            return 0.0
+        return max(0.0, float(self._now() - self._start_time))
+
+    def _append_event(self, ev: dict):
+        try:
+            if self._lock:
+                self._lock.acquire()
+            self.events.append(ev)
+        finally:
+            try:
+                if self._lock:
+                    self._lock.release()
+            except Exception:
+                pass
+        self._append_row(ev)
+
+    def _append_row(self, ev: dict):
+        try:
+            row = self.events_table.rowCount()
+            self.events_table.insertRow(row)
+            def _set(c, val):
+                item = QTableWidgetItem(str(val))
+                self.events_table.setItem(row, c, item)
+            _set(0, f"{float(ev.get('t',0.0)):.3f}")
+            _set(1, ev.get('type',''))
+            _set(2, ev.get('x',''))
+            _set(3, ev.get('y',''))
+            _set(4, ev.get('info',''))
+        except Exception:
+            pass
+
+    def _rebuild_table(self):
+        try:
+            self.events_table.setRowCount(0)
+            for ev in self.events:
+                self._append_row(ev)
+        except Exception:
+            pass
+
+    def _normalize_button(self, btn):
+        try:
+            from pynput.mouse import Button
+            if btn == Button.left:
+                return 'left'
+            if btn == Button.right:
+                return 'right'
+            if btn == Button.middle:
+                return 'middle'
+        except Exception:
+            pass
+        return str(btn).replace('Button.','').lower()
+
+    def _normalize_key(self, key):
+        try:
+            from pynput.keyboard import Key
+            if hasattr(key, 'char') and key.char:
+                return str(key.char)
+            k = str(key)
+            if k.startswith('Key.'):
+                return k.split('.',1)[1]
+        except Exception:
+            pass
+        s = str(key)
+        return s.replace('Key.','').lower()
+
+    def start_recording(self):
+        if self._recording:
+            return
+        try:
+            from pynput import mouse, keyboard
+        except Exception:
+            QMessageBox.warning(self, "Recorder", "Global recording requires 'pynput'.\nInstall with: pip install pynput")
+            return
+        self.events.clear()
+        self.events_table.setRowCount(0)
+        self._start_time = self._now()
+        self._recording = True
+        self._paused = False
+        self._paused_at = None
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.pause_btn.setEnabled(True)
+        self.pause_btn.setText("Pause")
+        self.clear_btn.setEnabled(False)
+        self._last_move_time = 0.0
+
+        def on_move(x, y):
+            if not self._recording or self._paused or not self.record_moves_chk.isChecked():
                 return
-            x0 = min(sc.geometry().x() for sc in screens)
-            y0 = min(sc.geometry().y() for sc in screens)
-            x1 = max(sc.geometry().x() + sc.geometry().width() for sc in screens)
-            y1 = max(sc.geometry().y() + sc.geometry().height() for sc in screens)
-            total_w, total_h = x1 - x0, y1 - y0
-            canvas = np.zeros((total_h, total_w, 3), dtype=np.uint8)
-            for sc in screens:
-                g = sc.geometry()
-                pm = sc.grabWindow(0)
-                if pm.isNull():
-                    continue
-                qi = pm.toImage().convertToFormat(QImage.Format.Format_BGR888)
-                h = qi.height(); w = qi.width(); bpl = qi.bytesPerLine()
-                size_bytes = getattr(qi, 'sizeInBytes', None)
-                size_bytes = size_bytes() if callable(size_bytes) else (bpl * h)
-                bits = qi.bits(); bits.setsize(size_bytes)
-                buf = np.frombuffer(bits, dtype=np.uint8)
-                img_row = buf.reshape((h, bpl))
-                img_row = img_row[:, :w * 3]
-                arr = img_row.reshape((h, w, 3))
-                off_x = g.x() - x0
-                off_y = g.y() - y0
-                y_end = min(off_y + h, total_h)
-                x_end = min(off_x + w, total_w)
-                canvas[off_y:y_end, off_x:x_end] = arr[:y_end - off_y, :x_end - off_x]
-            # Show preview
-            height, width, channel = canvas.shape
-            q_img = QImage(canvas.data, width, height, width * 3, QImage.Format.Format_BGR888)
-            self.preview_label.setPixmap(QPixmap.fromImage(q_img).scaled(
-                self.preview_label.width(), self.preview_label.height(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            ))
+            dt = self._dt()
+            if dt - self._last_move_time < (self.move_sample_spin.value()/1000.0):
+                return
+            self._last_move_time = dt
+            self._append_event({"type":"move","x":int(x),"y":int(y),"t":dt})
+
+        def on_click(x, y, button, pressed):
+            if not self._recording or self._paused:
+                return
+            dt = self._dt()
+            btn = self._normalize_button(button)
+            typ = "mouse_down" if pressed else "mouse_up"
+            self._append_event({"type":typ,"x":int(x),"y":int(y),"button":btn,"t":dt,"info":btn})
+
+        def on_scroll(x, y, dx, dy):
+            if not self._recording or self._paused:
+                return
+            dt = self._dt()
+            self._append_event({"type":"scroll","x":int(x),"y":int(y),"dx":int(dx),"dy":int(dy),"t":dt,"info":f"{dy}"})
+
+        def on_press(key):
+            if not self._recording or self._paused:
+                return
+            dt = self._dt()
+            k = self._normalize_key(key)
+            self._append_event({"type":"key_down","key":k,"t":dt,"info":k})
+
+        def on_release(key):
+            if not self._recording or self._paused:
+                return
+            dt = self._dt()
+            k = self._normalize_key(key)
+            self._append_event({"type":"key_up","key":k,"t":dt,"info":k})
+
+        try:
+            self._mouse_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll)
+            self._key_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+            self._mouse_listener.start(); self._key_listener.start()
         except Exception as e:
-            QMessageBox.warning(self, "Capture", f"Failed to capture monitors: {e}")
+            QMessageBox.critical(self, "Recorder", f"Failed to start listeners: {e}")
+            self._recording = False
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.clear_btn.setEnabled(True)
+
+    def stop_recording(self):
+        if not self._recording:
+            return
+        self._recording = False
+        self._paused = False
+        self._paused_at = None
+        try:
+            if self._mouse_listener:
+                self._mouse_listener.stop()
+            if self._key_listener:
+                self._key_listener.stop()
+        except Exception:
+            pass
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.pause_btn.setEnabled(False)
+        self.clear_btn.setEnabled(True)
+
+    def toggle_pause(self):
+        if not self._recording:
+            return
+        try:
+            if not self._paused:
+                self._paused = True
+                self._paused_at = self._now()
+                self.pause_btn.setText("Resume")
+            else:
+                if self._paused_at is not None:
+                    delta = float(self._now() - self._paused_at)
+                    try:
+                        self._start_time = float(self._start_time + delta)
+                    except Exception:
+                        pass
+                self._paused = False
+                self._paused_at = None
+                self.pause_btn.setText("Pause")
+        except Exception:
+            pass
+
+    def add_marker(self):
+        try:
+            from PyQt6.QtWidgets import QInputDialog
+            label, ok = QInputDialog.getText(self, "Add Marker", "Label:")
+            if not ok:
+                return
+            dt = self._dt()
+            self._append_event({"type":"marker","t":dt,"info":(label or "")})
+        except Exception:
+            try:
+                dt = self._dt()
+                self._append_event({"type":"marker","t":dt})
+            except Exception:
+                pass
+
+    def refresh_library(self):
+        try:
+            import os
+            base = self.recordings_dir or os.path.dirname(os.path.abspath(__file__))
+            os.makedirs(base, exist_ok=True)
+            files = [f for f in os.listdir(base) if f.lower().endswith('.json')]
+            names = sorted([os.path.splitext(f)[0] for f in files])
+            self.library_combo.clear()
+            for n in names:
+                self.library_combo.addItem(n, os.path.join(base, f"{n}.json"))
+        except Exception:
+            pass
+
+    def _current_library_path(self) -> str:
+        try:
+            return str(self.library_combo.currentData())
+        except Exception:
+            return ""
+
+    def open_selected_recording(self):
+        path = self._current_library_path()
+        if not path:
+            return
+        try:
+            import json
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            self.events = list(data.get('events', []) or [])
+            self._rebuild_table()
+            QMessageBox.information(self, "Recorder", "Recording loaded.")
+        except Exception as e:
+            QMessageBox.critical(self, "Recorder", f"Failed to open: {e}")
+
+    def play_selected_recording(self):
+        path = self._current_library_path()
+        if not path:
+            return
+        try:
+            import json, time, pyautogui
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            evs = list(data.get('events', []) or [])
+            if not evs:
+                QMessageBox.information(self, "Recorder", "No events in recording.")
+                return
+            start = evs[0].get('t', 0.0)
+            base = self._now()
+            for ev in evs:
+                t = float(ev.get('t', 0.0)) - float(start)
+                while self._now() - base < t:
+                    time.sleep(0.005)
+                typ = str(ev.get('type',''))
+                if typ == 'move':
+                    x = int(ev.get('x', 0)); y = int(ev.get('y', 0))
+                    pyautogui.moveTo(x, y, duration=0.0)
+                elif typ in ('mouse_down','mouse_up'):
+                    btn = ev.get('button','left')
+                    if typ == 'mouse_down':
+                        pyautogui.mouseDown(button=btn)
+                    else:
+                        pyautogui.mouseUp(button=btn)
+                elif typ == 'scroll':
+                    dy = int(ev.get('dy', 0))
+                    pyautogui.scroll(dy)
+                elif typ in ('key_down','key_up'):
+                    k = str(ev.get('key',''))
+                    try:
+                        if typ == 'key_down':
+                            pyautogui.keyDown(k)
+                        else:
+                            pyautogui.keyUp(k)
+                    except Exception:
+                        try:
+                            pyautogui.press(k)
+                        except Exception:
+                            pass
+            QMessageBox.information(self, "Recorder", "Playback finished.")
+        except Exception as e:
+            QMessageBox.critical(self, "Recorder", f"Playback failed: {e}")
+
+    def rename_selected_recording(self):
+        path = self._current_library_path()
+        if not path:
+            return
+        try:
+            from PyQt6.QtWidgets import QInputDialog
+            import os, time
+            base_dir = os.path.dirname(path)
+            old_name = os.path.splitext(os.path.basename(path))[0]
+            name, ok = QInputDialog.getText(self, "Rename Recording", "New name:", text=old_name)
+            if not ok:
+                return
+            nm = (name or "").strip()
+            if not nm:
+                nm = f"recording_{int(time.time())}"
+            safe = "".join(ch if ch.isalnum() or ch in ("-","_") else "_" for ch in nm).strip("_")
+            new_path = os.path.join(base_dir, f"{safe}.json")
+            if os.path.exists(new_path):
+                QMessageBox.warning(self, "Recorder", "A recording with that name already exists.")
+                return
+            os.rename(path, new_path)
+            self.refresh_library()
+        except Exception as e:
+            QMessageBox.critical(self, "Recorder", f"Rename failed: {e}")
+
+    def delete_selected_recording(self):
+        path = self._current_library_path()
+        if not path:
+            return
+        try:
+            import os
+            resp = QMessageBox.question(self, "Delete Recording", f"Delete '{os.path.basename(path)}'?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+            os.remove(path)
+            self.refresh_library()
+        except Exception as e:
+            QMessageBox.critical(self, "Recorder", f"Delete failed: {e}")
+
+    def clear_events(self):
+        if self._recording:
+            return
+        self.events.clear()
+        try:
+            self.events_table.setRowCount(0)
+        except Exception:
+            pass
+
+    def remove_selected_events(self):
+        try:
+            sel = self.events_table.selectionModel().selectedRows()
+        except Exception:
+            sel = []
+        if not sel:
+            return
+        try:
+            rows = sorted([ix.row() for ix in sel], reverse=True)
+        except Exception:
+            rows = []
+        if not rows:
+            return
+        try:
+            if self._lock:
+                self._lock.acquire()
+            for r in rows:
+                if 0 <= r < len(self.events):
+                    del self.events[r]
+        finally:
+            try:
+                if self._lock:
+                    self._lock.release()
+            except Exception:
+                pass
+        self._rebuild_table()
+
+    def save_events(self):
+        if not self.events:
+            QMessageBox.information(self, "Recorder", "No events to save.")
+            return
+        try:
+            from PyQt6.QtWidgets import QInputDialog
+            import os, json, time
+            base = self.recordings_dir or os.path.dirname(os.path.abspath(__file__))
+            os.makedirs(base, exist_ok=True)
+            name, ok = QInputDialog.getText(self, "Save Recording", "Name:")
+            if not ok:
+                return
+            nm = (name or "").strip()
+            if not nm:
+                nm = f"recording_{int(time.time())}"
+            safe = "".join(ch if ch.isalnum() or ch in ("-","_") else "_" for ch in nm).strip("_")
+            if not safe:
+                safe = f"recording_{int(time.time())}"
+            path = os.path.join(base, f"{safe}.json")
+            if os.path.exists(path):
+                resp = QMessageBox.question(self, "Overwrite?", f"'{safe}.json' exists. Overwrite?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if resp != QMessageBox.StandardButton.Yes:
+                    return
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump({"name": safe, "events": self.events}, f, indent=2)
+            QMessageBox.information(self, "Recorder", f"Saved as {safe}.")
+        except Exception as e:
+            QMessageBox.critical(self, "Recorder", f"Failed to save: {e}")
+
+    def load_events(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load Recording", "", "JSON Files (*.json);;All Files (*)")
+        if not path:
+            return
+        try:
+            import json
+            with open(path, 'r') as f:
+                data = json.load(f)
+            self.events = list(data.get('events', []) or [])
+            self._rebuild_table()
+            QMessageBox.information(self, "Recorder", "Recording loaded.")
+        except Exception as e:
+            QMessageBox.critical(self, "Recorder", f"Failed to load: {e}")
+
+    def playback_events(self):
+        if not self.events:
+            QMessageBox.information(self, "Recorder", "No events to playback.")
+            return
+        try:
+            import time
+            import pyautogui
+            start = self.events[0].get('t', 0.0)
+            base = self._now()
+            for ev in self.events:
+                t = float(ev.get('t', 0.0)) - float(start)
+                while self._now() - base < t:
+                    time.sleep(0.005)
+                typ = str(ev.get('type',''))
+                if typ == 'move':
+                    x = int(ev.get('x', 0)); y = int(ev.get('y', 0))
+                    pyautogui.moveTo(x, y, duration=0.0)
+                elif typ in ('mouse_down','mouse_up'):
+                    btn = ev.get('button','left')
+                    if typ == 'mouse_down':
+                        pyautogui.mouseDown(button=btn)
+                    else:
+                        pyautogui.mouseUp(button=btn)
+                elif typ == 'scroll':
+                    dy = int(ev.get('dy', 0))
+                    pyautogui.scroll(dy)
+                elif typ in ('key_down','key_up'):
+                    k = str(ev.get('key',''))
+                    try:
+                        if typ == 'key_down':
+                            pyautogui.keyDown(k)
+                        else:
+                            pyautogui.keyUp(k)
+                    except Exception:
+                        try:
+                            pyautogui.press(k)
+                        except Exception:
+                            pass
+            QMessageBox.information(self, "Recorder", "Playback finished.")
+        except Exception as e:
+            QMessageBox.critical(self, "Recorder", f"Playback failed: {e}")
+
+    def preview_overlay(self):
+        if not self.events:
+            QMessageBox.information(self, "Recorder", "No events to preview.")
+            return
+        try:
+            from PyQt6.QtCore import QTimer
+            self._preview_index = 0
+            start_t = float(self.events[0].get('t', 0.0))
+            self._preview_base = self._now()
+            def step():
+                if self._preview_index >= len(self.events):
+                    return
+                ev = self.events[self._preview_index]
+                t = float(ev.get('t', 0.0)) - start_t
+                now = self._now() - self._preview_base
+                if now + 0.001 < t:
+                    QTimer.singleShot(int((t - now) * 1000), step)
+                    return
+                typ = str(ev.get('type',''))
+                msg = None; pt = None
+                if typ in ('move','mouse_down','mouse_up','scroll'):
+                    x = ev.get('x'); y = ev.get('y')
+                    if isinstance(x, (int,float)) and isinstance(y, (int,float)):
+                        from PyQt6.QtCore import QPoint
+                        pt = QPoint(int(x), int(y))
+                    if typ == 'move':
+                        msg = 'Move'
+                    elif typ == 'mouse_down':
+                        msg = f"Click {ev.get('button','')}"
+                    elif typ == 'mouse_up':
+                        msg = f"Release {ev.get('button','')}"
+                    elif typ == 'scroll':
+                        msg = f"Scroll {ev.get('dy',0)}"
+                elif typ in ('key_down','key_up'):
+                    msg = f"Key {ev.get('key','')}"
+                try:
+                    dlg = OverlayPreviewWindow(self, rect=None, point=pt, target_geometry=None, duration_ms=600, message=msg)
+                    dlg.show()
+                except Exception:
+                    pass
+                self._preview_index += 1
+                if self._preview_index < len(self.events):
+                    QTimer.singleShot(10, step)
+            step()
+        except Exception as e:
+            QMessageBox.critical(self, "Recorder", f"Preview failed: {e}")
+
 
 
 class TemplatePreview(QWidget):
@@ -1139,7 +1673,7 @@ class ActionEditor(QWidget):
         # Action type
         self.type_combo = QComboBox()
         # Add action types directly as strings to match ActionType enum values
-        action_types = ["click", "move", "move_to", "right_click", "double_click", "type", "key_press", "wait", "scroll", "click_and_hold"]
+        action_types = ["click", "move", "move_to", "right_click", "double_click", "type", "key_press", "wait", "scroll", "click_and_hold", "play_recording"]
         self.type_combo.addItems(action_types)
         if "type" in self.action_data:
             action_type = self.action_data["type"]
@@ -1267,6 +1801,74 @@ class ActionEditor(QWidget):
                 key_combo.currentTextChanged.connect(
                     lambda text, key="key": self.update_action_param(key, text))
                 main_layout.addWidget(key_combo)
+        elif action_type == "play_recording":
+            main_layout.addWidget(QLabel("Recording:"))
+            rec_combo = QComboBox(); self._rec_combo = rec_combo
+            # Build list from recordings folder
+            rec_dir = None
+            try:
+                import os
+                rec_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+                os.makedirs(rec_dir, exist_ok=True)
+                files = [f for f in os.listdir(rec_dir) if f.lower().endswith('.json')]
+            except Exception:
+                files = []
+            self._recording_paths_map = {}
+            for f in files:
+                name = os.path.splitext(f)[0]
+                p = os.path.join(rec_dir, f) if rec_dir else f
+                self._recording_paths_map[name] = p
+            rec_combo.addItems(sorted(list(self._recording_paths_map.keys())))
+            saved_path = self.action_data.get("recording_path", "")
+            if saved_path:
+                # Try to set current based on saved path
+                try:
+                    import os
+                    base = os.path.splitext(os.path.basename(saved_path))[0]
+                    if base in self._recording_paths_map:
+                        rec_combo.setCurrentText(base)
+                except Exception:
+                    pass
+            def on_rec_change(name: str):
+                path = self._recording_paths_map.get(name, "")
+                self.update_action_param("recording_path", path)
+            rec_combo.currentTextChanged.connect(on_rec_change)
+            main_layout.addWidget(rec_combo, 1)
+            try:
+                if not saved_path:
+                    names = sorted(list(self._recording_paths_map.keys()))
+                    if names:
+                        rec_combo.setCurrentText(names[0])
+                        on_rec_change(names[0])
+            except Exception:
+                pass
+            refresh_btn = QPushButton("Refresh")
+            def _refresh():
+                try:
+                    import os
+                    files2 = [f for f in os.listdir(rec_dir) if f.lower().endswith('.json')]
+                    names = sorted([os.path.splitext(f)[0] for f in files2])
+                    rec_combo.clear(); self._recording_paths_map.clear()
+                    for f in files2:
+                        n = os.path.splitext(f)[0]
+                        self._recording_paths_map[n] = os.path.join(rec_dir, f)
+                    rec_combo.addItems(names)
+                except Exception:
+                    pass
+            refresh_btn.clicked.connect(_refresh)
+            main_layout.addWidget(refresh_btn)
+            main_layout.addWidget(QLabel("Speed:"))
+            sp = QDoubleSpinBox(); sp.setRange(0.1, 10.0); sp.setSingleStep(0.1)
+            sp.setValue(float(self.action_data.get("recording_speed", 1.0)))
+            sp.valueChanged.connect(lambda v, key="recording_speed": self.update_action_param(key, float(v)))
+            self._speed_spin = sp
+            main_layout.addWidget(sp)
+            main_layout.addWidget(QLabel("Start Transition (s):"))
+            st = QDoubleSpinBox(); st.setRange(0.0, 5.0); st.setSingleStep(0.05)
+            st.setValue(float(self.action_data.get("start_transition", 0.0)))
+            st.valueChanged.connect(lambda v, key="start_transition": self.update_action_param(key, float(v)))
+            self._start_spin = st
+            main_layout.addWidget(st)
             
         elif action_type == "wait":
             main_layout.addWidget(QLabel("Seconds:"))
@@ -1449,6 +2051,22 @@ class ActionEditor(QWidget):
     def get_action_data(self) -> dict:
         action_type = self.type_combo.currentText()
         self.action_data["type"] = action_type
+        # Ensure latest values from widgets are captured for play_recording
+        try:
+            if action_type == "play_recording":
+                if hasattr(self, '_rec_combo') and isinstance(self._rec_combo, QComboBox):
+                    name = self._rec_combo.currentText()
+                    # Map name back to path if available
+                    if hasattr(self, '_recording_paths_map') and isinstance(self._recording_paths_map, dict):
+                        path = self._recording_paths_map.get(name, self.action_data.get('recording_path',''))
+                        if path:
+                            self.action_data['recording_path'] = path
+                if hasattr(self, '_speed_spin') and isinstance(self._speed_spin, QDoubleSpinBox):
+                    self.action_data['recording_speed'] = float(self._speed_spin.value())
+                if hasattr(self, '_start_spin') and isinstance(self._start_spin, QDoubleSpinBox):
+                    self.action_data['start_transition'] = float(self._start_spin.value())
+        except Exception:
+            pass
         # Collect else actions if any
         try:
             if hasattr(self, 'else_action_widgets') and isinstance(self.else_action_widgets, list) and len(self.else_action_widgets) > 0:
@@ -1789,7 +2407,7 @@ class MiniActionEditor(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0,0,0,0)
         self.type_combo = QComboBox()
-        self.type_combo.addItems(["click", "move", "move_to", "right_click", "double_click", "type", "key_press", "wait", "scroll", "click_and_hold"])
+        self.type_combo.addItems(["click", "move", "move_to", "right_click", "double_click", "type", "key_press", "wait", "scroll", "click_and_hold", "play_recording"])
         self.type_combo.setCurrentText(self.action_data.get("type", "click"))
         lay.addWidget(QLabel("Else:"))
         lay.addWidget(self.type_combo)
@@ -1908,6 +2526,56 @@ class MiniActionEditor(QWidget):
                 w.currentTextChanged.connect(lambda tt: self.update_param('key', tt))
                 self.params['key'] = w
                 self.params_layout.addWidget(w)
+        elif t == 'play_recording':
+            try:
+                import os
+                rec_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+                os.makedirs(rec_dir, exist_ok=True)
+                files = [f for f in os.listdir(rec_dir) if f.lower().endswith('.json')]
+            except Exception:
+                files = []
+                rec_dir = None
+            names = []
+            paths = {}
+            for f in files:
+                n = os.path.splitext(f)[0]
+                names.append(n)
+                paths[n] = os.path.join(rec_dir, f) if rec_dir else f
+            add_label('Recording:')
+            cmb = QComboBox(); cmb.addItems(sorted(names))
+            saved_path = self.action_data.get('recording_path','')
+            if saved_path:
+                try:
+                    base = os.path.splitext(os.path.basename(saved_path))[0]
+                    if base in paths:
+                        cmb.setCurrentText(base)
+                except Exception:
+                    pass
+            def on_change(name):
+                self.update_param('recording_path', paths.get(name,''))
+            cmb.currentTextChanged.connect(on_change)
+            self.params['recording_path'] = cmb
+            self.params_layout.addWidget(cmb)
+            try:
+                if not saved_path:
+                    names_sorted = sorted(names)
+                    if names_sorted:
+                        cmb.setCurrentText(names_sorted[0])
+                        on_change(names_sorted[0])
+            except Exception:
+                pass
+            add_label('Speed:')
+            spd = QDoubleSpinBox(); spd.setRange(0.1, 10.0); spd.setSingleStep(0.1)
+            spd.setValue(float(self.action_data.get('recording_speed', 1.0)))
+            spd.valueChanged.connect(lambda v: self.update_param('recording_speed', float(v)))
+            self.params['recording_speed'] = spd
+            self.params_layout.addWidget(spd)
+            add_label('Start Transition (s):')
+            st = QDoubleSpinBox(); st.setRange(0.0, 5.0); st.setSingleStep(0.05)
+            st.setValue(float(self.action_data.get('start_transition', 0.0)))
+            st.valueChanged.connect(lambda v: self.update_param('start_transition', float(v)))
+            self.params['start_transition'] = st
+            self.params_layout.addWidget(st)
         else:
             # No extra params for right_click/double_click/click_and_hold here
             pass
@@ -4406,6 +5074,12 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(self.templates_tab, "Templates")
         self.tab_widget.addTab(self.template_tester_tab, "Template Tester")
         self.tab_widget.addTab(self.break_tab, "Break Settings")
+        # Recorder tab
+        self.recorder_tab = QWidget()
+        self.recorder_widget = RecorderWidget(parent=self)
+        rec_layout = QVBoxLayout(self.recorder_tab)
+        rec_layout.addWidget(self.recorder_widget)
+        self.tab_widget.addTab(self.recorder_tab, "Recorder")
         
         # Welcome screen
         welcome_widget = QWidget()
@@ -4711,7 +5385,6 @@ class MainWindow(QMainWindow):
                 self.update_ui_from_config()
             except Exception:
                 pass
-            self.statusBar().showMessage("Failed to load configuration — using defaults")
         finally:
             # Re-enable auto-save after finishing load
             try:

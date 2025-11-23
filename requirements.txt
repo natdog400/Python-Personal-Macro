@@ -7,3 +7,4 @@ pyqt6-tools>=6.4.0
 darkdetect>=0.7.1
 mss>=9.0.1
 psutil>=5.9.0
+pynput>=1.7.6

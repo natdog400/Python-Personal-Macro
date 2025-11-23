@@ -4,10 +4,10 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
 
 ## Features
 
-- **GUI Tabs**: Sequences, Failsafe, Templates, and Template Tester
+- **GUI Tabs**: Sequences, Failsafe, Templates, Template Tester, and Recorder
 - **Template Management**: Create, preview, capture from screen, or load from file
 - **Sequence Editor**: Add steps that find a template and then run actions
-- **Action Types**: `click`, `right_click`, `double_click`, `move`, `move_to`, `type`, `key_press`, `wait`, `scroll`, `click_and_hold`
+- **Action Types**: `click`, `right_click`, `double_click`, `move`, `move_to`, `type`, `key_press`, `wait`, `scroll`, `click_and_hold`, `play_recording`
 - **Regions & Randomization**:
   - Step-level `search_region` for finding templates
   - Click actions can target a random point in a selected region
@@ -15,6 +15,7 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
 - **Failsafe System**: Enable a template-based trigger, define a separate sequence, and test it with a button
 - **Template Tester**: Live preview of template matching with confidence meter and optional search region
 - **Overlay Previews**: One-click visual overlays to preview current search regions and click points (`Show Region`, `Show Click` buttons across editors).
+- **Recorder Tab**: Record global mouse/keyboard input with timing, delete events, save named recordings to `recordings/`, preview overlays without executing, and play recordings as actions in sequences/groups/failsafe.
 - **Hotkeys & Status**: F8 to stop; status bar updates; mouse position tracker
 - **Config Persistence**: Reads/writes `config.json` and keeps template paths relative when possible
 - **Break Settings**: Set a maximum runtime cap (hours/minutes/seconds); live timer shows `Elapsed / Max`; cap overrides loop settings
@@ -78,7 +79,10 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
 ## Requirements
 
 - Python 3.8+ (Windows batch launcher checks 3.8+)
-- `opencv-python`, `pyautogui`, `numpy`, `Pillow`, `PyQt6`, `pyqt6-tools`, `darkdetect`
+ - `opencv-python`, `pyautogui`, `numpy`, `Pillow`, `PyQt6`, `pyqt6-tools`, `darkdetect`, `mss`, `psutil`, `pynput`
+ - Notes:
+   - `pynput` enables global mouse/keyboard recording for the Recorder tab.
+   - If you don’t need recording, you can skip `pynput`.
 - Install via `requirements.txt`
 
 ## Setup
@@ -181,7 +185,7 @@ This outputs `dist/ImageDetectionBotConsole.exe`, which launches the GUI and sho
 - Sequences tab:
   - Add a sequence, then add steps
   - For each step: set `find` template, `required`, `timeout`, optional `confidence`
-  - Add actions like Click, Move, Move-To, Type, Key Press, Wait, Scroll
+  - Add actions like Click, Move, Move-To, Type, Key Press, Wait, Scroll, Play Recording
   - For Click: optionally select a region to click randomly inside
   - For Move-To: optionally enable random and select a region to move within
   - Use `Show Region` or `Show Click` to quickly visualize the current settings before running.
@@ -254,9 +258,14 @@ The project includes a lightweight web server with browser-based editors that mi
   - Preview “Size” dropdown (640/800/1024/1280) on all editors; region mapping remains accurate regardless of browser zoom or selected size
 
 - Partially implemented / known gaps
-  - Groups step header advanced fields (monitor, Step Loops, Detection Strategy, Min Inliers/Ratio/RANSAC) are not yet exposed
-  - Insert‑at‑index for new steps is not implemented; new steps append to the end
+  - Insert‑at‑index for new steps is supported in Sequences via “Add Step Here” (internally appends then reorders)
   - Label polish and defaults can be tuned based on your workflow
+
+- Groups editor now exposes advanced step fields
+  - Per-step monitor selection with “Use Global” and specific monitor indexes
+  - Step Loops configuration
+  - Detection Strategy: `default` (template) or `feature`
+  - Feature matcher params: `Min Inliers`, `Ratio`, `RANSAC`
 
 - Web API endpoints (selected)
   - Sequences
@@ -527,6 +536,7 @@ Action dictionary fields (as used across sequences and failsafe steps):
 - Runtime logs: `bot_debug.log`
 - On failed matches, screenshots and templates may be saved under a `debug/` folder next to the script
 - Press F8 to stop sequences; the status bar shows progress and messages
+ - Action metrics: the engine records per‑action timing results (type, success, elapsed seconds). Entries are summarized in `bot_debug.log` and retained in memory for recent actions.
 
 ### Template Tester (Preview)
 
@@ -602,3 +612,21 @@ This project is for personal use; choose an appropriate license before public re
   - The UI is designed to stay populated even if individual templates fail to load into the bot.
   - Check `bot_debug.log` for the failing template path; ensure the image exists at the resolved absolute path.
   - Use the Templates tab to update the path or re-capture and save the template.
+- Recorder tab:
+  - Start Recording to capture global mouse moves, clicks, scrolls, and key presses (requires `pynput`).
+  - Stop to end capture, then optionally delete selected events.
+  - Save… prompts for a friendly name; stores `recordings/<name>.json` with `events` and `name`.
+  - Preview Overlay replays visually without performing any input.
+  - Playback executes the recording now.
+  - Use Play Recording in any step editor to run a saved recording; pick from the dropdown that lists files in `recordings/`.
+  - Pause/Resume: temporarily pause capture during a session; resuming preserves timing and continues appending events.
+  - Add Marker: insert labeled markers into the timeline to annotate moments.
+  - Library Bar: browse and manage saved recordings — Refresh list, Open into the table, Play immediately, Rename, Delete.
+  - Play Recording action fields:
+    - Recording: select from the `recordings/` folder via dropdown.
+    - Speed: multiplier to compress or expand event intervals (e.g., `2.0` runs twice as fast).
+    - Start Transition (s): optional smooth pre‑roll move to the first recorded position (set to `0.0` for auto distance‑based duration).
+  - Implementation details:
+    - Speed scales per‑event intervals; internal `pyautogui.PAUSE` is disabled during playback to avoid unintended delays.
+    - Start Transition uses either the configured duration or an auto duration based on cursor distance and speed.
+    - Playback and action results are logged to `bot_debug.log` for traceability.
