@@ -67,6 +67,8 @@ class Action:
     recording_path: Optional[str] = None
     recording_speed: float = 1.0
     start_transition: float = 0.0
+    jitter_px: int = 0
+    delay_jitter_ms: int = 0
 
 class ImageDetectionBot:
     def __init__(self, confidence: float = 0.8):
@@ -934,6 +936,19 @@ class ImageDetectionBot:
                     return False
         
         try:
+            try:
+                dj = int(getattr(action, 'delay_jitter_ms', 0) or 0)
+                if dj > 0:
+                    time.sleep(random.uniform(0.0, max(0.0, float(dj))/1000.0))
+            except Exception:
+                pass
+            try:
+                jp = int(getattr(action, 'jitter_px', 0) or 0)
+                if jp > 0:
+                    x += random.randint(-jp, jp)
+                    y += random.randint(-jp, jp)
+            except Exception:
+                pass
             if action.type == ActionType.CLICK:
                 self.click_at(x, y, button=self._resolve(getattr(action, 'button', 'left')), clicks=int(self._resolve(getattr(action, 'clicks', 1))))
             elif action.type == ActionType.MOVE:
@@ -967,6 +982,13 @@ class ImageDetectionBot:
                         return False
                         
                     x, y = self.current_position
+                    try:
+                        jp2 = int(getattr(action, 'jitter_px', 0) or 0)
+                        if jp2 > 0:
+                            x += random.randint(-jp2, jp2)
+                            y += random.randint(-jp2, jp2)
+                    except Exception:
+                        pass
                     logger.info(f"Executing CLICK_AND_HOLD at current position: ({x}, {y}) for {action.duration} seconds")
                     
                     # Move to the position first
@@ -1242,6 +1264,12 @@ class ImageDetectionBot:
                     entry['recording_path'] = getattr(action, 'recording_path', None)
                     entry['recording_speed'] = float(getattr(action, 'recording_speed', 1.0))
                     entry['start_transition'] = float(getattr(action, 'start_transition', 0.0))
+                jp = int(getattr(action, 'jitter_px', 0) or 0)
+                dj = int(getattr(action, 'delay_jitter_ms', 0) or 0)
+                if jp:
+                    entry['jitter_px'] = jp
+                if dj:
+                    entry['delay_jitter_ms'] = dj
             except Exception:
                 pass
             self.action_metrics.append(entry)

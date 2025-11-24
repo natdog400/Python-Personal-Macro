@@ -13,7 +13,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                             QPushButton, QListWidget, QStackedWidget, QLineEdit, QSpinBox, 
                             QDoubleSpinBox, QComboBox, QFileDialog, QMessageBox, QCheckBox, 
-                            QGroupBox, QScrollArea, QSplitter, QFrame, QSizePolicy, QToolBar, 
+                            QGroupBox, QScrollArea, QSplitter, QFrame, QSizePolicy, QToolBar, QToolBox,
                             QStatusBar, QProgressBar, QDialog, QFormLayout, QListWidgetItem, QInputDialog, QMenu,
                             QDialogButtonBox, QMenuBar, QTableWidget, QTableWidgetItem, QGridLayout,
                             QHeaderView, QAbstractItemView, QTabWidget, QTimeEdit)
@@ -868,7 +868,6 @@ class RecorderWidget(QWidget):
         controls.addWidget(self.play_btn)
         controls.addWidget(self.preview_btn)
         controls.addStretch()
-        lay.addLayout(controls)
 
         lib = QHBoxLayout()
         lib.addWidget(QLabel("Library:"))
@@ -884,7 +883,15 @@ class RecorderWidget(QWidget):
         lib.addWidget(self.library_play_btn)
         lib.addWidget(self.library_rename_btn)
         lib.addWidget(self.library_delete_btn)
-        lay.addLayout(lib)
+
+        seg = QHBoxLayout()
+        seg.addWidget(QLabel("Segments:"))
+        self.trim_btn = QPushButton("Trim to Selection")
+        self.split_btn = QPushButton("Split at Selection")
+        self.merge_btn = QPushButton("Merge Recordings…")
+        seg.addWidget(self.trim_btn)
+        seg.addWidget(self.split_btn)
+        seg.addWidget(self.merge_btn)
 
         opts = QHBoxLayout()
         self.record_moves_chk = QCheckBox("Record mouse moves")
@@ -894,7 +901,19 @@ class RecorderWidget(QWidget):
         self.move_sample_spin = QSpinBox(); self.move_sample_spin.setRange(5, 200); self.move_sample_spin.setValue(25)
         opts.addWidget(self.move_sample_spin)
         opts.addStretch()
-        lay.addLayout(opts)
+        # Collapsible tool sections to declutter the Recorder UI
+        tool = QToolBox()
+        session_page = QWidget(); sp = QVBoxLayout(session_page); sp.setContentsMargins(0,0,0,0); sp.setSpacing(6)
+        sp.addLayout(controls)
+        sp.addLayout(opts)
+        library_page = QWidget(); lp = QVBoxLayout(library_page); lp.setContentsMargins(0,0,0,0); lp.setSpacing(6)
+        lp.addLayout(lib)
+        segments_page = QWidget(); sg = QVBoxLayout(segments_page); sg.setContentsMargins(0,0,0,0); sg.setSpacing(6)
+        sg.addLayout(seg)
+        tool.addItem(session_page, "Session")
+        tool.addItem(library_page, "Library")
+        tool.addItem(segments_page, "Segments")
+        lay.addWidget(tool)
 
         self.events_table = QTableWidget(0, 5)
         self.events_table.setHorizontalHeaderLabels(["time(s)", "type", "x", "y", "info"])
@@ -924,6 +943,9 @@ class RecorderWidget(QWidget):
         self.library_play_btn.clicked.connect(self.play_selected_recording)
         self.library_rename_btn.clicked.connect(self.rename_selected_recording)
         self.library_delete_btn.clicked.connect(self.delete_selected_recording)
+        self.trim_btn.clicked.connect(self.trim_to_selection)
+        self.split_btn.clicked.connect(self.split_at_selection)
+        self.merge_btn.clicked.connect(self.merge_recordings)
         try:
             del_shortcut = QShortcut(QKeySequence("Delete"), self.events_table)
             del_shortcut.activated.connect(self.remove_selected_events)
@@ -1250,6 +1272,145 @@ class RecorderWidget(QWidget):
             self.refresh_library()
         except Exception as e:
             QMessageBox.critical(self, "Recorder", f"Delete failed: {e}")
+
+    def _selected_indices(self) -> list:
+        try:
+            sel = self.events_table.selectionModel().selectedRows()
+            idxs = sorted([r.row() for r in sel])
+            return idxs
+        except Exception:
+            return []
+
+    def trim_to_selection(self):
+        idxs = self._selected_indices()
+        if not idxs:
+            QMessageBox.information(self, "Recorder", "Select one or more rows to trim.")
+            return
+        try:
+            i0 = min(idxs); i1 = max(idxs)
+            seg = list(self.events[i0:i1+1])
+            if not seg:
+                return
+            try:
+                t0 = float(seg[0].get('t', 0.0))
+            except Exception:
+                t0 = 0.0
+            for ev in seg:
+                try:
+                    ev['t'] = max(0.0, float(ev.get('t', 0.0)) - t0)
+                except Exception:
+                    pass
+            self.events = seg
+            self._rebuild_table()
+        except Exception as e:
+            QMessageBox.critical(self, "Recorder", f"Trim failed: {e}")
+
+    def split_at_selection(self):
+        idxs = self._selected_indices()
+        if not idxs:
+            QMessageBox.information(self, "Recorder", "Select a row to split.")
+            return
+        try:
+            at = min(idxs)
+            left = list(self.events[:at])
+            right = list(self.events[at:])
+            if not left or not right:
+                QMessageBox.information(self, "Recorder", "Cannot split: one side is empty.")
+                return
+            from PyQt6.QtWidgets import QInputDialog
+            import os, json, time
+            base = self.recordings_dir or os.path.dirname(os.path.abspath(__file__))
+            os.makedirs(base, exist_ok=True)
+            ln, ok = QInputDialog.getText(self, "Save Left", "Name:", text=f"segment_left_{int(time.time())}")
+            if not ok:
+                return
+            rn, ok2 = QInputDialog.getText(self, "Save Right", "Name:", text=f"segment_right_{int(time.time())}")
+            if not ok2:
+                return
+            def safe(nm):
+                s = (nm or "").strip()
+                s = "".join(ch if ch.isalnum() or ch in ("-","_") else "_" for ch in s).strip("_")
+                return s or f"segment_{int(time.time())}"
+            def rebase(seq):
+                try:
+                    t0 = float(seq[0].get('t', 0.0))
+                except Exception:
+                    t0 = 0.0
+                for ev in seq:
+                    try:
+                        ev['t'] = max(0.0, float(ev.get('t', 0.0)) - t0)
+                    except Exception:
+                        pass
+                return seq
+            left = rebase(left); right = rebase(right)
+            lp = os.path.join(base, safe(ln) + ".json")
+            rp = os.path.join(base, safe(rn) + ".json")
+            with open(lp, 'w', encoding='utf-8') as f:
+                json.dump({"name": os.path.splitext(os.path.basename(lp))[0], "events": left}, f, indent=2)
+            with open(rp, 'w', encoding='utf-8') as f:
+                json.dump({"name": os.path.splitext(os.path.basename(rp))[0], "events": right}, f, indent=2)
+            self.refresh_library()
+            self.events = left
+            self._rebuild_table()
+            QMessageBox.information(self, "Recorder", "Split saved.")
+        except Exception as e:
+            QMessageBox.critical(self, "Recorder", f"Split failed: {e}")
+
+    def merge_recordings(self):
+        try:
+            from PyQt6.QtWidgets import QFileDialog, QInputDialog
+            import os, json, time
+            base = self.recordings_dir or os.path.dirname(os.path.abspath(__file__))
+            os.makedirs(base, exist_ok=True)
+            files, _ = QFileDialog.getOpenFileNames(self, "Select recordings to merge", base, "JSON Files (*.json)")
+            if not files or len(files) < 2:
+                return
+            merged = []
+            offset = 0.0
+            for fp in files:
+                try:
+                    with open(fp, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    seq = list(data.get('events', []) or [])
+                    if not seq:
+                        continue
+                    try:
+                        t0 = float(seq[0].get('t', 0.0))
+                    except Exception:
+                        t0 = 0.0
+                    for ev in seq:
+                        try:
+                            t_rel = float(ev.get('t', 0.0)) - t0
+                        except Exception:
+                            t_rel = 0.0
+                        ev2 = dict(ev)
+                        ev2['t'] = offset + max(0.0, t_rel)
+                        merged.append(ev2)
+                    try:
+                        t_last = float(seq[-1].get('t', 0.0)) - t0
+                    except Exception:
+                        t_last = 0.0
+                    offset += t_last + 0.01
+                except Exception:
+                    pass
+            if not merged:
+                QMessageBox.information(self, "Recorder", "No events to merge.")
+                return
+            nm, ok = QInputDialog.getText(self, "Save Merged", "Name:", text=f"merged_{int(time.time())}")
+            if not ok:
+                return
+            safe = "".join(ch if ch.isalnum() or ch in ("-","_") else "_" for ch in (nm or "")).strip("_")
+            if not safe:
+                safe = f"merged_{int(time.time())}"
+            path = os.path.join(base, safe + ".json")
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump({"name": safe, "events": merged}, f, indent=2)
+            self.refresh_library()
+            self.events = merged
+            self._rebuild_table()
+            QMessageBox.information(self, "Recorder", "Merged saved.")
+        except Exception as e:
+            QMessageBox.critical(self, "Recorder", f"Merge failed: {e}")
 
     def clear_events(self):
         if self._recording:
@@ -1777,6 +1938,22 @@ class ActionEditor(QWidget):
             clicks_spin.valueChanged.connect(
                 lambda value, key="clicks": self.update_action_param(key, value))
             main_layout.addWidget(clicks_spin)
+            adv_btn = QPushButton("Advanced…")
+            adv_btn.setToolTip("Open advanced options like jitter and delays")
+            adv_btn.clicked.connect(lambda: self.open_advanced_dialog(action_type))
+            main_layout.addWidget(adv_btn)
+            main_layout.addWidget(QLabel("Jitter (px):"))
+            j_spin = QSpinBox()
+            j_spin.setRange(0, 100)
+            j_spin.setValue(self.action_data.get("jitter_px", 0))
+            j_spin.valueChanged.connect(lambda value, key="jitter_px": self.update_action_param(key, value))
+            main_layout.addWidget(j_spin)
+            main_layout.addWidget(QLabel("Delay Jitter (ms):"))
+            dj_spin = QSpinBox()
+            dj_spin.setRange(0, 2000)
+            dj_spin.setValue(self.action_data.get("delay_jitter_ms", 0))
+            dj_spin.valueChanged.connect(lambda value, key="delay_jitter_ms": self.update_action_param(key, value))
+            main_layout.addWidget(dj_spin)
             
         elif action_type in ["type", "key_press"]:
             if action_type == "type":
@@ -1899,35 +2076,14 @@ class ActionEditor(QWidget):
                 lambda value, key="y": self.update_action_param(key, value))
             main_layout.addWidget(y_spin)
 
-            # Show click preview
-            show_click_btn = QPushButton("Show Click")
-            show_click_btn.setToolTip("Preview the click/move point on screen")
-            show_click_btn.clicked.connect(self.show_click_overlay)
-            main_layout.addWidget(show_click_btn)
+            if action_type == "move":
+                show_click_btn = QPushButton("Show Click")
+                show_click_btn.setToolTip("Preview the click/move point on screen")
+                show_click_btn.clicked.connect(self.show_click_overlay)
+                main_layout.addWidget(show_click_btn)
             
-            # Toggle random checkbox
-            self.random_checkbox = QCheckBox("Toggle Random")
-            self.random_checkbox.setChecked(self.action_data.get("random", False))
-            self.random_checkbox.toggled.connect(lambda checked: self.update_action_param("random", checked) or self.update_params())
-            main_layout.addWidget(self.random_checkbox)
-
-            # If random is checked, allow region selection
-            if self.action_data.get("random", False):
-                region_btn = QPushButton("Select Region")
-                region_btn.clicked.connect(self.select_random_region)
-                main_layout.addWidget(region_btn)
-                self.random_region_label = QLabel()
-                main_layout.addWidget(self.random_region_label)
-                self.update_random_region_label()
-                # Show random region preview
-                show_rr_btn = QPushButton("Show Region")
-                show_rr_btn.setToolTip("Preview the random move region")
-                show_rr_btn.clicked.connect(self.show_random_region_overlay)
-                main_layout.addWidget(show_rr_btn)
-            else:
-                # Show info
-                info_label = QLabel("Moves to center of detected template")
-                main_layout.addWidget(info_label)
+            info_label = QLabel("Moves to center of detected template")
+            main_layout.addWidget(info_label)
 
             # Duration
             main_layout.addWidget(QLabel("Duration (s):"))
@@ -1938,6 +2094,22 @@ class ActionEditor(QWidget):
             duration_spin.valueChanged.connect(
                 lambda value, key="duration": self.update_action_param(key, value))
             main_layout.addWidget(duration_spin)
+            adv_btn = QPushButton("Advanced…")
+            adv_btn.setToolTip("Open advanced options (random region, jitter, delays)")
+            adv_btn.clicked.connect(lambda: self.open_advanced_dialog(action_type))
+            main_layout.addWidget(adv_btn)
+            main_layout.addWidget(QLabel("Jitter (px):"))
+            j2 = QSpinBox()
+            j2.setRange(0, 100)
+            j2.setValue(self.action_data.get("jitter_px", 0))
+            j2.valueChanged.connect(lambda value, key="jitter_px": self.update_action_param(key, value))
+            main_layout.addWidget(j2)
+            main_layout.addWidget(QLabel("Delay Jitter (ms):"))
+            dj2 = QSpinBox()
+            dj2.setRange(0, 2000)
+            dj2.setValue(self.action_data.get("delay_jitter_ms", 0))
+            dj2.valueChanged.connect(lambda value, key="delay_jitter_ms": self.update_action_param(key, value))
+            main_layout.addWidget(dj2)
         
         elif action_type == "scroll":
             main_layout.addWidget(QLabel("Pixels:"))
@@ -1967,81 +2139,41 @@ class ActionEditor(QWidget):
             duration_spin.valueChanged.connect(
                 lambda value, key="duration": self.update_action_param(key, value))
             main_layout.addWidget(duration_spin)
+            adv_btn = QPushButton("Advanced…")
+            adv_btn.setToolTip("Open advanced options like jitter and delays")
+            adv_btn.clicked.connect(lambda: self.open_advanced_dialog(action_type))
+            main_layout.addWidget(adv_btn)
+            main_layout.addWidget(QLabel("Jitter (px):"))
+            jh = QSpinBox()
+            jh.setRange(0, 100)
+            jh.setValue(self.action_data.get("jitter_px", 0))
+            jh.valueChanged.connect(lambda value, key="jitter_px": self.update_action_param(key, value))
+            main_layout.addWidget(jh)
 
         # Add the main params row
         self.params_layout.addWidget(main_params)
 
-        # Conditional IF/ELSE controls
+        # Compact condition controls: single button to open dialog
         try:
-            cond_group = QGroupBox("Condition")
-            try:
-                # Prevent the condition group from collapsing when more actions exist
-                cond_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
-                cond_group.setMinimumHeight(100)
-            except Exception:
-                pass
-            cond_layout = QVBoxLayout(cond_group)
-            cond_layout.setContentsMargins(6,6,6,6)
-            # IF row
-            if_row = QHBoxLayout()
-            if_row.addWidget(QLabel("If Template:"))
-            self.if_combo = QComboBox()
-            self.if_combo.addItems([""] + list(self.templates))
-            # Preload saved value
-            self.if_combo.setCurrentText(self.action_data.get("if_template", ""))
-            self.if_combo.currentTextChanged.connect(lambda val: self.update_action_param("if_template", val))
-            if_row.addWidget(self.if_combo, 1)
-            cond_layout.addLayout(if_row)
-
-            # IF region selection row
-            if_region_row = QHBoxLayout()
-            self.if_region_btn = QPushButton("Set IF Region")
-            self.if_region_btn.setToolTip("Limit condition template search to a selected region")
-            self.if_region_btn.clicked.connect(self.select_if_region)
-            if_region_row.addWidget(self.if_region_btn)
-            self.if_region_label = QLabel("IF Region: (none)")
-            self.update_if_region_label()
-            if_region_row.addWidget(self.if_region_label, 1)
-            # Optional clear button
-            clear_if_btn = QPushButton("Clear")
-            clear_if_btn.setToolTip("Clear IF search region")
-            clear_if_btn.clicked.connect(lambda: (self.action_data.pop('if_region', None), self.update_if_region_label()))
-            if_region_row.addWidget(clear_if_btn)
-            # Optional: show IF region overlay
-            show_if_btn = QPushButton("Show IF Region")
-            show_if_btn.setToolTip("Preview the IF template search region")
-            show_if_btn.clicked.connect(self.show_if_region_overlay)
-            if_region_row.addWidget(show_if_btn)
-            cond_layout.addLayout(if_region_row)
-
-            # Compact Else Actions header only (count + pop-out button)
-            else_header_row = QHBoxLayout()
+            cond_row = QHBoxLayout()
+            cond_row.addWidget(QLabel("Conditions:"))
+            edit_cond_btn = QPushButton("Edit…")
+            edit_cond_btn.setToolTip("Open condition editor (IF, regions, Else/If-Not)")
+            edit_cond_btn.clicked.connect(self.open_condition_dialog)
+            cond_row.addWidget(edit_cond_btn)
+            # Also show current counts for quick context
             try:
                 count = len(self.action_data.get('else_actions', []) or [])
             except Exception:
                 count = 0
-            self.else_count_label = QLabel(f"Else Actions: {count}")
-            else_header_row.addWidget(self.else_count_label, 0)
-            edit_else_btn = QPushButton("Edit Else Actions…")
-            edit_else_btn.setToolTip("Open a window to edit Else Actions")
-            edit_else_btn.clicked.connect(self.open_else_actions_dialog)
-            else_header_row.addWidget(edit_else_btn, 0)
-            cond_layout.addLayout(else_header_row)
-
-            # If-Not Actions header (count + pop-out button)
-            ifnot_header_row = QHBoxLayout()
             try:
                 not_count = len(self.action_data.get('if_not_actions', []) or [])
             except Exception:
                 not_count = 0
-            self.ifnot_count_label = QLabel(f"If-Not Actions: {not_count}")
-            ifnot_header_row.addWidget(self.ifnot_count_label, 0)
-            edit_ifnot_btn = QPushButton("Edit If-Not Actions…")
-            edit_ifnot_btn.setToolTip("Open a window to edit actions when IF template is not found")
-            edit_ifnot_btn.clicked.connect(self.open_if_not_actions_dialog)
-            ifnot_header_row.addWidget(edit_ifnot_btn, 0)
-            cond_layout.addLayout(ifnot_header_row)
-            self.params_layout.addWidget(cond_group)
+            cond_row.addWidget(QLabel(f"Else: {count}"))
+            cond_row.addWidget(QLabel(f"If-Not: {not_count}"))
+            wrap = QWidget(); wlay = QHBoxLayout(wrap); wlay.setContentsMargins(0,0,0,0); wlay.addLayout(cond_row)
+            self.params_layout.addWidget(wrap)
         except Exception:
             pass
     
@@ -2177,6 +2309,122 @@ class ActionEditor(QWidget):
         except Exception:
             pass
 
+    def open_advanced_dialog(self, action_type: str):
+        try:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Advanced Options")
+            v = QVBoxLayout(dlg)
+            v.setContentsMargins(8,8,8,8)
+            v.setSpacing(8)
+            form = QFormLayout(); form.setContentsMargins(0,0,0,0)
+            # Jitter and delay available for most actions
+            j_spin = QSpinBox(); j_spin.setRange(0, 100); j_spin.setValue(int(self.action_data.get("jitter_px", 0)))
+            dj_spin = QSpinBox(); dj_spin.setRange(0, 2000); dj_spin.setValue(int(self.action_data.get("delay_jitter_ms", 0)))
+            form.addRow("Jitter (px)", j_spin)
+            form.addRow("Delay Jitter (ms)", dj_spin)
+            # Random region for move_to
+            rr_wrap = QWidget(); rr = QHBoxLayout(rr_wrap); rr.setContentsMargins(0,0,0,0)
+            if action_type == "move_to":
+                rand_chk = QCheckBox("Random in region")
+                rand_chk.setChecked(bool(self.action_data.get("random", False)))
+                rr.addWidget(rand_chk)
+                set_btn = QPushButton("Set Region")
+                set_btn.clicked.connect(self.select_random_region)
+                rr.addWidget(set_btn)
+                show_btn = QPushButton("Show Region")
+                show_btn.clicked.connect(self.show_random_region_overlay)
+                rr.addWidget(show_btn)
+                clear_btn = QPushButton("Clear")
+                clear_btn.clicked.connect(lambda: (self.action_data.pop('random_region', None), self.update_random_region_label()))
+                rr.addWidget(clear_btn)
+                form.addRow("Move To Random", rr_wrap)
+            # Click action region support
+            if action_type == "click":
+                cr_wrap = QWidget(); cr = QHBoxLayout(cr_wrap); cr.setContentsMargins(0,0,0,0)
+                set_r = QPushButton("Set Click Region"); set_r.clicked.connect(self.select_region); cr.addWidget(set_r)
+                show_r = QPushButton("Show Click Region"); show_r.clicked.connect(lambda: self.show_region_overlay('region')); cr.addWidget(show_r)
+                clear_r = QPushButton("Clear"); clear_r.clicked.connect(lambda: (self.action_data.pop('region', None), self.update_region_label())); cr.addWidget(clear_r)
+                form.addRow("Click Region", cr_wrap)
+            v.addLayout(form)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel, parent=dlg)
+            v.addWidget(buttons)
+            def on_save():
+                try:
+                    self.action_data['jitter_px'] = int(j_spin.value())
+                    self.action_data['delay_jitter_ms'] = int(dj_spin.value())
+                    if action_type == "move_to":
+                        self.action_data['random'] = bool(rand_chk.isChecked())
+                except Exception:
+                    pass
+                dlg.accept()
+            def on_cancel():
+                dlg.reject()
+            buttons.accepted.connect(on_save)
+            buttons.rejected.connect(on_cancel)
+            dlg.exec()
+        except Exception:
+            pass
+
+    def open_condition_dialog(self):
+        try:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Edit Conditions")
+            layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(8,8,8,8)
+            layout.setSpacing(8)
+            # IF controls
+            if_row = QHBoxLayout()
+            if_row.addWidget(QLabel("If Template:"))
+            self.if_combo = QComboBox()
+            self.if_combo.addItems([""] + list(self.templates))
+            self.if_combo.setCurrentText(self.action_data.get("if_template", ""))
+            self.if_combo.currentTextChanged.connect(lambda val: self.update_action_param("if_template", val))
+            if_row.addWidget(self.if_combo, 1)
+            layout.addLayout(if_row)
+            # IF Region controls
+            if_region_row = QHBoxLayout()
+            self.if_region_btn = QPushButton("Set IF Region")
+            self.if_region_btn.setToolTip("Limit condition template search to a selected region")
+            self.if_region_btn.clicked.connect(self.select_if_region)
+            if_region_row.addWidget(self.if_region_btn)
+            self.if_region_label = QLabel("IF Region: (none)")
+            self.update_if_region_label()
+            if_region_row.addWidget(self.if_region_label, 1)
+            clear_if_btn = QPushButton("Clear")
+            clear_if_btn.setToolTip("Clear IF search region")
+            clear_if_btn.clicked.connect(lambda: (self.action_data.pop('if_region', None), self.update_if_region_label()))
+            if_region_row.addWidget(clear_if_btn)
+            show_if_btn = QPushButton("Show IF Region")
+            show_if_btn.setToolTip("Preview the IF template search region")
+            show_if_btn.clicked.connect(self.show_if_region_overlay)
+            if_region_row.addWidget(show_if_btn)
+            layout.addLayout(if_region_row)
+            # Else/If-Not editor shortcuts
+            hdr = QHBoxLayout()
+            try:
+                count = len(self.action_data.get('else_actions', []) or [])
+            except Exception:
+                count = 0
+            try:
+                not_count = len(self.action_data.get('if_not_actions', []) or [])
+            except Exception:
+                not_count = 0
+            hdr.addWidget(QLabel(f"Else Actions: {count}"))
+            btn_e = QPushButton("Edit Else Actions…"); btn_e.clicked.connect(self.open_else_actions_dialog)
+            hdr.addWidget(btn_e)
+            hdr.addWidget(QLabel(f"If-Not Actions: {not_count}"))
+            btn_n = QPushButton("Edit If-Not Actions…"); btn_n.clicked.connect(self.open_if_not_actions_dialog)
+            hdr.addWidget(btn_n)
+            layout.addLayout(hdr)
+            # Buttons
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
+            layout.addWidget(buttons)
+            buttons.rejected.connect(dialog.reject)
+            buttons.accepted.connect(dialog.accept)
+            dialog.exec()
+        except Exception:
+            pass
+
     def open_if_not_actions_dialog(self):
         """Open a dialog window to edit actions when IF template is NOT found."""
         try:
@@ -2294,11 +2542,15 @@ class ActionEditor(QWidget):
 
     def update_region_label(self):
         region = self.action_data.get("region")
-        if region and len(region) == 4:
-            x, y, w, h = region
-            self.region_label.setText(f"Region: ({x}, {y}, {w}x{h})")
-        else:
-            self.region_label.setText("Region: None (random click disabled)")
+        try:
+            txt = "Region: None (random click disabled)"
+            if region and len(region) == 4:
+                x, y, w, h = region
+                txt = f"Region: ({x}, {y}, {w}x{h})"
+            if hasattr(self, 'region_label') and isinstance(self.region_label, QLabel):
+                self.region_label.setText(txt)
+        except Exception:
+            pass
     
     def select_random_region(self):
         dialog = ScreenCaptureDialog(self)
@@ -2313,11 +2565,15 @@ class ActionEditor(QWidget):
 
     def update_random_region_label(self):
         region = self.action_data.get("random_region")
-        if region and len(region) == 4:
-            x, y, w, h = region
-            self.random_region_label.setText(f"Region: ({x}, {y}, {w}x{h})")
-        else:
-            self.random_region_label.setText("Region: None (random move disabled)")
+        try:
+            txt = "Region: None (random move disabled)"
+            if region and len(region) == 4:
+                x, y, w, h = region
+                txt = f"Region: ({x}, {y}, {w}x{h})"
+            if hasattr(self, 'random_region_label') and isinstance(self.random_region_label, QLabel):
+                self.random_region_label.setText(txt)
+        except Exception:
+            pass
 
     def select_if_region(self):
         """Capture and set if_region for conditional template search."""
@@ -2355,6 +2611,23 @@ class ActionEditor(QWidget):
                 x, y, w, h = rr
                 rect = QRect(int(x), int(y), int(w), int(h))
             dlg = OverlayPreviewWindow(self, rect=rect, point=None, target_geometry=None, duration_ms=1200, message="Random Region")
+            try:
+                self._overlay_preview = dlg
+            except Exception:
+                pass
+            dlg.show()
+        except Exception:
+            pass
+    
+    def show_region_overlay(self, key: str = 'region'):
+        """Preview a region by key (e.g., 'region' or 'random_region')."""
+        try:
+            rr = self.action_data.get(key)
+            rect = None
+            if isinstance(rr, (list, tuple)) and len(rr) == 4:
+                x, y, w, h = rr
+                rect = QRect(int(x), int(y), int(w), int(h))
+            dlg = OverlayPreviewWindow(self, rect=rect, point=None, target_geometry=None, duration_ms=1200, message=f"{key} Preview")
             try:
                 self._overlay_preview = dlg
             except Exception:
@@ -2482,10 +2755,22 @@ class MiniActionEditor(QWidget):
         # Build minimal param set based on type
         if t == 'click':
             add_btn_combo(); add_spin('Clicks:', 'clicks', (1,10), self.action_data.get('clicks',1))
+            add_spin('Jitter (px):', 'jitter_px', (0,100), self.action_data.get('jitter_px',0))
+            add_spin('Delay Jitter (ms):', 'delay_jitter_ms', (0,2000), self.action_data.get('delay_jitter_ms',0))
+            adv_btn = QPushButton('Advanced…')
+            adv_btn.setToolTip('Open advanced options')
+            adv_btn.clicked.connect(lambda: self.open_advanced_dialog(t))
+            self.params_layout.addWidget(adv_btn)
         elif t in ('move','move_to'):
             add_spin('X:', 'x', (0,10000), self.action_data.get('x',0))
             add_spin('Y:', 'y', (0,10000), self.action_data.get('y',0))
             add_spin('Duration:', 'duration', (0,10), self.action_data.get('duration',0.0), dble=True)
+            if t == 'move':
+                btn_show = QPushButton('Show Click')
+                btn_show.clicked.connect(self.show_click_overlay)
+                self.params_layout.addWidget(btn_show)
+            add_spin('Jitter (px):', 'jitter_px', (0,100), self.action_data.get('jitter_px',0))
+            add_spin('Delay Jitter (ms):', 'delay_jitter_ms', (0,2000), self.action_data.get('delay_jitter_ms',0))
             # Random toggle and region for move_to
             if t == 'move_to':
                 # Random checkbox
@@ -2499,10 +2784,20 @@ class MiniActionEditor(QWidget):
                 btn = QPushButton('Set Random Region')
                 btn.clicked.connect(self.select_random_region)
                 self.params_layout.addWidget(btn)
+                show_btn = QPushButton('Show Random Region')
+                show_btn.clicked.connect(self.show_random_region_overlay)
+                self.params_layout.addWidget(show_btn)
+                clear_btn = QPushButton('Clear')
+                clear_btn.clicked.connect(lambda: (self.action_data.pop('random_region', None), self.update_random_region_label()))
+                self.params_layout.addWidget(clear_btn)
                 # Readout label
                 self.random_readout = QLabel()
                 self.update_random_region_label()
                 self.params_layout.addWidget(self.random_readout)
+                adv_btn = QPushButton('Advanced…')
+                adv_btn.setToolTip('Open advanced options')
+                adv_btn.clicked.connect(lambda: self.open_advanced_dialog(t))
+                self.params_layout.addWidget(adv_btn)
         elif t == 'wait':
             add_spin('Seconds:', 'seconds', (0,60), self.action_data.get('seconds',1.0), dble=True)
         elif t == 'scroll':
@@ -2599,6 +2894,18 @@ class MiniActionEditor(QWidget):
         except Exception:
             pass
 
+    def select_region(self):
+        try:
+            dialog = ScreenCaptureDialog(self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                rect = dialog.get_capture_rect()
+                if rect and rect.isValid():
+                    self.action_data['region'] = [rect.x(), rect.y(), rect.width(), rect.height()]
+                else:
+                    self.action_data.pop('region', None)
+        except Exception:
+            pass
+
     def update_random_region_label(self):
         try:
             rr = self.action_data.get('random_region')
@@ -2621,6 +2928,22 @@ class MiniActionEditor(QWidget):
                 x, y, w, h = rr
                 rect = QRect(int(x), int(y), int(w), int(h))
             dlg = OverlayPreviewWindow(self, rect=rect, point=None, target_geometry=None, duration_ms=1200, message="Random Region")
+            try:
+                self._overlay_preview = dlg
+            except Exception:
+                pass
+            dlg.show()
+        except Exception:
+            pass
+
+    def show_region_overlay(self, key: str = 'region'):
+        try:
+            rr = self.action_data.get(key)
+            rect = None
+            if isinstance(rr, (list, tuple)) and len(rr) == 4:
+                x, y, w, h = rr
+                rect = QRect(int(x), int(y), int(w), int(h))
+            dlg = OverlayPreviewWindow(self, rect=rect, point=None, target_geometry=None, duration_ms=1200, message=f"{key} Preview")
             try:
                 self._overlay_preview = dlg
             except Exception:
@@ -2658,6 +2981,59 @@ class MiniActionEditor(QWidget):
             except Exception:
                 pass
             dlg.show()
+        except Exception:
+            pass
+
+    def open_advanced_dialog(self, action_type: str):
+        try:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Advanced Options")
+            v = QVBoxLayout(dlg)
+            v.setContentsMargins(8,8,8,8)
+            v.setSpacing(8)
+            form = QFormLayout(); form.setContentsMargins(0,0,0,0)
+            j_spin = QSpinBox(); j_spin.setRange(0, 100); j_spin.setValue(int(self.action_data.get("jitter_px", 0)))
+            dj_spin = QSpinBox(); dj_spin.setRange(0, 2000); dj_spin.setValue(int(self.action_data.get("delay_jitter_ms", 0)))
+            form.addRow("Jitter (px)", j_spin)
+            form.addRow("Delay Jitter (ms)", dj_spin)
+            rr_wrap = QWidget(); rr = QHBoxLayout(rr_wrap); rr.setContentsMargins(0,0,0,0)
+            if action_type == "move_to":
+                rand_chk = QCheckBox("Random in region")
+                rand_chk.setChecked(bool(self.action_data.get("random", False)))
+                rr.addWidget(rand_chk)
+                set_btn = QPushButton("Set Region")
+                set_btn.clicked.connect(self.select_random_region)
+                rr.addWidget(set_btn)
+                show_btn = QPushButton("Show Region")
+                show_btn.clicked.connect(self.show_random_region_overlay)
+                rr.addWidget(show_btn)
+                clear_btn = QPushButton("Clear")
+                clear_btn.clicked.connect(lambda: (self.action_data.pop('random_region', None), self.update_random_region_label()))
+                rr.addWidget(clear_btn)
+                form.addRow("Move To Random", rr_wrap)
+            if action_type == "click":
+                cr_wrap = QWidget(); cr = QHBoxLayout(cr_wrap); cr.setContentsMargins(0,0,0,0)
+                set_r = QPushButton("Set Click Region"); set_r.clicked.connect(self.select_region); cr.addWidget(set_r)
+                show_r = QPushButton("Show Click Region"); show_r.clicked.connect(lambda: self.show_region_overlay('region')); cr.addWidget(show_r)
+                clear_r = QPushButton("Clear"); clear_r.clicked.connect(lambda: (self.action_data.pop('region', None))); cr.addWidget(clear_r)
+                form.addRow("Click Region", cr_wrap)
+            v.addLayout(form)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel, parent=dlg)
+            v.addWidget(buttons)
+            def on_save():
+                try:
+                    self.action_data['jitter_px'] = int(j_spin.value())
+                    self.action_data['delay_jitter_ms'] = int(dj_spin.value())
+                    if action_type == "move_to":
+                        self.action_data['random'] = bool(rand_chk.isChecked())
+                except Exception:
+                    pass
+                dlg.accept()
+            def on_cancel():
+                dlg.reject()
+            buttons.accepted.connect(on_save)
+            buttons.rejected.connect(on_cancel)
+            dlg.exec()
         except Exception:
             pass
 
