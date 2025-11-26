@@ -900,6 +900,12 @@ class RecorderWidget(QWidget):
         opts.addWidget(QLabel("Move sampling (ms):"))
         self.move_sample_spin = QSpinBox(); self.move_sample_spin.setRange(5, 200); self.move_sample_spin.setValue(25)
         opts.addWidget(self.move_sample_spin)
+        opts.addWidget(QLabel("Jitter (px):"))
+        self.jitter_spin = QSpinBox(); self.jitter_spin.setRange(0, 50); self.jitter_spin.setValue(0)
+        opts.addWidget(self.jitter_spin)
+        opts.addWidget(QLabel("Delay jitter (ms):"))
+        self.delay_jitter_spin = QSpinBox(); self.delay_jitter_spin.setRange(0, 1000); self.delay_jitter_spin.setValue(0)
+        opts.addWidget(self.delay_jitter_spin)
         opts.addStretch()
         # Collapsible tool sections to declutter the Recorder UI
         tool = QToolBox()
@@ -1192,7 +1198,7 @@ class RecorderWidget(QWidget):
         if not path:
             return
         try:
-            import json, time, pyautogui
+            import json, time, pyautogui, random
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             evs = list(data.get('events', []) or [])
@@ -1205,9 +1211,16 @@ class RecorderWidget(QWidget):
                 t = float(ev.get('t', 0.0)) - float(start)
                 while self._now() - base < t:
                     time.sleep(0.005)
+                dj = int(self.delay_jitter_spin.value())
+                if dj > 0:
+                    time.sleep(random.uniform(0.0, float(dj)/1000.0))
                 typ = str(ev.get('type',''))
                 if typ == 'move':
                     x = int(ev.get('x', 0)); y = int(ev.get('y', 0))
+                    jp = int(self.jitter_spin.value())
+                    if jp > 0:
+                        x += random.randint(-jp, jp)
+                        y += random.randint(-jp, jp)
                     pyautogui.moveTo(x, y, duration=0.0)
                 elif typ in ('mouse_down','mouse_up'):
                     btn = ev.get('button','left')
@@ -1498,15 +1511,23 @@ class RecorderWidget(QWidget):
         try:
             import time
             import pyautogui
+            import random
             start = self.events[0].get('t', 0.0)
             base = self._now()
             for ev in self.events:
                 t = float(ev.get('t', 0.0)) - float(start)
                 while self._now() - base < t:
                     time.sleep(0.005)
+                dj = int(self.delay_jitter_spin.value())
+                if dj > 0:
+                    time.sleep(random.uniform(0.0, float(dj)/1000.0))
                 typ = str(ev.get('type',''))
                 if typ == 'move':
                     x = int(ev.get('x', 0)); y = int(ev.get('y', 0))
+                    jp = int(self.jitter_spin.value())
+                    if jp > 0:
+                        x += random.randint(-jp, jp)
+                        y += random.randint(-jp, jp)
                     pyautogui.moveTo(x, y, duration=0.0)
                 elif typ in ('mouse_down','mouse_up'):
                     btn = ev.get('button','left')
@@ -1539,6 +1560,7 @@ class RecorderWidget(QWidget):
             return
         try:
             from PyQt6.QtCore import QTimer
+            import random
             self._preview_index = 0
             start_t = float(self.events[0].get('t', 0.0))
             self._preview_base = self._now()
@@ -1547,6 +1569,12 @@ class RecorderWidget(QWidget):
                     return
                 ev = self.events[self._preview_index]
                 t = float(ev.get('t', 0.0)) - start_t
+                try:
+                    dj = int(self.delay_jitter_spin.value())
+                    if dj > 0:
+                        t = t + random.uniform(0.0, float(dj)/1000.0)
+                except Exception:
+                    pass
                 now = self._now() - self._preview_base
                 if now + 0.001 < t:
                     QTimer.singleShot(int((t - now) * 1000), step)
@@ -1555,6 +1583,13 @@ class RecorderWidget(QWidget):
                 msg = None; pt = None
                 if typ in ('move','mouse_down','mouse_up','scroll'):
                     x = ev.get('x'); y = ev.get('y')
+                    try:
+                        jp = int(self.jitter_spin.value())
+                        if jp > 0 and isinstance(x, (int,float)) and isinstance(y, (int,float)):
+                            x = int(x) + random.randint(-jp, jp)
+                            y = int(y) + random.randint(-jp, jp)
+                    except Exception:
+                        pass
                     if isinstance(x, (int,float)) and isinstance(y, (int,float)):
                         from PyQt6.QtCore import QPoint
                         pt = QPoint(int(x), int(y))
@@ -1836,6 +1871,14 @@ class ActionEditor(QWidget):
         # Add action types directly as strings to match ActionType enum values
         action_types = ["click", "move", "move_to", "right_click", "double_click", "type", "key_press", "wait", "scroll", "click_and_hold", "play_recording"]
         self.type_combo.addItems(action_types)
+        try:
+            from PyQt6.QtWidgets import QComboBox as _QCB, QSizePolicy as _QSP
+            self.type_combo.setSizeAdjustPolicy(_QCB.SizeAdjustPolicy.AdjustToContents)
+            self.type_combo.setMinimumContentsLength(12)
+            self.type_combo.setSizePolicy(_QSP.Policy.Preferred, _QSP.Policy.Fixed)
+            self.type_combo.setFixedHeight(24)
+        except Exception:
+            pass
         if "type" in self.action_data:
             action_type = self.action_data["type"]
             self.type_combo.setCurrentText(action_type)
@@ -1846,8 +1889,7 @@ class ActionEditor(QWidget):
         self.params_layout = QVBoxLayout(self.params_widget)
         self.params_layout.setContentsMargins(0, 0, 0, 0)
         try:
-            # Allow the params area to grow vertically with its content
-            self.params_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            self.params_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         except Exception:
             pass
         
@@ -1856,6 +1898,13 @@ class ActionEditor(QWidget):
         btn_layout = QHBoxLayout(btn_frame)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(2)
+        try:
+            from PyQt6.QtWidgets import QSizePolicy as _QSP
+            btn_frame.setSizePolicy(_QSP.Policy.Fixed, _QSP.Policy.Fixed)
+            btn_frame.setFixedHeight(26)
+            btn_frame.setFixedWidth(110)
+        except Exception:
+            pass
         
         # Move up button
         self.move_up_btn = QPushButton("↑")
@@ -1874,9 +1923,14 @@ class ActionEditor(QWidget):
         remove_btn.setFixedSize(24, 24)
         remove_btn.setToolTip("Remove action")
         remove_btn.clicked.connect(self.remove_self)
+        # Duplicate button
+        dup_btn = QPushButton("⧉")
+        dup_btn.setFixedSize(24, 24)
+        dup_btn.setToolTip("Duplicate action")
+        dup_btn.clicked.connect(self.duplicate_self)
         
         # Style buttons
-        for btn in [self.move_up_btn, self.move_down_btn, remove_btn]:
+        for btn in [self.move_up_btn, self.move_down_btn, dup_btn, remove_btn]:
             btn.setStyleSheet("""
                 QPushButton {
                     border: 1px solid #3a3a3a;
@@ -1896,12 +1950,17 @@ class ActionEditor(QWidget):
         # Add buttons to layout
         btn_layout.addWidget(self.move_up_btn)
         btn_layout.addWidget(self.move_down_btn)
+        btn_layout.addWidget(dup_btn)
         btn_layout.addWidget(remove_btn)
         
         # Add widgets to main layout
         layout.addWidget(QLabel("Action:"))
-        layout.addWidget(self.type_combo, 1)  # Allow type combo to expand
-        layout.addWidget(self.params_widget, 2)  # Allow params to expand more
+        layout.addWidget(self.type_combo)
+        try:
+            self.params_widget.setMinimumHeight(60)
+        except Exception:
+            pass
+        layout.addWidget(self.params_widget, 2)
         layout.addWidget(btn_frame)
         
         self.type_combo.currentTextChanged.connect(self.update_params)
@@ -1922,13 +1981,38 @@ class ActionEditor(QWidget):
         main_params = QWidget()
         main_layout = QHBoxLayout(main_params)
         main_layout.setContentsMargins(0,0,0,0)
+        en_cb = QCheckBox("Enabled")
+        try:
+            en_cb.setChecked(bool(self.action_data.get("enabled", True)))
+        except Exception:
+            pass
+        try:
+            en_cb.stateChanged.connect(lambda s: self.update_action_param("enabled", bool(s)))
+        except Exception:
+            pass
+        main_layout.addWidget(en_cb)
+        def _size(w):
+            try:
+                w.setMinimumWidth(120)
+                w.setFixedHeight(24)
+            except Exception:
+                pass
         if action_type == "click":
             main_layout.addWidget(QLabel("Button:"))
             button_combo = QComboBox()
             button_combo.addItems(["left", "middle", "right"])
+            try:
+                from PyQt6.QtWidgets import QComboBox as _QCB, QSizePolicy as _QSP
+                button_combo.setSizeAdjustPolicy(_QCB.SizeAdjustPolicy.AdjustToContents)
+                button_combo.setMinimumContentsLength(5)
+                button_combo.setSizePolicy(_QSP.Policy.Preferred, _QSP.Policy.Fixed)
+                button_combo.setFixedHeight(24)
+            except Exception:
+                pass
             button_combo.setCurrentText(self.action_data.get("button", "left"))
             button_combo.currentTextChanged.connect(
                 lambda text, key="button": self.update_action_param(key, text))
+            _size(button_combo)
             main_layout.addWidget(button_combo)
             
             main_layout.addWidget(QLabel("Clicks:"))
@@ -1937,23 +2021,13 @@ class ActionEditor(QWidget):
             clicks_spin.setValue(self.action_data.get("clicks", 1))
             clicks_spin.valueChanged.connect(
                 lambda value, key="clicks": self.update_action_param(key, value))
+            _size(clicks_spin)
             main_layout.addWidget(clicks_spin)
             adv_btn = QPushButton("Advanced…")
-            adv_btn.setToolTip("Open advanced options like jitter and delays")
+            adv_btn.setToolTip("Open advanced options")
             adv_btn.clicked.connect(lambda: self.open_advanced_dialog(action_type))
+            _size(adv_btn)
             main_layout.addWidget(adv_btn)
-            main_layout.addWidget(QLabel("Jitter (px):"))
-            j_spin = QSpinBox()
-            j_spin.setRange(0, 100)
-            j_spin.setValue(self.action_data.get("jitter_px", 0))
-            j_spin.valueChanged.connect(lambda value, key="jitter_px": self.update_action_param(key, value))
-            main_layout.addWidget(j_spin)
-            main_layout.addWidget(QLabel("Delay Jitter (ms):"))
-            dj_spin = QSpinBox()
-            dj_spin.setRange(0, 2000)
-            dj_spin.setValue(self.action_data.get("delay_jitter_ms", 0))
-            dj_spin.valueChanged.connect(lambda value, key="delay_jitter_ms": self.update_action_param(key, value))
-            main_layout.addWidget(dj_spin)
             
         elif action_type in ["type", "key_press"]:
             if action_type == "type":
@@ -1961,6 +2035,7 @@ class ActionEditor(QWidget):
                 text_edit = QLineEdit(self.action_data.get("text", ""))
                 text_edit.textChanged.connect(
                     lambda text, key="text": self.update_action_param(key, text))
+                _size(text_edit)
                 main_layout.addWidget(text_edit)
             else:
                 main_layout.addWidget(QLabel("Key:"))
@@ -1970,6 +2045,14 @@ class ActionEditor(QWidget):
                 except Exception:
                     keys = []
                 key_combo.addItems(keys)
+                try:
+                    from PyQt6.QtWidgets import QComboBox as _QCB, QSizePolicy as _QSP
+                    key_combo.setSizeAdjustPolicy(_QCB.SizeAdjustPolicy.AdjustToContents)
+                    key_combo.setMinimumContentsLength(8)
+                    key_combo.setSizePolicy(_QSP.Policy.Preferred, _QSP.Policy.Fixed)
+                    key_combo.setFixedHeight(24)
+                except Exception:
+                    pass
                 saved_key = self.action_data.get("key", "")
                 if saved_key and saved_key not in keys:
                     key_combo.addItem(saved_key)
@@ -1977,7 +2060,13 @@ class ActionEditor(QWidget):
                     key_combo.setCurrentText(saved_key)
                 key_combo.currentTextChanged.connect(
                     lambda text, key="key": self.update_action_param(key, text))
+                _size(key_combo)
                 main_layout.addWidget(key_combo)
+            adv_btn = QPushButton("Advanced…")
+            adv_btn.setToolTip("Open advanced options")
+            adv_btn.clicked.connect(lambda: self.open_advanced_dialog(action_type))
+            _size(adv_btn)
+            main_layout.addWidget(adv_btn)
         elif action_type == "play_recording":
             main_layout.addWidget(QLabel("Recording:"))
             rec_combo = QComboBox(); self._rec_combo = rec_combo
@@ -1996,6 +2085,14 @@ class ActionEditor(QWidget):
                 p = os.path.join(rec_dir, f) if rec_dir else f
                 self._recording_paths_map[name] = p
             rec_combo.addItems(sorted(list(self._recording_paths_map.keys())))
+            try:
+                from PyQt6.QtWidgets import QComboBox as _QCB, QSizePolicy as _QSP
+                rec_combo.setSizeAdjustPolicy(_QCB.SizeAdjustPolicy.AdjustToContents)
+                rec_combo.setMinimumContentsLength(12)
+                rec_combo.setSizePolicy(_QSP.Policy.Preferred, _QSP.Policy.Fixed)
+                rec_combo.setFixedHeight(24)
+            except Exception:
+                pass
             saved_path = self.action_data.get("recording_path", "")
             if saved_path:
                 # Try to set current based on saved path
@@ -2010,6 +2107,7 @@ class ActionEditor(QWidget):
                 path = self._recording_paths_map.get(name, "")
                 self.update_action_param("recording_path", path)
             rec_combo.currentTextChanged.connect(on_rec_change)
+            _size(rec_combo)
             main_layout.addWidget(rec_combo, 1)
             try:
                 if not saved_path:
@@ -2029,23 +2127,31 @@ class ActionEditor(QWidget):
                     for f in files2:
                         n = os.path.splitext(f)[0]
                         self._recording_paths_map[n] = os.path.join(rec_dir, f)
-                    rec_combo.addItems(names)
+                        rec_combo.addItems(names)
                 except Exception:
                     pass
             refresh_btn.clicked.connect(_refresh)
+            _size(refresh_btn)
             main_layout.addWidget(refresh_btn)
             main_layout.addWidget(QLabel("Speed:"))
             sp = QDoubleSpinBox(); sp.setRange(0.1, 10.0); sp.setSingleStep(0.1)
             sp.setValue(float(self.action_data.get("recording_speed", 1.0)))
             sp.valueChanged.connect(lambda v, key="recording_speed": self.update_action_param(key, float(v)))
             self._speed_spin = sp
+            _size(sp)
             main_layout.addWidget(sp)
             main_layout.addWidget(QLabel("Start Transition (s):"))
             st = QDoubleSpinBox(); st.setRange(0.0, 5.0); st.setSingleStep(0.05)
             st.setValue(float(self.action_data.get("start_transition", 0.0)))
             st.valueChanged.connect(lambda v, key="start_transition": self.update_action_param(key, float(v)))
             self._start_spin = st
+            _size(st)
             main_layout.addWidget(st)
+            adv_btn = QPushButton("Advanced…")
+            adv_btn.setToolTip("Open advanced options")
+            adv_btn.clicked.connect(lambda: self.open_advanced_dialog(action_type))
+            _size(adv_btn)
+            main_layout.addWidget(adv_btn)
             
         elif action_type == "wait":
             main_layout.addWidget(QLabel("Seconds:"))
@@ -2055,7 +2161,13 @@ class ActionEditor(QWidget):
             seconds_spin.setSingleStep(0.1)
             seconds_spin.valueChanged.connect(
                 lambda value, key="seconds": self.update_action_param(key, value))
+            _size(seconds_spin)
             main_layout.addWidget(seconds_spin)
+            adv_btn = QPushButton("Advanced…")
+            adv_btn.setToolTip("Open advanced options")
+            adv_btn.clicked.connect(lambda: self.open_advanced_dialog(action_type))
+            _size(adv_btn)
+            main_layout.addWidget(adv_btn)
             
         elif action_type in ["move", "move_to"]:
             # Add X coordinate
@@ -2065,6 +2177,7 @@ class ActionEditor(QWidget):
             x_spin.setValue(self.action_data.get("x", 0))
             x_spin.valueChanged.connect(
                 lambda value, key="x": self.update_action_param(key, value))
+            _size(x_spin)
             main_layout.addWidget(x_spin)
             
             # Add Y coordinate
@@ -2074,6 +2187,7 @@ class ActionEditor(QWidget):
             y_spin.setValue(self.action_data.get("y", 0))
             y_spin.valueChanged.connect(
                 lambda value, key="y": self.update_action_param(key, value))
+            _size(y_spin)
             main_layout.addWidget(y_spin)
 
             if action_type == "move":
@@ -2093,23 +2207,13 @@ class ActionEditor(QWidget):
             duration_spin.setValue(self.action_data.get("duration", 0.0))
             duration_spin.valueChanged.connect(
                 lambda value, key="duration": self.update_action_param(key, value))
+            _size(duration_spin)
             main_layout.addWidget(duration_spin)
             adv_btn = QPushButton("Advanced…")
-            adv_btn.setToolTip("Open advanced options (random region, jitter, delays)")
+            adv_btn.setToolTip("Open advanced options")
             adv_btn.clicked.connect(lambda: self.open_advanced_dialog(action_type))
+            _size(adv_btn)
             main_layout.addWidget(adv_btn)
-            main_layout.addWidget(QLabel("Jitter (px):"))
-            j2 = QSpinBox()
-            j2.setRange(0, 100)
-            j2.setValue(self.action_data.get("jitter_px", 0))
-            j2.valueChanged.connect(lambda value, key="jitter_px": self.update_action_param(key, value))
-            main_layout.addWidget(j2)
-            main_layout.addWidget(QLabel("Delay Jitter (ms):"))
-            dj2 = QSpinBox()
-            dj2.setRange(0, 2000)
-            dj2.setValue(self.action_data.get("delay_jitter_ms", 0))
-            dj2.valueChanged.connect(lambda value, key="delay_jitter_ms": self.update_action_param(key, value))
-            main_layout.addWidget(dj2)
         
         elif action_type == "scroll":
             main_layout.addWidget(QLabel("Pixels:"))
@@ -2118,7 +2222,13 @@ class ActionEditor(QWidget):
             pixels_spin.setValue(self.action_data.get("pixels", 0))
             pixels_spin.valueChanged.connect(
                 lambda value, key="pixels": self.update_action_param(key, value))
+            _size(pixels_spin)
             main_layout.addWidget(pixels_spin)
+            adv_btn = QPushButton("Advanced…")
+            adv_btn.setToolTip("Open advanced options")
+            adv_btn.clicked.connect(lambda: self.open_advanced_dialog(action_type))
+            _size(adv_btn)
+            main_layout.addWidget(adv_btn)
             
         elif action_type == "click_and_hold":
             # Add button selection
@@ -2128,6 +2238,7 @@ class ActionEditor(QWidget):
             button_combo.setCurrentText(self.action_data.get("button", "left"))
             button_combo.currentTextChanged.connect(
                 lambda text, key="button": self.update_action_param(key, text))
+            _size(button_combo)
             main_layout.addWidget(button_combo)
             
             # Add duration control
@@ -2138,17 +2249,13 @@ class ActionEditor(QWidget):
             duration_spin.setValue(self.action_data.get("duration", 1.0))
             duration_spin.valueChanged.connect(
                 lambda value, key="duration": self.update_action_param(key, value))
+            _size(duration_spin)
             main_layout.addWidget(duration_spin)
             adv_btn = QPushButton("Advanced…")
-            adv_btn.setToolTip("Open advanced options like jitter and delays")
+            adv_btn.setToolTip("Open advanced options")
             adv_btn.clicked.connect(lambda: self.open_advanced_dialog(action_type))
+            _size(adv_btn)
             main_layout.addWidget(adv_btn)
-            main_layout.addWidget(QLabel("Jitter (px):"))
-            jh = QSpinBox()
-            jh.setRange(0, 100)
-            jh.setValue(self.action_data.get("jitter_px", 0))
-            jh.valueChanged.connect(lambda value, key="jitter_px": self.update_action_param(key, value))
-            main_layout.addWidget(jh)
 
         # Add the main params row
         self.params_layout.addWidget(main_params)
@@ -2156,12 +2263,11 @@ class ActionEditor(QWidget):
         # Compact condition controls: single button to open dialog
         try:
             cond_row = QHBoxLayout()
-            cond_row.addWidget(QLabel("Conditions:"))
             edit_cond_btn = QPushButton("Edit…")
             edit_cond_btn.setToolTip("Open condition editor (IF, regions, Else/If-Not)")
             edit_cond_btn.clicked.connect(self.open_condition_dialog)
             cond_row.addWidget(edit_cond_btn)
-            # Also show current counts for quick context
+            cond_row.addWidget(QLabel("Conditions:"))
             try:
                 count = len(self.action_data.get('else_actions', []) or [])
             except Exception:
@@ -2170,8 +2276,10 @@ class ActionEditor(QWidget):
                 not_count = len(self.action_data.get('if_not_actions', []) or [])
             except Exception:
                 not_count = 0
-            cond_row.addWidget(QLabel(f"Else: {count}"))
-            cond_row.addWidget(QLabel(f"If-Not: {not_count}"))
+            self.else_count_label = QLabel(f"Else: {count}")
+            self.ifnot_count_label = QLabel(f"If-Not: {not_count}")
+            cond_row.addWidget(self.else_count_label)
+            cond_row.addWidget(self.ifnot_count_label)
             wrap = QWidget(); wlay = QHBoxLayout(wrap); wlay.setContentsMargins(0,0,0,0); wlay.addLayout(cond_row)
             self.params_layout.addWidget(wrap)
         except Exception:
@@ -2220,11 +2328,10 @@ class ActionEditor(QWidget):
         try:
             count = len(self.action_data.get('else_actions', []) or [])
             if hasattr(self, 'else_count_label') and self.else_count_label is not None:
-                self.else_count_label.setText(f"Else Actions: {count}")
-            # Also update If-Not Actions count label if present
+                self.else_count_label.setText(f"Else: {count}")
             not_count = len(self.action_data.get('if_not_actions', []) or [])
             if hasattr(self, 'ifnot_count_label') and self.ifnot_count_label is not None:
-                self.ifnot_count_label.setText(f"If-Not Actions: {not_count}")
+                self.ifnot_count_label.setText(f"If-Not: {not_count}")
         except Exception:
             pass
 
@@ -2317,10 +2424,11 @@ class ActionEditor(QWidget):
             v.setContentsMargins(8,8,8,8)
             v.setSpacing(8)
             form = QFormLayout(); form.setContentsMargins(0,0,0,0)
-            # Jitter and delay available for most actions
-            j_spin = QSpinBox(); j_spin.setRange(0, 100); j_spin.setValue(int(self.action_data.get("jitter_px", 0)))
+            pos_types = {"click","move","move_to","right_click","double_click","click_and_hold","play_recording"}
+            if action_type in pos_types:
+                j_spin = QSpinBox(); j_spin.setRange(0, 100); j_spin.setValue(int(self.action_data.get("jitter_px", 0)))
+                form.addRow("Jitter (px)", j_spin)
             dj_spin = QSpinBox(); dj_spin.setRange(0, 2000); dj_spin.setValue(int(self.action_data.get("delay_jitter_ms", 0)))
-            form.addRow("Jitter (px)", j_spin)
             form.addRow("Delay Jitter (ms)", dj_spin)
             # Random region for move_to
             rr_wrap = QWidget(); rr = QHBoxLayout(rr_wrap); rr.setContentsMargins(0,0,0,0)
@@ -2350,7 +2458,8 @@ class ActionEditor(QWidget):
             v.addWidget(buttons)
             def on_save():
                 try:
-                    self.action_data['jitter_px'] = int(j_spin.value())
+                    if action_type in pos_types:
+                        self.action_data['jitter_px'] = int(j_spin.value())
                     self.action_data['delay_jitter_ms'] = int(dj_spin.value())
                     if action_type == "move_to":
                         self.action_data['random'] = bool(rand_chk.isChecked())
@@ -2529,6 +2638,28 @@ class ActionEditor(QWidget):
                 break
             parent = parent.parent()
 
+    def duplicate_self(self):
+        """Duplicate this action below the current one."""
+        try:
+            parent = self.parent()
+            while parent is not None and not hasattr(parent, 'add_action'):
+                parent = parent.parent()
+            if not parent:
+                return
+            import copy
+            data = copy.deepcopy(self.get_action_data())
+            new_editor = parent.add_action(data)
+            try:
+                idx_cur = parent.action_widgets.index(self)
+                idx_new = parent.action_widgets.index(new_editor)
+                while idx_new > idx_cur + 1:
+                    parent.move_action_up(new_editor)
+                    idx_new = parent.action_widgets.index(new_editor)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def select_region(self):
         dialog = ScreenCaptureDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -2682,6 +2813,14 @@ class MiniActionEditor(QWidget):
         self.type_combo = QComboBox()
         self.type_combo.addItems(["click", "move", "move_to", "right_click", "double_click", "type", "key_press", "wait", "scroll", "click_and_hold", "play_recording"])
         self.type_combo.setCurrentText(self.action_data.get("type", "click"))
+        try:
+            from PyQt6.QtWidgets import QComboBox as _QCB, QSizePolicy as _QSP
+            self.type_combo.setSizeAdjustPolicy(_QCB.SizeAdjustPolicy.AdjustToContents)
+            self.type_combo.setMinimumContentsLength(12)
+            self.type_combo.setSizePolicy(_QSP.Policy.Preferred, _QSP.Policy.Fixed)
+            self.type_combo.setFixedHeight(24)
+        except Exception:
+            pass
         lay.addWidget(QLabel("Else:"))
         lay.addWidget(self.type_combo)
         # Container for dynamic params
@@ -2738,25 +2877,45 @@ class MiniActionEditor(QWidget):
                 w = QDoubleSpinBox(); w.setRange(float(rng[0]), float(rng[1])); w.setSingleStep(0.1); w.setValue(float(val))
             else:
                 w = QSpinBox(); w.setRange(int(rng[0]), int(rng[1])); w.setValue(int(val))
+            try:
+                w.setMinimumWidth(120); w.setFixedHeight(24)
+            except Exception:
+                pass
             w.valueChanged.connect(lambda v, k=key: self.update_param(k, v))
             self.params[key] = w
             self.params_layout.addWidget(w)
         def add_text(label, key, val=""):
             add_label(label)
             w = QLineEdit(str(val)); w.textChanged.connect(lambda tt, k=key: self.update_param(k, tt))
+            try:
+                w.setMinimumWidth(160); w.setFixedHeight(24)
+            except Exception:
+                pass
             self.params[key] = w
             self.params_layout.addWidget(w)
         def add_btn_combo():
             add_label("Button:")
             w = QComboBox(); w.addItems(["left","middle","right"]); w.setCurrentText(self.action_data.get("button","left"))
+            try:
+                from PyQt6.QtWidgets import QComboBox as _QCB
+                w.setSizeAdjustPolicy(_QCB.SizeAdjustPolicy.AdjustToContents)
+                w.setMinimumContentsLength(5); w.setFixedHeight(24); w.setMinimumWidth(120)
+            except Exception:
+                pass
             w.currentTextChanged.connect(lambda tbtn: self.update_param("button", tbtn))
             self.params['button'] = w
             self.params_layout.addWidget(w)
+        # Common enabled toggle
+        add_label('Enabled:')
+        en = QCheckBox()
+        en.setChecked(bool(self.action_data.get('enabled', True)))
+        en.stateChanged.connect(lambda s: self.update_param('enabled', bool(s)))
+        self.params['enabled'] = en
+        self.params_layout.addWidget(en)
+
         # Build minimal param set based on type
         if t == 'click':
             add_btn_combo(); add_spin('Clicks:', 'clicks', (1,10), self.action_data.get('clicks',1))
-            add_spin('Jitter (px):', 'jitter_px', (0,100), self.action_data.get('jitter_px',0))
-            add_spin('Delay Jitter (ms):', 'delay_jitter_ms', (0,2000), self.action_data.get('delay_jitter_ms',0))
             adv_btn = QPushButton('Advanced…')
             adv_btn.setToolTip('Open advanced options')
             adv_btn.clicked.connect(lambda: self.open_advanced_dialog(t))
@@ -2769,35 +2928,10 @@ class MiniActionEditor(QWidget):
                 btn_show = QPushButton('Show Click')
                 btn_show.clicked.connect(self.show_click_overlay)
                 self.params_layout.addWidget(btn_show)
-            add_spin('Jitter (px):', 'jitter_px', (0,100), self.action_data.get('jitter_px',0))
-            add_spin('Delay Jitter (ms):', 'delay_jitter_ms', (0,2000), self.action_data.get('delay_jitter_ms',0))
-            # Random toggle and region for move_to
-            if t == 'move_to':
-                # Random checkbox
-                add_label('Random:')
-                rand_cb = QCheckBox()
-                rand_cb.setChecked(bool(self.action_data.get('random', False)))
-                rand_cb.stateChanged.connect(lambda s: self.update_param('random', bool(s)))
-                self.params['random'] = rand_cb
-                self.params_layout.addWidget(rand_cb)
-                # Set Random Region button
-                btn = QPushButton('Set Random Region')
-                btn.clicked.connect(self.select_random_region)
-                self.params_layout.addWidget(btn)
-                show_btn = QPushButton('Show Random Region')
-                show_btn.clicked.connect(self.show_random_region_overlay)
-                self.params_layout.addWidget(show_btn)
-                clear_btn = QPushButton('Clear')
-                clear_btn.clicked.connect(lambda: (self.action_data.pop('random_region', None), self.update_random_region_label()))
-                self.params_layout.addWidget(clear_btn)
-                # Readout label
-                self.random_readout = QLabel()
-                self.update_random_region_label()
-                self.params_layout.addWidget(self.random_readout)
-                adv_btn = QPushButton('Advanced…')
-                adv_btn.setToolTip('Open advanced options')
-                adv_btn.clicked.connect(lambda: self.open_advanced_dialog(t))
-                self.params_layout.addWidget(adv_btn)
+            adv_btn = QPushButton('Advanced…')
+            adv_btn.setToolTip('Open advanced options')
+            adv_btn.clicked.connect(lambda: self.open_advanced_dialog(t))
+            self.params_layout.addWidget(adv_btn)
         elif t == 'wait':
             add_spin('Seconds:', 'seconds', (0,60), self.action_data.get('seconds',1.0), dble=True)
         elif t == 'scroll':
@@ -2871,9 +3005,15 @@ class MiniActionEditor(QWidget):
             st.valueChanged.connect(lambda v: self.update_param('start_transition', float(v)))
             self.params['start_transition'] = st
             self.params_layout.addWidget(st)
+            adv_btn = QPushButton('Advanced…')
+            adv_btn.setToolTip('Open advanced options')
+            adv_btn.clicked.connect(lambda: self.open_advanced_dialog(t))
+            self.params_layout.addWidget(adv_btn)
         else:
-            # No extra params for right_click/double_click/click_and_hold here
-            pass
+            adv_btn = QPushButton('Advanced…')
+            adv_btn.setToolTip('Open advanced options')
+            adv_btn.clicked.connect(lambda: self.open_advanced_dialog(t))
+            self.params_layout.addWidget(adv_btn)
 
     def on_type_change(self, new_type: str):
         # Update stored type and refresh fields
@@ -2992,9 +3132,11 @@ class MiniActionEditor(QWidget):
             v.setContentsMargins(8,8,8,8)
             v.setSpacing(8)
             form = QFormLayout(); form.setContentsMargins(0,0,0,0)
-            j_spin = QSpinBox(); j_spin.setRange(0, 100); j_spin.setValue(int(self.action_data.get("jitter_px", 0)))
+            pos_types = {"click","move","move_to","right_click","double_click","click_and_hold","play_recording"}
+            if action_type in pos_types:
+                j_spin = QSpinBox(); j_spin.setRange(0, 100); j_spin.setValue(int(self.action_data.get("jitter_px", 0)))
+                form.addRow("Jitter (px)", j_spin)
             dj_spin = QSpinBox(); dj_spin.setRange(0, 2000); dj_spin.setValue(int(self.action_data.get("delay_jitter_ms", 0)))
-            form.addRow("Jitter (px)", j_spin)
             form.addRow("Delay Jitter (ms)", dj_spin)
             rr_wrap = QWidget(); rr = QHBoxLayout(rr_wrap); rr.setContentsMargins(0,0,0,0)
             if action_type == "move_to":
@@ -3022,7 +3164,8 @@ class MiniActionEditor(QWidget):
             v.addWidget(buttons)
             def on_save():
                 try:
-                    self.action_data['jitter_px'] = int(j_spin.value())
+                    if action_type in pos_types:
+                        self.action_data['jitter_px'] = int(j_spin.value())
                     self.action_data['delay_jitter_ms'] = int(dj_spin.value())
                     if action_type == "move_to":
                         self.action_data['random'] = bool(rand_chk.isChecked())

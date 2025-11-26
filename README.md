@@ -36,6 +36,12 @@ Automate mouse/keyboard actions by detecting on-screen images. This repo ships a
   - New buttons: `Show Region` in Step Editor, Action Editor, and Failsafe sidebar; `Show Click` in Action Editor.
   - Previews draw a red rectangle for regions and a crosshair marker for click points; overlays auto-close after a short timeout.
 
+- Action editor layout polish (GUI)
+  - Compact action rows with a two-line layout; conditions moved below main params.
+  - Dropdowns auto-size to content; inputs standardized to 24px height for readability.
+  - Advanced-only fields moved behind the `Advanced…` dialog to save horizontal space.
+  - Duplicate controls removed from inline rows when already available under `Advanced…`.
+
 - Template reload robustness and debug toggle fix
   - Template list is repopulated in the UI first; each template loads into the bot with per-item error handling. UI no longer clears if a single template fails.
   - Fixed a NameError when toggling branch debug by reading templates from `self.config` within the handler; the toggle no longer disrupts UI refresh.
@@ -437,6 +443,9 @@ Action dictionary fields (as used across sequences and failsafe steps):
 - scroll: `pixels`
 - click_and_hold: `duration` at current position
 
+Note (GUI): To keep action rows compact, tuning/optional fields live under `Advanced…`.
+Examples include Random-in-Region controls for `move_to`, per‑action Jitter (px), and Delay Jitter (ms).
+
 ## Multi-Monitor & Regions
 
 - Toolbar Monitor Selector:
@@ -622,11 +631,15 @@ This project is for personal use; choose an appropriate license before public re
   - Pause/Resume: temporarily pause capture during a session; resuming preserves timing and continues appending events.
   - Add Marker: insert labeled markers into the timeline to annotate moments.
   - Library Bar: browse and manage saved recordings — Refresh list, Open into the table, Play immediately, Rename, Delete.
-  - Play Recording action fields:
-    - Recording: select from the `recordings/` folder via dropdown.
-    - Speed: multiplier to compress or expand event intervals (e.g., `2.0` runs twice as fast).
-    - Start Transition (s): optional smooth pre‑roll move to the first recorded position (set to `0.0` for auto distance‑based duration).
+- Play Recording action fields:
+  - Recording: select from the `recordings/` folder via dropdown.
+  - Speed: multiplier to compress or expand event intervals (e.g., `2.0` runs twice as fast).
+  - Start Transition (s): optional smooth pre‑roll move to the first recorded position (set to `0.0` for auto distance‑based duration).
+ - Humanization:
+  - Per-action Jitter (px): small random offset applied to target positions for `click`, `move`, `move_to`, `right_click`, `double_click`, `click_and_hold`.
+  - Per-action Delay Jitter (ms): random small delay inserted before action execution to simulate human variability.
   - Implementation details:
     - Speed scales per‑event intervals; internal `pyautogui.PAUSE` is disabled during playback to avoid unintended delays.
     - Start Transition uses either the configured duration or an auto duration based on cursor distance and speed.
     - Playback and action results are logged to `bot_debug.log` for traceability.
+  - Advanced (GUI): Jitter (px) and Delay Jitter (ms) are available via `Advanced…` and intentionally hidden from the main row to save space.

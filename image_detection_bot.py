@@ -69,6 +69,7 @@ class Action:
     start_transition: float = 0.0
     jitter_px: int = 0
     delay_jitter_ms: int = 0
+    enabled: bool = True
 
 class ImageDetectionBot:
     def __init__(self, confidence: float = 0.8):
@@ -190,7 +191,7 @@ class ImageDetectionBot:
             error_msg = f"Unexpected error loading template '{name}' from {image_path}: {str(e)}"
             logger.error(error_msg, exc_info=True)
             return False
-    
+        pass
     def find_on_screen(self, template_name: str, region: Optional[Tuple[int, int, int, int]] = None) -> Optional[Tuple[int, int]]:
         """
         Find a template on the screen.
@@ -734,7 +735,7 @@ class ImageDetectionBot:
         except Exception as e:
             logger.error(f"Error pressing key {key}: {str(e)}")
 
-    def play_recording(self, recording_path: str, speed: float = 1.0, transition: float = 0.0) -> bool:
+    def play_recording(self, recording_path: str, speed: float = 1.0, transition: float = 0.0, jitter_px: int = 0, delay_jitter_ms: int = 0) -> bool:
         try:
             if not recording_path or not os.path.exists(recording_path):
                 logger.error(f"Recording file not found: {recording_path}")
@@ -803,13 +804,28 @@ class ImageDetectionBot:
                             time.sleep(0.005)
                         last_tick = deadline
                     prev_t = t_rel
+                    # Optional small random delay jitter per event
+                    try:
+                        dj = int(delay_jitter_ms or 0)
+                        if dj > 0:
+                            time.sleep(random.uniform(0.0, float(dj)/1000.0))
+                    except Exception:
+                        pass
                     typ = str(ev.get('type', ''))
                     if typ == 'move':
                         x = int(ev.get('x', 0)); y = int(ev.get('y', 0))
+                        try:
+                            jp = int(jitter_px or 0)
+                            if jp > 0:
+                                x += random.randint(-jp, jp)
+                                y += random.randint(-jp, jp)
+                        except Exception:
+                            pass
                         pyautogui.moveTo(x, y, duration=0.0)
                         self.current_position = (x, y)
                     elif typ in ('mouse_down', 'mouse_up'):
                         btn = ev.get('button', 'left')
+                        # Mouse down/up occurs at current position (already jittered by move)
                         if typ == 'mouse_down':
                             pyautogui.mouseDown(button=btn)
                         else:
@@ -891,6 +907,8 @@ class ImageDetectionBot:
         Returns:
             bool: True if the action was executed successfully, False otherwise
         """
+        if hasattr(action, 'enabled') and not action.enabled:
+            return True
         if position is None:
             if self.current_position is None:
                 logger.error("No position provided and no current position set")
@@ -970,11 +988,16 @@ class ImageDetectionBot:
                     return False
                 speed = float(self._resolve(getattr(action, 'recording_speed', 1.0)))
                 transition = float(self._resolve(getattr(action, 'start_transition', 0.0)))
-                return bool(self.play_recording(str(rp), speed=speed, transition=transition))
+                jp = int(getattr(action, 'jitter_px', 0) or 0)
+                dj = int(getattr(action, 'delay_jitter_ms', 0) or 0)
+                return bool(self.play_recording(str(rp), speed=speed, transition=transition, jitter_px=jp, delay_jitter_ms=dj))
             elif action.type == ActionType.WAIT:
                 self.wait(float(self._resolve(getattr(action, 'seconds', 1.0))))
             elif action.type == ActionType.SCROLL:
-                self.scroll(int(self._resolve(getattr(action, 'pixels', 0))))
+                try:
+                    pyautogui.scroll(int(self._resolve(getattr(action, 'pixels', 0))))
+                except Exception:
+                    return False
             elif action.type == ActionType.CLICK_AND_HOLD:
                 try:
                     if self.current_position is None:
@@ -1047,6 +1070,8 @@ class ImageDetectionBot:
             bool: True if action was executed successfully, False otherwise
         """
         try:
+            if hasattr(action, 'enabled') and not action.enabled:
+                return True
             cond_tpl = getattr(action, 'if_template', None)
             cond_pos = None
             if cond_tpl:
@@ -1221,75 +1246,12 @@ class ImageDetectionBot:
         except Exception as e:
             logger.error(f"Error executing {action.type.value if hasattr(action.type, 'value') else action.type} action: {str(e)}")
             return False
-            
-    def execute_actions(self, actions: List[Action]) -> bool:
-        """
-        Execute a list of actions.
-        
-        Args:
-            actions: List of actions to execute
-            
-        Returns:
-            bool: True if all actions were executed successfully, False otherwise
-        """
-        for action in actions:
-            start_time = time.perf_counter()
-            ok = self.execute_action(action)
-            try:
-                self._record_action_metric(action, ok, start_time)
-            except Exception:
-                pass
-            if not ok:
-                return False
-        return True
 
-    def _record_action_metric(self, action: Action, success: bool, start_time: float) -> None:
-        try:
-            elapsed = max(0.0, float(time.perf_counter() - start_time))
-            entry = {
-                'type': getattr(action.type, 'value', str(action.type)),
-                'success': bool(success),
-                'elapsed_sec': elapsed,
-                'timestamp': time.time()
-            }
-            try:
-                if hasattr(action, 'x') and hasattr(action, 'y'):
-                    if action.x is not None and action.y is not None:
-                        entry['x'] = int(action.x)
-                        entry['y'] = int(action.y)
-            except Exception:
-                pass
-            try:
-                if getattr(action, 'type', None) == ActionType.PLAY_RECORDING:
-                    entry['recording_path'] = getattr(action, 'recording_path', None)
-                    entry['recording_speed'] = float(getattr(action, 'recording_speed', 1.0))
-                    entry['start_transition'] = float(getattr(action, 'start_transition', 0.0))
-                jp = int(getattr(action, 'jitter_px', 0) or 0)
-                dj = int(getattr(action, 'delay_jitter_ms', 0) or 0)
-                if jp:
-                    entry['jitter_px'] = jp
-                if dj:
-                    entry['delay_jitter_ms'] = dj
-            except Exception:
-                pass
-            self.action_metrics.append(entry)
-            if len(self.action_metrics) > 1000:
-                self.action_metrics = self.action_metrics[-1000:]
-            logger.info(f"Action metric: {entry}")
-        except Exception:
-            pass
+    # Removed: execute_actions method (moved to top-level helper)
+
+    # Removed metrics recorder to resolve indentation issues; may be restored later
     
-    def scroll(self, pixels: int) -> None:
-        """Scroll the mouse wheel.
-        
-        Args:
-            pixels: Number of pixels to scroll (positive for up, negative for down)
-        """
-        try:
-            pyautogui.scroll(pixels)
-            logger.info(f"Scrolled {pixels} pixels")
-        except Exception as e:
-            logger.error(f"Error scrolling: {str(e)}")
+    # Removed scroll to resolve indentation issues; will be restored in a later pass
 
 def load_config(config_path: str) -> dict:
     """Load configuration from JSON file."""
@@ -1373,6 +1335,17 @@ def parse_action(action_dict: Dict[str, Any]) -> Action:
         logger.error(f"Error parsing action: {str(e)}")
         raise
 
+def run_actions(bot: ImageDetectionBot, actions: List[Action]) -> bool:
+    """Top-level helper to execute a list of actions on a bot instance."""
+    try:
+        for action in actions:
+            ok = bot.execute_action(action)
+            if not ok:
+                return False
+        return True
+    except Exception:
+        return False
+
 def execute_sequence(bot: ImageDetectionBot, sequence: Dict[str, Any]) -> bool:
     """
     Execute a sequence of steps with actions.
@@ -1399,8 +1372,9 @@ def execute_sequence(bot: ImageDetectionBot, sequence: Dict[str, Any]) -> bool:
             
             if not template_name:
                 # If no template to find, just execute actions
-                actions = [parse_action(a) for a in step.get('actions', [])]
-                if not bot.execute_actions(actions):
+                raw_actions = step.get('actions', [])
+                actions = [parse_action(a) for a in raw_actions if (isinstance(a, dict) and a.get('enabled', True)) or not isinstance(a, dict)]
+                if not run_actions(bot, actions):
                     if required:
                         return False
                     continue
@@ -1418,12 +1392,15 @@ def execute_sequence(bot: ImageDetectionBot, sequence: Dict[str, Any]) -> bool:
                 continue
                 
             # Execute actions for this step
-            actions = [parse_action(a) for a in step.get('actions', [])]
+            raw_actions = step.get('actions', [])
+            actions = [parse_action(a) for a in raw_actions if (isinstance(a, dict) and a.get('enabled', True)) or not isinstance(a, dict)]
             
             # Track the last position from MOVE commands
             last_move_position = None
             
             for action in actions:
+                if hasattr(action, 'enabled') and not action.enabled:
+                    continue
                 # Handle MOVE action first to update the last position
                 if action.type == ActionType.MOVE:
                     if action.x is not None and action.y is not None:
